@@ -1,0 +1,626 @@
+% !TEX root = ../main.tex
+% Chapter 06: Thread 6 — Tool Use & Agentic Capabilities
+
+\section{Thread 6: Tool Use \& Agentic Capabilities}
+\label{sec:thread6}
+
+大型语言模型在文本生成方面展现出惊人的能力，但它们本质上仍是"封闭系统"——无法访问外部工具、无法获取实时信息、无法执行精确计算。本章追踪 post-training 如何将 LLM 从被动的文本生成器转变为能够调用工具、与环境交互、协调多步骤任务执行的 \emph{agentic} 系统。这条演化线索的核心数据结构从"纯文本序列"扩展为"文本 + API 调用 + 环境反馈"的交织序列，由此催生了 function calling、agent tuning、code generation alignment 以及 multi-tool orchestration 四大分支。
+
+\evolution{LLM 只能生成文本，无法与外部世界交互}{LLM 作为 agent 调用工具、规划并执行多步骤任务}{tool use training + reasoning-action loop}
+
+
+% ============================================================
+\subsection{问题起源}
+\label{sec:t6-origin}
+% ============================================================
+
+\begin{problembox}
+LLM 的三个根本性局限使其无法胜任实际任务执行：
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Knowledge cutoff}：预训练数据存在时间截断，模型无法获取训练后的新信息，导致回答过时甚至产生幻觉。
+  \item \textbf{无法执行精确计算}：即使是简单的算术运算（如 $735/499$），LLM 也倾向于猜测而非准确计算；数学推理中的错误累积更是难以避免。
+  \item \textbf{无法与外部环境交互}：模型不能浏览网页、查询数据库、调用 API 或操作文件系统——而这些正是真实任务的基本要求。
+\end{enumerate}
+\end{problembox}
+
+这些局限在早期研究中被反复确认。\citet{komeili2022internet} 和 \citet{thoppilan2022lamda} 分别展示了让模型访问搜索引擎可以显著减少事实性错误，但这些方法依赖大量人工标注或任务特定的设计，不具备通用性。\citet{patel2021nlp} 指出即使是最大的 LLM 在简单数学问题上的表现也远逊于小型专用计算器。\citet{ji2022hallucination} 的系统性综述则表明，幻觉问题仅靠扩大模型规模无法根本解决——模型需要 \emph{接入外部信息源} 的能力。
+
+从 post-training 的视角看，问题的本质在于：预训练只教会模型"预测下一个 token"，而不是"在正确的时机选择正确的工具并正确使用它"。后者需要一种全新的训练范式——让模型学会 \emph{何时}调用工具、\emph{调用哪个}工具、以及\emph{如何}将工具返回的结果整合到后续生成中。
+
+值得注意的是，\textbf{代码生成}为 tool use 提供了一条间接但极为重要的路径。
+Codex \cite{chen2021codex}（OpenAI 在 GitHub 代码上 fine-tune 的 GPT-3）
+证明了 LLM 可以作为通用的代码生成器，
+而代码本身就是一种``工具调用语言''——通过生成可执行代码，
+LLM 可以间接调用任意 API、执行计算、操作文件系统。
+Codex 的成功为后续 PAL \cite{gao2022pal}（Thread~4，\crossref{4}{sec:t4-origin}）
+和 Code as Policies \cite{liang2023codepolicies} 等``code-as-action''范式奠定了基础。
+
+
+% ============================================================
+\subsection{奠基方法}
+\label{sec:t6-foundation}
+% ============================================================
+
+2021--2023 年间出现了三项奠基性工作，分别从不同的技术路径解决了"让 LLM 使用外部工具"的核心问题。
+
+% --- WebGPT ---
+\subsubsection{WebGPT：基于人类反馈的浏览器辅助问答}
+
+\landmark{nakano2022webgpt} 是最早将 LLM 与外部工具结合并通过 post-training 优化的系统之一。其核心洞察是：与其改进 LLM 的内部知识，不如给它一个浏览器，让它像人类一样搜索、浏览和引用网页信息。
+
+\paragraph{系统设计。} WebGPT 基于 GPT-3 构建了一个文本化的 web browsing 环境。模型可以执行一组离散的操作指令：\texttt{Search <query>}（发送 Bing 搜索）、\texttt{Click on link <ID>}（点击链接）、\texttt{Quote <text>}（提取引用）、\texttt{Scroll}（翻页）等。环境的状态被转换为文本描述反馈给模型，形成一个多轮交互循环。关键设计是模型在浏览过程中必须收集 \emph{references}——这使得人类标注者可以基于引用来判断答案的事实准确性，而无需自行查证。
+
+\paragraph{训练流程。} 训练分为四个阶段：
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Behavior Cloning (BC)}：收集约 6,000 条人类示范轨迹（92\% 来自 ELI5 数据集），通过 supervised fine-tuning 教会模型基本的浏览操作模式。
+  \item \textbf{Reward Modeling (RM)}：收集约 21,500 对模型生成答案的人类比较数据，训练一个 reward model 来预测人类偏好（使用 Elo score 表示）。
+  \item \textbf{Reinforcement Learning (RL)}：使用 PPO 算法基于 reward model 优化 BC 模型，在每个 episode 结束时获取 reward score，并加入相对于 BC 策略的 KL 惩罚以防止 reward hacking。
+  \item \textbf{Rejection Sampling (best-of-$n$)}：从 BC 或 RL 模型生成 $n$ 个答案，用 reward model 选择最优的一个。这种方法不需要额外训练，但消耗更多推理计算。
+\end{enumerate}
+
+\paragraph{实验结果。} 最优模型（175B best-of-64）在 ELI5 数据集上，其回答被人类评判为优于人类示范者 56\% 的情况、优于 Reddit 最高票答案 69\% 的情况。在 TruthfulQA 上，WebGPT 在 truthfulness 和 informativeness 两个维度均优于所有 GPT-3 变体，且随模型规模增大性能持续提升——这与基础 GPT-3 在 TruthfulQA 上规模越大越容易产生 imitative falsehoods 形成鲜明对比。
+
+\paragraph{Post-training 视角。} WebGPT 开创性地将 RLHF pipeline（BC $\rightarrow$ RM $\rightarrow$ RL）应用于工具使用场景，证明了 reward model 可以有效评估涉及多轮工具交互的复杂行为。同时，rejection sampling 在此场景下优于 RL 的发现，暗示了环境的不可预测性使得 train-time RL 难以充分探索——这一观察对后续 agent training 研究有重要启示。
+
+% --- Toolformer ---
+\subsubsection{Toolformer：自监督的工具使用学习}
+
+WebGPT 依赖大量人类示范和反馈，成本高昂。\landmark{schick2023toolformer} 提出了一个根本不同的方案：让模型\emph{自己教自己}使用工具。这是一个纯粹的工程美学——用 perplexity 这个自监督信号取代了人类标注。
+
+\paragraph{核心方法。} Toolformer 的训练分为三个步骤：
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{采样 API 调用}：对于训练语料中的每段文本 $\mathbf{x} = x_1, \ldots, x_n$，利用模型自身的 in-context learning 能力，在每个可能的位置 $i$ 采样候选 API 调用 $c_i^1, \ldots, c_i^k$。具体而言，对每个位置计算模型生成 \texttt{<API>} token 的概率 $p_i$，只保留 $p_i > \tau_s$ 的位置，再从这些位置采样具体的调用内容。
+
+  \item \textbf{执行 API 调用}：实际执行所有候选 API 调用以获取返回结果 $r_i$。支持的工具包括 QA 系统（Atlas）、计算器、Wikipedia 搜索（BM25）、机器翻译（NLLB-600M）和日历。
+
+  \item \textbf{基于 Perplexity 过滤}：这是方法的精髓。定义带权重的 cross-entropy loss $L_i(\mathbf{z})$，比较两个量：$L_i^+$（将 API 调用及其结果作为前缀时的 loss）和 $L_i^-$（不做 API 调用或只做调用但不包含结果时的 loss 的较小值）。只保留满足 $L_i^- - L_i^+ \geq \tau_f$ 的调用——即 API 调用及其结果 \emph{确实降低了后续 token 预测的困难度}。
+\end{enumerate}
+
+过滤后，将保留的 API 调用以特殊 token（\texttt{<API>}, \texttt{</API>}, \texttt{$\rightarrow$}）嵌入原始文本，构成增强数据集 $\mathcal{C}^*$，最终在 $\mathcal{C}^*$ 上用标准语言建模目标 fine-tune 模型。
+
+\paragraph{推理机制。} 推理时，当模型生成的 top-$k$ token 中包含 \texttt{<API>} 时，中断正常解码，执行对应的 API 调用，将结果插入后继续生成。实验中取 $k=10$ 以鼓励模型更积极地使用工具。
+
+\paragraph{实验结果。} 基于 GPT-J（6.7B）的 Toolformer 在 zero-shot 设置下取得了显著提升：在 LAMA 知识补全任务上领先 GPT-J baseline 11.7--18.6 个百分点，在数学推理（ASDiv/SVAMP/MAWPS）上超越 GPT-J 2--3 倍，甚至超过规模大 25 倍的 GPT-3（175B）。在语言建模 perplexity 方面，工具增强的 fine-tuning 不会造成退化——禁用 API 调用时的 perplexity 与原模型相当。Scaling 实验表明，工具使用能力在约 775M 参数时开始涌现（emerge）。
+
+\paragraph{局限性。} Toolformer 的关键限制在于它无法进行 \emph{工具链式调用}（即把一个工具的输出作为另一个工具的输入），因为 API 调用是独立采样和过滤的。它也不支持交互式工具使用（如根据搜索结果重新构造查询）。这些正是后续工作着力解决的方向。
+
+% --- ReAct ---
+\subsubsection{ReAct：推理与行动的协同}
+
+在 ReAct 之前，\textbf{具身 AI} 领域已经探索了将 LLM 推理与物理世界行动相结合的思路。
+SayCan \cite{ahn2022saycan} 让 LLM 提议高层行动方案，
+再由 affordance function（基于机器人当前状态判断哪些动作可行）进行 grounding 过滤，
+解决了``LLM 知道该做什么但不知道能做什么''的问题。
+Inner Monologue \cite{huang2022innermonologue} 进一步引入了\textbf{闭环反馈}——
+机器人在执行每一步后将环境观测（成功/失败信号、场景描述）
+以自然语言形式反馈给 LLM，由 LLM 基于反馈动态调整后续计划。
+这种``推理 $\rightarrow$ 行动 $\rightarrow$ 观测 $\rightarrow$ 再推理''的闭环结构
+直接预示了 ReAct 的 Thought--Action--Observation 范式。
+
+如果说 WebGPT 解决了"LLM 如何操作工具"，Toolformer 解决了"LLM 如何自主决定使用工具"，那么 \landmark{yao2023react} 则将上述思想统一并形式化——\emph{将推理和行动交织在同一个 token 序列中}。
+
+\paragraph{核心思想。} ReAct 将 agent 的行动空间从 $\mathcal{A}$ 扩展为 $\hat{\mathcal{A}} = \mathcal{A} \cup \mathcal{L}$，其中 $\mathcal{L}$ 是自然语言空间。一个 $\hat{a}_t \in \mathcal{L}$ 被称为 \emph{thought} 或 \emph{reasoning trace}——它不会影响外部环境，但会更新 agent 的内部上下文 $c_{t+1} = (c_t, \hat{a}_t)$，从而影响后续的推理和行动。任务解决轨迹由 Thought--Action--Observation 三元组的序列构成：
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Thought}：分解目标、提取关键信息、调整计划、处理异常（如"搜索结果中没有目标信息，我需要换一个查询"）。
+  \item \textbf{Action}：执行具体的环境操作（如 \texttt{search[entity]}、\texttt{lookup[string]}、\texttt{finish[answer]}）。
+  \item \textbf{Observation}：接收环境返回的反馈（如 Wikipedia 页面片段）。
+\end{itemize}
+
+\paragraph{方法实现。} ReAct 主要通过 few-shot prompting 实现——手动标注少量（6 个）ReAct 格式的示例轨迹作为 in-context examples。这使得它无需任何参数更新即可赋予 LLM agent 能力。论文同时探索了 fine-tuning：收集 3,000 条正确轨迹，fine-tune PaLM-8B/62B，结果显示 fine-tuned ReAct 显著优于 fine-tuned 的 Standard/CoT/Act 方法。
+
+\paragraph{关键实验发现。}
+
+\begin{itemize}[leftmargin=*]
+  \item 在 HotpotQA 和 FEVER 上，ReAct 比纯 Action（无 thought）baseline 一致地更好，表明 reasoning traces 对引导 action 至关重要。错误分析显示 CoT 的主要失败模式是 hallucination（占 56\%），而 ReAct 的 hallucination 率为 0\%，因为它可以通过外部知识库 grounding。
+  \item ReAct 与 CoT 的优劣互补：ReAct 更 grounded 但推理灵活性受限，CoT 推理链更灵活但易产生幻觉。最佳策略是组合使用（ReAct $\rightarrow$ CoT-SC 或 CoT-SC $\rightarrow$ ReAct）。
+  \item 在 ALFWorld 决策任务上，ReAct 的 best trial 达到 71\% 成功率，大幅超过 Act-only（45\%）和 imitation learning baseline BUTLER（37\%）。
+  \item 在 WebShop 上，ReAct 成功率达到 40.0\%，超过 IL+RL 方法（28.7\%），但仍远低于人类专家（59.6\%）。
+\end{itemize}
+
+\paragraph{Post-training 意义。} ReAct 的 Thought--Action--Observation 循环成为后续几乎所有 agent 系统的标准范式（\crossref{4}{sec:t4-convergence}）。更重要的是，它揭示了一个关键洞察：推理能力和工具使用能力不应被视为独立的维度——前者是后者的"规划层"，后者是前者的"执行层"。这一认识直接催生了后续的 agent tuning 研究。
+
+
+% ============================================================
+\subsection{局限与分支}
+\label{sec:t6-branches}
+% ============================================================
+
+奠基方法确立了基本范式，但各自的局限也清晰可见：WebGPT 依赖大量人类标注，Toolformer 不支持工具链和交互式使用，ReAct 受限于 few-shot prompting 的 context 长度。围绕这些瓶颈，研究沿四条分支展开。
+
+% --- Branch A: Function Calling ---
+\subsubsection{Branch A：Function Calling}
+
+从 post-training 的角度看，function calling 的核心问题是：如何构建大规模高质量的工具使用训练数据，以及如何让模型在面对数千甚至数万个 API 时正确选择和调用。
+
+\paragraph{Gorilla：Retriever-Aware Training。}
+\citet{patil2023gorilla} 提出了 \textbf{Gorilla}，针对大规模 API 调用场景进行专门训练。核心贡献包括：(1) 构建了覆盖 TorchHub、TensorHub 和 HuggingFace 三大平台的 \textbf{1,645 个 API} 的数据集 APIBench，通过 GPT-4 self-instruct 生成（instruction, API call）对；(2) 提出 \emph{retriever-aware training}——在训练时将检索到的相关 API 文档拼接到 prompt 中，使模型学会在文档上下文中进行 API 选择，而非死记 API 签名。实验表明这种方式显著降低了 hallucination rate（生成不存在的 API），并且在 API 更新时只需更新检索索引而无需重新训练。
+
+\paragraph{ToolLLM：面向真实 API 的大规模框架。}
+\landmark{qin2023toolllm} 将 function calling 推向了一个全新的规模层级。核心设计包含三个阶段：
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{API 收集}：从 RapidAPI Hub 爬取 \textbf{16,464 个真实 RESTful API}，涵盖 49 个类别（社交媒体、电商、天气等），经过严格的可用性过滤（初始测试 + 响应评估）保留 3,451 个高质量工具。
+  \item \textbf{指令生成}：使用 ChatGPT 生成覆盖 single-tool 和 multi-tool 场景的多样化指令，通过 RapidAPI 的层级结构（category $\rightarrow$ collection $\rightarrow$ tool $\rightarrow$ API）引导采样策略以确保多样性，最终生成近 200K 条（instruction, relevant API）对。
+  \item \textbf{Solution Path 标注}：最关键的创新——提出 \textbf{Depth-First Search-based Decision Tree (DFSDT)} 替代 CoT/ReAct 的线性推理链。DFSDT 允许模型在遇到错误时 \emph{回溯} 到之前的节点并尝试不同的推理路径，从而解决了 ReAct 的两个固有问题：(a) 错误传播——一个错误动作会导致后续连锁失败；(b) 有限探索——线性链只探索一个方向。DFSDT 在所有场景下显著优于 ReAct（平均 pass rate：63.8\% vs. 35.8\%），对复杂的 multi-tool 指令提升尤其显著。
+\end{enumerate}
+
+基于 ToolBench 数据集 fine-tune 的 \textbf{ToolLLaMA}（LLaMA-2 7B）在 pass rate 和 win rate 上接近其 teacher model ChatGPT，在 out-of-distribution 的 APIBench 上也展现出强泛化能力。配合训练的 neural API retriever（基于 Sentence-BERT），系统可以从 16K+ 的 API 池中自动推荐相关 API，无需用户手动指定。
+
+\paragraph{其他重要工作。}
+\citet{liu2024apigen} 提出 \textbf{APIGen}，构建了自动化的 function calling 数据生成 pipeline，通过多层验证（format check, execution, semantic）确保数据质量。
+\citet{zhang2024xlam} 训练的 \textbf{xLAM} 系列模型在 Berkeley Function-Calling Leaderboard 上取得领先表现，展示了 action model 的统一训练范式。
+\citet{hao2023toolkengpt} 的 \textbf{ToolkenGPT} 采用了完全不同的技术路线——将每个工具表示为 vocabulary 中的一个特殊 token embedding，通过在 next-token prediction 中自然地"预测"出工具 token 来触发调用，无需修改模型架构。
+
+% --- Branch B: Agent Tuning ---
+\subsubsection{Branch B：Agent Tuning}
+
+ReAct 通过 prompting 展示了 agent 能力，但能否通过 fine-tuning 将这种能力"内化"到模型参数中？Agent tuning 这条分支正是回答这个问题（\crossref{4}{sec:t4-convergence}：reasoning 训练为 planning 提供基础能力）。
+
+\paragraph{FireAct：从强模型轨迹学习。}
+\citet{chen2023fireact} 的 \textbf{FireAct} 首先使用 GPT-4 在多个 prompting 方法（CoT, ReAct 等）下生成 agent 轨迹，然后筛选成功轨迹用于 fine-tune 较小模型（Llama-2 7B/13B）。关键发现是：fine-tuning 使小模型在 agent 任务上的表现可以媲美甚至超过 prompting 大模型，且训练数据中包含多种 prompting 方法的轨迹可以让模型学会根据任务需要灵活切换策略。
+
+\paragraph{AgentTuning 与 Agent-FLAN：分解式训练。}
+\citet{zeng2023agenttuning} 提出 \textbf{AgentTuning}，将 agent trajectory 数据与通用 instruction tuning 数据混合训练，关键发现是这种混合策略既提升了 agent 能力又不损害通用能力——纯 agent 数据训练会导致通用性退化。\citet{chen2024agentflan} 的 \textbf{Agent-FLAN} 进一步分析了 agent tuning 面临的三个挑战（hallucinated actions, inadequate long-horizon reasoning, non-robust format following），提出将 agent 能力分解为独立的子能力分别训练，再通过数据混合组合。
+
+\paragraph{Reflexion：语言化的自我反思。}
+\citet{shinn2023reflexion} 提出了一种不更新参数的"训练"方式：\textbf{Reflexion} 让 agent 在任务失败后生成自然语言的反思总结（如"我上次搜索的查询太宽泛了，下次应该更具体"），将这些反思存入长期记忆，在后续尝试中作为额外上下文提供给模型。这种 verbal reinforcement learning 在 HotpotQA、AlfWorld 和编程任务上均取得显著提升，展示了语言本身作为经验表示（而非梯度更新）的潜力。
+
+\paragraph{Lemur：自然语言与代码的统一。}
+\citet{xu2023lemur} 观察到 agent 任务同时需要自然语言理解（理解指令、推理规划）和代码能力（与环境交互、结构化操作），但现有模型通常只擅长其一。\textbf{Lemur} 通过精心设计的预训练数据配比（text 90\%: code 10\%）和 instruction tuning 的平衡策略，实现了两种能力的 harmonization。
+
+% --- Branch C: Code Generation Alignment ---
+\subsubsection{Branch C：代码生成对齐}
+
+代码生成是 tool use 的一个特殊但极其重要的实例——代码本身就是一种"工具调用语言"，而 unit test 则提供了天然的、可自动化的 reward signal。
+
+\paragraph{CodeRL：Actor-Critic 框架。}
+\landmark{le2022coderl} 将代码生成形式化为 RL 问题，提出了 actor-critic 架构。核心设计包含：
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Actor}：预训练的 code LM（CodeT5-large, 770M），作为随机策略生成代码序列。
+  \item \textbf{Critic}：一个独立的神经网络，接收 problem description 和 sampled program 作为输入，预测程序的 unit test 结果（CompileError / RuntimeError / FailedTest / PassedTest 四类）。Critic 的 token-level hidden states 被用于估计每个 token 的 intermediate return $\hat{q}_{\phi}(w_t^s)$，提供比 episode-level return 更细粒度的反馈。
+  \item \textbf{Return 定义}：基于 unit test 信号定义分级 reward：编译错误 $-1.0$，运行时错误 $-0.6$，测试失败 $-0.3$，全部通过 $+1.0$。使用 greedy decoding baseline 进行 return normalization 以稳定训练。
+\end{itemize}
+
+推理阶段引入 \textbf{Critic Sampling} 策略，区分两种情况：(a) 如果存在通过样例测试的程序，用 critic 选择高质量子序列作为 seed 进行 refining；(b) 如果所有程序均失败，用 critic 选择最有潜力的候选送入 program repair module。在 APPS benchmark 上达到 SOTA（pass@1000: 20\%+），在 MBPP 上 pass@80 达到 63.0\%，超过 finetuned GPT-137B（61.4\%）。
+
+\paragraph{RLTF 与 PPOCoder。}
+\citet{liu2023rltf} 提出 \textbf{RLTF}（Reinforcement Learning from Unit Test Feedback），核心创新是 \emph{multi-granularity feedback}：不仅在程序级别给出 pass/fail 信号，还利用编译器和测试框架的错误信息在代码行级别提供定位反馈，使 RL 训练更高效。\citet{shojaee2023ppocoder} 的 \textbf{PPOCoder} 将 PPO 算法应用于代码生成，使用程序的编译和执行结果作为 reward 信号。
+
+% --- Branch D: Multi-tool Orchestration ---
+\subsubsection{Branch D：Multi-tool Orchestration}
+
+单工具调用解决的是"使用锤子"的问题，而真实场景往往需要"选择并协调多种工具"——这催生了以 LLM 为中心控制器的 multi-tool orchestration 范式。
+
+\paragraph{HuggingGPT：LLM 作为 AI 模型调度器。}
+\landmark{shen2023hugginggpt} 提出了一个大胆的构想："Language serves as an interface for LLMs to collaborate with AI models." 系统以 ChatGPT 为核心控制器，连接 Hugging Face 社区中的众多专家模型，通过四个阶段处理复杂的多模态任务：
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Task Planning}：LLM 解析用户请求，将其分解为结构化的子任务列表（JSON 格式），确定执行顺序和依赖关系。支持三种任务拓扑：单任务、顺序任务链和 DAG 结构图任务。
+  \item \textbf{Model Selection}：对每个子任务，LLM 根据 Hugging Face 上模型的功能描述，通过 in-context task-model assignment 选择最合适的专家模型。为处理候选模型过多的问题，先按 task type 过滤，再按下载量排名取 top-$K$。
+  \item \textbf{Task Execution}：调用选定的专家模型执行推理，通过 \texttt{<resource>-task\_id} 机制管理任务间的资源依赖（如任务 2 需要任务 1 生成的图像作为输入）。
+  \item \textbf{Response Generation}：LLM 整合所有子任务的执行结果，生成最终的自然语言回答。
+\end{enumerate}
+
+实验表明 GPT-3.5 在 task planning 方面显著优于 Alpaca-7b 和 Vicuna-7b（如 graph task 的 GPT-4 Score：50.48 vs. 13.14/19.17），但 HuggingGPT 的 end-to-end success rate 仍只有 63.08\%（GPT-3.5 作为控制器），暴露出当前 LLM 在 planning 稳定性和格式遵循方面的不足。
+
+\paragraph{其他多工具协调方法。}
+\citet{lu2023chameleon} 的 \textbf{Chameleon} 提出 plug-and-play compositional reasoning，让 LLM 根据任务需要动态组合不同工具（如 web search + Python + image captioner）生成程序化的解决方案。
+\citet{yin2023agentlumos} 的 \textbf{Agent Lumos} 提出 unified and modular training：将 agent 能力分解为 planning（生成高层计划）和 grounding（将计划转化为具体操作）两个模块，分别训练后组合使用。
+\citet{wang2023voyager} 的 \textbf{Voyager} 在 Minecraft 游戏中展示了 open-ended agentic 行为，通过 automatic curriculum、skill library 和 code-as-action 三个机制实现持续自主探索和技能积累。
+Code as Policies \cite{liang2023codepolicies} 则将 Codex 级别的代码生成能力
+直接应用于机器人控制——LLM 将自然语言指令转化为可执行的 Python 控制策略，
+利用空间几何 API 实现精确的物理操作，
+展示了``代码即行动''范式在具身场景的可行性。
+
+\paragraph{Generative Agents：Agent 社会模拟.}
+Park et al.\ \cite{park2023generativeagents} 构建了一个由 25 个 LLM agent 组成的虚拟小镇，
+每个 agent 拥有独立的记忆系统（observation $\rightarrow$ retrieval $\rightarrow$ reflection）
+并能自主规划日常活动、形成社会关系。
+这一工作的独特价值在于它将 agent 能力从``完成单一任务''扩展到``持续自主生存''，
+其 memory architecture（记忆流 + 反思 + 规划的三层结构）
+为后续 agent 系统的长期记忆设计提供了重要参照。
+
+
+% ============================================================
+\subsection{收敛与前沿}
+\label{sec:t6-convergence}
+% ============================================================
+
+经过 2023 年的快速分化，四条分支在 2024 年开始收敛：function calling 训练与 planning/reasoning 训练被统一在同一个 post-training pipeline 中，evaluation 标准也趋向统一。
+
+\paragraph{Function Calling + Planning 的融合训练。}
+早期 function calling 训练只关注"给定工具列表，正确生成调用"，而忽略了多步骤规划能力。最新的 practice 将 ReAct/DFSDT 风格的推理轨迹与 function calling 数据融合训练，使模型同时具备"知道调什么"和"知道按什么顺序调"的能力。xLAM \citep{zhang2024xlam} 和 Granite Function Calling \citep{abdelaziz2024granite} 是这一趋势的代表。
+
+\paragraph{AgentBench：系统化的 Agent 评估。}
+\landmark{liu2023agentbench} 构建了首个系统化评估 LLM-as-Agent 的多维度 benchmark。涵盖 \textbf{8 个交互式环境}，分为三大类：
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Code-grounded}：Operating System（bash 交互）、Database（SQL 操作）、Knowledge Graph（结构化查询）。
+  \item \textbf{Game-grounded}：Digital Card Game（策略推理）、Lateral Thinking Puzzles（横向思维）、House Holding / ALFWorld（常识推理）。
+  \item \textbf{Web-grounded}：Web Shopping / WebShop（电商导航）、Web Browsing / Mind2Web（通用网页操作）。
+\end{itemize}
+
+对 29 个 LLM（API-based 和开源）的评估揭示了几个关键发现：
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{商业模型与开源模型存在巨大差距}：GPT-4 Overall Score 4.01，而最强开源模型 codellama-34b 仅 0.96。API-based 模型平均 2.32，OSS 模型平均 0.51。
+  \item \textbf{主要失败模式是 Task Limit Exceeded}（即多轮推理后仍无法解决问题），其次是 Invalid Format 和 Invalid Action——表明 long-term reasoning、decision-making 和 instruction following 是主要瓶颈。
+  \item \textbf{Code training 的双刃剑效应}：codellama 在需要结构化操作的任务（如 Web Shopping）上优于 llama-2，但在需要通用推理的任务（如 Digital Card Game、Operating System）上反而更差。
+  \item \textbf{高质量对齐数据的重要性}：vicuna-13b（基于 ShareGPT 的 gpt-4/gpt-3.5 对话数据对齐）在 AgentBench 上不仅优于同大小的 llama-2-13b，甚至可与 3 倍大的 codellama-34b 竞争。
+\end{enumerate}
+
+\paragraph{从 SWE-bench 到编码 Agent：四条分支的自然收敛。}
+2024 年，\emph{软件工程自动化} 成为 agentic capabilities 最具影响力的应用场景，
+也成为四条分支收敛的标志性案例。
+\citet{jimenez2024swebench} 提出的 \textbf{SWE-bench}
+将评估标准从人造编程题推进到真实的 GitHub issue resolution：
+给定一个 repository 和 issue description，
+agent 需要自主定位问题代码、设计修复方案并生成可通过原始 test suite 的 patch。
+SWE-bench 的 2,294 个实例覆盖了 12 个大型 Python 项目，
+平均每个 issue 涉及跨文件修改——
+这同时要求：
+\begin{itemize}[leftmargin=*]
+  \item \emph{Branch A} 的能力——精确调用 bash、编辑器、搜索工具（function calling）；
+  \item \emph{Branch B} 的能力——多步骤推理与规划，包括错误诊断、假设验证、方案回退（agent tuning）；
+  \item \emph{Branch C} 的能力——生成语法正确且语义精确的代码 patch（code alignment）；
+  \item \emph{Branch D} 的能力——在 terminal、文件编辑器、搜索引擎之间协调切换（multi-tool orchestration）。
+\end{itemize}
+
+\citet{yang2024sweagent} 的 \textbf{SWE-Agent} 为此设计了
+\textbf{Agent-Computer Interface (ACI)}——
+一套面向 LLM 优化的文件浏览和编辑命令，
+取代传统的 bash 操作以降低 action space 复杂度。
+SWE-Agent 的关键发现是 \emph{interface design matters}：
+相同底层模型在不同 action interface 下的 resolve rate 差异可达两倍以上，
+表明 agentic post-training 不仅要优化模型参数，
+还需要精心设计模型与环境的交互协议。
+这一洞察呼应了 Toolformer 的设计哲学——
+工具的\emph{表示方式}（如何将工具暴露给模型）
+与工具的\emph{使用训练}同等重要。
+
+\citet{wang2024opendevin} 的 \textbf{OpenHands}（原 OpenDevin）
+进一步将编码 agent 的基础设施开源化，
+提供了可扩展的 sandbox 执行环境和标准化的 agent 评估框架。
+在 SWE-bench Verified 基准上，
+2024 年初至 2025 年中的 resolve rate
+从个位数百分比攀升到超过 70\%，
+展现出令人瞩目的进步速度——
+这也使得编码 agent 成为衡量 agentic post-training 整体水平的
+\emph{de facto} 基准领域。
+
+
+% ============================================================
+\subsection{2025--2026: Computer Use 与 Agent 基础设施}
+\label{sec:t6-computer-use}
+% ============================================================
+
+2025 年，agentic capabilities 从``模型调用预定义 API''
+迅速演进到``模型直接操作计算机界面''和``标准化的 agent 基础设施''两大方向，
+标志着 LLM agent 从实验原型走向生产级部署。
+
+\subsubsection{Computer Use: 从 API 到 GUI}
+
+\paragraph{Claude Computer Use。}
+Anthropic 在 2024 年末发布了 Claude Computer Use \cite{anthropic2024computeruse}，
+使模型能够\textbf{直接操作计算机的图形界面} ---
+包括移动鼠标、点击按钮、输入文本、截取屏幕等。
+这一能力超越了传统 function calling 的边界：
+模型不再需要预定义的 API 接口，
+而是像人类用户一样通过 GUI 与任意软件交互。
+Claude 4.5 \cite{anthropic2025claude45} 在 OSWorld 基准上达到了 \textbf{61.4\%} 的成功率，
+成为当时 computer use 任务的最强模型。
+
+\paragraph{OpenAI Operator。}
+OpenAI 随后发布了 Operator \cite{openai2025operator}，
+一个专门面向浏览器操作的 AI agent。
+Operator 能够自主导航网页、填写表单、完成购物等复杂多步骤任务，
+展示了 computer use 在消费级应用中的直接商业价值。
+
+\paragraph{Computer Use 的训练挑战。}
+Computer use 对 post-training 提出了独特的挑战：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Action space 爆炸}：相比 function calling 的离散 API 集合，
+    GUI 操作的 action space 是连续的（鼠标坐标、键盘输入），
+    且高度依赖当前屏幕状态；
+  \item \textbf{视觉理解要求}：模型需要从屏幕截图中理解 UI 元素的含义、位置和可交互性，
+    将 Thread~5 的 multimodal 能力与 Thread~6 的 agent 能力深度融合；
+  \item \textbf{长轨迹稳定性}：实际 computer use 任务往往涉及数十步操作，
+    错误累积问题（\S\ref{sec:t6-open}）尤为严重。
+\end{itemize}
+
+\subsubsection{编码 Agent：从 Benchmark 到产品}
+
+编码 agent 在 2024--2025 年间从研究原型迅速演进为商业产品，
+成为 agentic capabilities 最早实现大规模部署的应用场景。
+
+\paragraph{Devin 与 AI 软件工程师。}
+Cognition AI 于 2024 年初发布 \textbf{Devin} \citep{cognition2024devin}，
+定位为``世界首个 AI 软件工程师''。
+Devin 配备了完整的开发环境（终端、代码编辑器、浏览器），
+能够自主执行多步骤的软件工程任务——
+从阅读 issue、搜索代码库、编写代码到运行测试。
+尽管业界对其实际能力存在争议，
+Devin 的发布标志着 agentic capabilities 从学术研究走向产品化的转折点，
+也催生了一轮编码 agent 的产品竞赛。
+
+\paragraph{Claude Code 与 terminal-native agent。}
+Anthropic 推出的 \textbf{Claude Code} \citep{anthropic2025claudecode}
+采取了截然不同的设计哲学——
+不提供独立的 IDE 界面，
+而是作为\textbf{命令行原生工具}直接嵌入开发者现有的终端工作流。
+通过 MCP 协议集成外部工具，
+Claude Code 展示了一种``agent as CLI tool''的产品范式，
+强调与人类开发者的协作而非替代。
+
+\paragraph{Post-training 启示。}
+编码 agent 的快速进化为 agentic post-training 提供了几个关键教训：
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{环境设计是训练的一部分}：
+    SWE-Agent 的 ACI 设计表明，
+    优化 agent 的 action interface 可以带来与优化模型参数同等甚至更大的收益；
+  \item \textbf{可验证的 reward 信号是关键}：
+    代码任务的 unit test 提供了天然的 binary reward，
+    使得 RL-based training（\crossref{2}{sec:pref:rlvr}）得以直接应用——
+    这与 Thread~2 中 RLVR 的成功逻辑一脉相承；
+  \item \textbf{长轨迹能力决定上限}：
+    真实的软件工程任务涉及数十到数百步操作，
+    agent 在长轨迹中的错误累积和恢复能力
+    成为决定性能天花板的核心因素。
+\end{enumerate}
+
+\subsubsection{Agent 基础设施标准化}
+
+2024--2025 年间，三大 AI 厂商几乎同时推出了 agent 开发标准和框架，
+标志着``agent as product''的转变。
+
+\paragraph{Model Context Protocol (MCP)。}
+Anthropic 发布的 \textbf{MCP} \cite{anthropic2024mcp}
+定义了一个开放的标准协议，
+使 LLM 能够以统一的方式访问外部数据源和工具。
+MCP 迅速成为行业事实标准 ---
+它将 tool use 从``每个应用自定义集成''
+标准化为``通过协议即插即用''，
+大幅降低了 agent 系统的构建成本。
+
+\paragraph{Agent SDKs。}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{OpenAI Agents SDK} \cite{openai2025agentssdk}：
+    提供了构建多 agent 工作流的开源框架，
+    内置 handoffs（agent 间任务传递）、guardrails（安全约束）和 tracing（调试追踪）等机制；
+  \item \textbf{Google ADK} \cite{google2025adk}：
+    Agent Development Kit，强调与 Google Cloud 生态的深度集成，
+    支持多 agent 编排和自定义工具注册。
+\end{itemize}
+
+\paragraph{收敛趋势：Agent as Product。}
+Computer use + function calling + 推理规划的三路收敛正在形成一个新的产品范式：
+\textbf{通用 AI agent}。
+这类系统具备以下特征：
+（1）可以通过 GUI 操作任意软件（computer use）；
+（2）可以通过标准协议调用任意 API（MCP/function calling）；
+（3）可以进行多步骤推理和规划（\crossref{4}{sec:t4-thinking-models}）。
+更值得关注的是 agent 能力的进步速度 ---
+有研究指出 AI agent 在标准化基准上的任务完成率
+大约每 \textbf{7 个月翻一番}，展现出一条独立于模型基础能力的 scaling curve。
+
+\subsubsection{2026: Agent RL 的规模化与环境革命}
+\label{sec:t6:2026}
+
+2026 年初，agentic post-training 领域发生了质变：
+\textbf{Agent 训练从手工环境中的 SFT/prompting 时代，
+进入合成环境中的大规模 RL 时代}。
+
+\paragraph{合成环境：解决 Agent RL 的数据瓶颈。}
+Agent RL 训练长期受限于环境数量：
+手工构建的训练环境通常只有十几到几十个场景，
+根本无法支撑 RL 所需的大规模探索。
+\landmark{wang2026awm} Agent World Model（AWM）
+从根本上解决了这一瓶颈：
+通过全自动的合成环境生成流水线，
+一次性生成 \textbf{1,000 个多样化环境}（平均每个环境 35 个工具），
+环境由代码驱动并配备数据库后端，
+提供比 LLM-simulated 环境更可靠的状态转移。
+关键发现是：仅在合成环境中训练的 agent
+即可\textbf{泛化到从未见过的真实环境}，
+在三个工具使用基准上取得 strong out-of-distribution 性能。
+VeriEnv \cite{chae2026verienv} 在 web agent 领域实现了类似的范式：
+用 LLM 自动克隆真实网站为可执行的合成环境，
+配备 deterministic 的可编程 reward，
+将 agent 训练与不安全的真实世界交互\emph{解耦}。
+
+\evolution{手工构建少量训练环境（ReAct, ALFWorld）}{自动合成千量级多样化环境（AWM, VeriEnv）}{Agent RL 的瓶颈从``算法''转移到``环境规模''}
+
+\paragraph{GLM-5: 异步 Agent RL 的工程突破。}
+\landmark{glm52026}
+智谱 AI 的 GLM-5（744B 参数，40B active MoE）
+在工程维度实现了 agent RL 的关键突破：
+\textbf{异步 agent RL 架构}将 generation 和 training 解耦，
+使得复杂的多轮 agent 交互可以在不阻塞训练循环的情况下执行。
+这一基础设施创新使得在真实多步交互场景中进行 RL 训练变得可行，
+GLM-5 在 reasoning、coding 和 agentic 任务上
+均达到了开源模型的 SOTA。
+
+\paragraph{Agent RL 的方法论创新。}
+在训练算法层面，三项工作分别解决了 agent RL 的不同核心瓶颈：
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{探索瓶颈}：
+    RAPO \cite{zhang2026rapo} 将 retrieval 引入 RL 训练循环——
+    在 rollout 阶段让 agent 参考检索到的 off-policy step-level traces，
+    突破了纯 on-policy 方法的探索限制。
+    在 14 个数据集上平均提升 5.0\%，训练速度提升 1.2 倍。
+
+  \item \textbf{技能积累}：
+    SkillRL \cite{xia2026skillrl} 实现了分层技能学习——
+    通过 SkillBank 存储通用技能和任务特定技能，
+    递归进化机制使技能库与 policy 共同演化。
+    7B 模型在 ALFWorld 和 WebShop 上超越 GPT-4o 达 41\%。
+
+  \item \textbf{多 agent 稳定性}：
+    Dr.\ MAS \cite{feng2026drmas} 发现 GRPO 的全局 advantage normalization
+    在多 agent 系统中导致梯度不稳定。
+    通过 \textbf{agent-wise advantage normalization}
+    （使用每个 agent 自身的 reward 统计量），
+    在 math reasoning 上提升 5.6\%，search 任务上提升 15.2\%。
+\end{itemize}
+
+\paragraph{长时程 Agent 与记忆管理。}
+MemPO \cite{li2026mempo} 将记忆管理从外部模块转化为\textbf{可学习的策略}：
+agent 在环境交互过程中自主总结和管理自身记忆，
+通过 RL-based credit assignment 评估记忆的有效性。
+在长时程任务上，F1 提升 25.98\%
+同时 token 使用量降低 67--73\%——
+直接解决了长轨迹任务的上下文长度瓶颈。
+
+\paragraph{Agent 安全与评估。}
+ToolSafe \cite{mou2026toolsafe} 提供了首个针对 agent 工具调用的
+\textbf{步骤级安全保障框架}：
+TS-Guard 使用多任务 RL 训练的安全模型
+\emph{主动}检测不安全的工具调用（在执行\emph{之前}），
+结合 TS-Flow 的 guardrail-feedback 推理框架，
+将有害工具调用减少 65\%，
+同时提升良性任务完成率 10\%
+（\crossref{3}{sec:t3-safety}）。
+
+在评估端，
+AgencyBench \cite{li2026agencybench} 将 agent 评估推向了
+\textbf{真实规模}：
+32 个场景、138 个任务，
+每个任务需要约 90 次工具调用和约 100 万 token 的上下文。
+评估结果揭示了 proprietary 与 open-source 模型之间的显著差距
+（48.4\% vs.\ 32.1\%），
+以及 agent 在 self-correction 和工具偏好方面的大幅个体差异。
+
+\begin{openproblembox}
+\textbf{开放问题 5: 合成环境到真实世界的 Sim-to-Real Gap。}\\
+AWM 和 VeriEnv 证明了合成环境训练的有效性，
+但从合成环境到真实世界的迁移是否存在系统性偏差？
+合成环境的 reward 设计是否会引入 reward hacking？
+如何验证合成训练的 agent 在 unseen 真实场景中的安全性和可靠性？
+这一问题与 Thread~4 中 RLVR 的可验证 reward 假设密切相关：
+合成环境的 reward 越接近``完美验证器''，
+sim-to-real gap 越小，但构建成本也越高。
+\end{openproblembox}
+
+% ============================================================
+\subsection{未解决问题}
+\label{sec:t6-open}
+% ============================================================
+
+\begin{openproblembox}
+\textbf{开放问题 1: 可靠的多步骤行为与错误恢复。}\\
+AgentBench 表明即使 GPT-4 也只有 78\% 的 house-holding 成功率，
+远未达到实用部署标准。
+Agent 在长轨迹中面临三类核心失败模式：
+(a) \textbf{错误累积}——早期的一个错误决策导致后续连锁失败；
+(b) \textbf{死循环}——agent 陷入重复尝试相同策略的 loop；
+(c) \textbf{不可恢复失败}——执行了不可逆操作（如删除文件）后无法回退。
+Reflexion 的 verbal self-reflection 和 ToolLLM 的 DFSDT
+分别从推理时和搜索时两个维度提供了初步解决方案，
+但尚缺乏在 \emph{train-time} 端到端优化 error recovery 策略的有效方法。
+如何通过 post-training 让模型学会``预见''并``避免''不可恢复的错误，
+而非仅在错误发生后``反思''，仍是核心挑战。
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{开放问题 2: 评估标准化。}\\
+当前的 agentic 能力评估高度碎片化：
+AgentBench \citep{liu2023agentbench} 评估整体 agent 能力，
+T-Eval \citep{chen2023teval} 对工具使用能力进行 step-by-step 细粒度评估，
+MINT \citep{wang2023mint} 聚焦 multi-turn 交互，
+Berkeley Function-Calling Leaderboard \citep{patil2024bfcl} 专注 function calling 准确率，
+SWE-bench \citep{jimenez2024swebench} 聚焦软件工程，
+OSWorld \citep{xie2024osworld} 评估 computer use 能力。
+不同 benchmark 的评估维度、环境设置和指标定义差异巨大，
+使得跨方法比较困难。
+社区需要一个统一的评估框架，
+涵盖从单步工具调用到多步骤任务规划的完整能力谱——
+类似 Thread~2 中 reward model 评估从 pairwise accuracy 到 RLHF Workbench 的演化，
+agent 评估也需要经历一次范式统一。
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{开放问题 3: Tool Use 的 Scaling Law。}\\
+Toolformer 观察到工具使用能力在 ${\sim}775$M 参数时涌现，
+但我们对 (model scale) $\times$ (number of tools) $\times$ (task complexity)
+三者之间的 scaling 关系几乎一无所知。
+更深层的问题是：
+随着工具集合的扩大，模型是否会遇到``工具选择困境''——
+即面对过多工具时，选择正确工具的能力反而下降？
+如何为给定规模的模型确定最优的工具集合大小和训练数据量？
+在 SWE-bench 上观察到的快速进步
+是否遵循可预测的 scaling curve，
+还是会在某个复杂度阈值处遭遇根本性瓶颈？
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{开放问题 4: Agent Safety 与 Controllability。}\\
+WebGPT 已经指出赋予模型实时 web 访问能力带来的风险
+（如编辑 Wikipedia、操纵搜索结果）。
+随着 computer use 的出现，
+agent 的 action space 从离散的 API 调用扩展到任意 GUI 操作，
+安全风险也随之急剧放大：
+agent 可能执行不可逆操作（删除文件、发送邮件、修改系统配置），
+且其行为轨迹难以被人类实时监控。
+如何设计有效的 \emph{permission model}（agent 可以做什么）、
+\emph{sandbox mechanism}（限制 agent 的操作范围）和
+\emph{human-in-the-loop} 审批机制，
+是 agent 从实验走向生产的前置条件
+（\crossref{3}{sec:t3-safety}）。
+\end{openproblembox}
+
+
+\subsection{小结}
+
+Thread~6 的演化轨迹清晰地展现了 LLM 从``被动文本生成器''
+到``主动世界交互者''的转变过程：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{问题奠基}（2021--2022）：
+    WebGPT 证明 LLM 可以通过 RLHF pipeline 学会使用浏览器，
+    Toolformer 证明工具使用能力可以通过自监督信号自主习得，
+    ReAct 确立了 Thought--Action--Observation 的标准交互范式。
+
+  \item \textbf{路径分化}（2023）：
+    围绕奠基方法的局限，研究分化为四条路径——
+    Function Calling（大规模 API 集成）、
+    Agent Tuning（将 agent 能力内化到参数中）、
+    Code Generation Alignment（利用 unit test 作为 reward）、
+    Multi-tool Orchestration（LLM 作为工具调度中心）。
+
+  \item \textbf{能力收敛}（2024）：
+    四条路径在 SWE-bench 等编码 agent 任务上自然收敛——
+    解决真实的软件工程问题同时需要精确的工具调用、
+    多步骤推理规划、高质量代码生成和多工具协调。
+    AgentBench 等系统化评估框架的出现标志着领域走向成熟。
+
+  \item \textbf{产品化与基础设施}（2025--2026）：
+    Computer use 将 action space 从离散 API 扩展到连续 GUI 操作，
+    MCP 等标准协议和 Agent SDK 的出现降低了 agent 系统的构建门槛，
+    Devin、Claude Code 等产品展示了 agent 的商业化路径。
+\end{enumerate}
+
+\evolution{LLM 作为被动的文本生成器 (2021)}{LLM 作为主动的环境交互者，编码 Agent 进入生产级部署 (2025)}{RLHF + self-supervised tool learning + ReAct + RL from environment feedback}
+
+\noindent
+本章的核心 takeaway 是：
+\textbf{Agentic post-training 的本质是让模型学会``与世界的交互协议''}。
+无论是 WebGPT 的浏览器操作、Toolformer 的 API 调用、
+还是 Computer Use 的 GUI 操作——
+所有突破都围绕着如何让模型理解``何时行动、如何行动、如何从行动结果中学习''
+这一核心问题展开。
+与 Thread~1（SFT 是数据工程问题）和 Thread~4（推理是 RL 问题）不同，
+Thread~6 揭示的关键瓶颈不在于训练算法，
+而在于 \textbf{action interface 的设计}和\textbf{环境反馈的质量}。
+SWE-Agent 的 ACI 设计、ToolLLM 的 DFSDT 搜索策略、
+以及 MCP 的标准化协议，
+都是在``模型与世界的接口层''进行优化，
+而非简单地扩大模型规模或增加训练数据。
+
+这一洞见也指向了 Thread~6 与其他线程的深层联系：
+Thread~4 的推理能力为 agent 提供了规划层（ReAct 的 Thought 本质上就是 CoT）；
+Thread~3 的安全研究为 agent 部署提供了必要的约束框架；
+Thread~7 的效率方法使得 agent 训练在资源受限场景下成为可能；
+而 Thread~5 的多模态能力则是 Computer Use 的前提条件。
+这些跨线程的深度交织，
+使得 Thread~6 成为整个 post-training 演化图谱中连接最为密集的节点之一。

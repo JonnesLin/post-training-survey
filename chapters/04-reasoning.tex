@@ -1,0 +1,1017 @@
+% === Thread 4: Reasoning & Verification ===
+\section{Thread 4: Reasoning \& Verification}
+\label{sec:thread4}
+
+\begin{quote}
+\textit{核心问题：如何让模型进行可靠的多步推理，并对中间步骤进行验证？}
+\end{quote}
+
+\noindent
+Reasoning 是大语言模型最令人振奋的能力之一，也是 post-training 领域中演化最为迅速的方向。
+一个仅经过 pre-training 的模型在面对需要多步推导的数学或逻辑任务时，
+往往直接输出一个答案而不展示中间过程，导致错误率极高且不可追溯。
+Post-training 阶段的核心挑战在于：
+\textbf{如何让模型学会``展示工作过程''（show your work），
+并在生成推理链的同时对每一步进行自我验证？}
+
+这条线程的演化轨迹可以概括为四个阶段：
+\textbf{（1）发现推理能力的存在}（CoT prompting 证明 few-shot 示例即可激活推理链）；
+\textbf{（2）提升推理可靠性}（Self-Consistency 和 verification 机制）；
+\textbf{（3）将推理能力内化到模型参数中}（STaR、ReST 等 bootstrapping 方法，以及 GRPO 等 RL 训练）；
+\textbf{（4）推理与计算的深度融合}（test-time compute scaling，o1/R1 范式）。
+
+与其他线程的关联尤为密切：
+reward modeling 的思想从 Thread~2 流入本线程，催生了 process reward model
+（\crossref{2}{sec:pref}）；
+本线程中发展的长链推理能力为 Thread~6 的 agent planning 提供了核心支撑
+（\crossref{6}{sec:thread6}）；
+而 Thread~7 的 efficiency 技术使得推理模型的训练和部署成本大幅降低
+（\crossref{7}{sec:efficiency}）。
+
+
+% ============================================================
+% 4.1 Problem Origin & Early Explorations
+% ============================================================
+\subsection{问题起源：Chain-of-Thought 的发现}
+\label{sec:t4-origin}
+
+\subsubsection{Scratchpads: 最早的``草稿纸''}
+
+在 Chain-of-Thought 这一术语被正式提出之前，
+Nye et al.\ \cite{nye2021scratchpad} 就已经发现了一个关键现象：
+当允许模型在输出最终答案之前先在一个``草稿纸''（scratchpad）上写下中间计算步骤时，
+模型在算术和程序执行跟踪等任务上的准确率显著提升。
+这一工作虽然朴素，却揭示了一个深刻的洞察：
+\textbf{Transformer 的单次 forward pass 所能实现的计算复杂度是有限的}，
+而通过生成中间 token 来``延长''计算链，
+本质上是在 inference 时动态增加模型的有效计算深度。
+
+\subsubsection{Chain-of-Thought Prompting}
+\label{sec:t4-cot}
+
+\landmark{wei2022cot} 的工作将这一发现系统化。
+Wei et al.\ 提出了 \textbf{Chain-of-Thought (CoT) prompting}：
+在 few-shot prompt 的每个示例中加入人类撰写的推理过程
+（而非仅提供 input-output 对），
+就能显著提升模型在多步推理任务上的表现。
+
+\begin{problembox}
+Standard prompting 仅给出 (question, answer) 对：\\
+\texttt{Q: Roger has 5 tennis balls...} $\rightarrow$ \texttt{A: 11}\\
+模型被迫在单次 forward pass 中完成所有计算，缺乏中间推理的空间。
+\end{problembox}
+
+\begin{solutionbox}
+CoT prompting 在答案前插入推理链：\\
+\texttt{Q: Roger has 5 tennis balls...} $\rightarrow$
+\texttt{A: Roger started with 5 balls. 2 cans of 3 = 6. 5 + 6 = 11. The answer is 11.}\\
+模型通过 autoregressive generation 逐步展开中间推理。
+\end{solutionbox}
+
+\paragraph{关键实验结果。}
+CoT prompting 的效果展现出显著的 \textbf{scale-dependent emergent} 特性：
+\begin{itemize}[leftmargin=2em]
+  \item 在小模型（$<$10B 参数）上，CoT 几乎不提供增益甚至会降低性能；
+  \item 在大模型上效果随规模急剧提升：PaLM-540B 在 GSM8K 上从 standard prompting 的 17.9\% 跃升到 CoT prompting 的 58.1\%；
+  \item 在 MultiArith 等简单算术基准上，PaLM-540B + CoT 的表现甚至达到了先前 task-specific fine-tuned 模型的水平。
+\end{itemize}
+
+\noindent
+这一发现的理论意义在于：
+CoT 不是``教会''模型推理，而是\textbf{激活}了 pre-training 阶段已经习得但未被利用的推理能力。
+这与 Thread~1 中 LIMA \cite{zhou2023lima} 提出的``Superficial Alignment Hypothesis''形成了有趣的呼应
+（\crossref{1}{sec:sft}）---
+post-training 的核心作用可能不在于注入新知识，而在于激活正确的输出模式。
+
+\subsubsection{Zero-Shot CoT}
+
+如果说 few-shot CoT 需要人类精心设计推理示例，
+\landmark{kojima2022zeroshotcot} 则证明了一个惊人的事实：
+仅需在 prompt 末尾添加一句 ``\textbf{Let's think step by step}''，
+就能在\textbf{无需任何示例}的情况下激活模型的推理链生成能力。
+
+Kojima et al.\ 将这一策略称为 \textbf{Zero-Shot CoT}。
+在 MultiArith 上，Zero-Shot CoT 将 InstructGPT-175B 的准确率从 17.7\% 提升至 78.7\%；
+在多个推理基准的平均表现上也优于 standard zero-shot prompting。
+这一结果表明，大语言模型内部已经具备了``步骤化思考''的能力模式，
+只需要一个极其简短的指令就能将其``解锁''。
+
+\subsubsection{Least-to-Most Prompting}
+
+与 CoT 的``一步到位''推理不同，
+\citet{zhou2022least} 提出了 \textbf{Least-to-Most Prompting}——
+将复杂问题\textbf{先分解为更简单的子问题序列}，
+然后从最简单的子问题开始逐步求解，每个子问题的答案作为后续子问题的上下文。
+这种 compositional decomposition 策略在需要泛化到超出示例复杂度的问题上
+（如 SCAN 组合泛化基准）表现尤为突出，
+准确率从 CoT 的 16\% 跃升至 99.7\%。
+Least-to-Most 揭示了一个重要的设计原则：
+\textbf{推理的关键不仅在于``逐步思考''，更在于``正确分解问题''}。
+
+\subsubsection{Tree of Thoughts}
+
+CoT 的线性推理链在面对需要搜索和回溯的问题时存在固有局限。
+Yao et al.\ \cite{yao2023tot} 提出了 \textbf{Tree of Thoughts (ToT)}，
+将推理过程从线性链扩展为树状搜索结构。
+ToT 在每一步生成多个候选 ``thought''，
+通过评估函数（可以是模型自身的自我评估）选择最有前景的分支，
+并支持 breadth-first search 和 depth-first search 等经典搜索策略。
+在 Game of 24 等需要创造性搜索的任务上，
+ToT 的成功率（74\%）远超 CoT prompting（4\%）。
+
+\paragraph{RAP: MCTS 驱动的推理。}
+Hao et al.\ \cite{hao2023rap} 提出了 \textbf{Reasoning via Planning (RAP)}，
+将 LLM 同时用作\textbf{world model}（预测每一步推理的后果）和 \textbf{reasoning agent}，
+并使用 \textbf{Monte Carlo Tree Search (MCTS)} 替代 ToT 中较简单的 BFS/DFS 搜索。
+MCTS 的 UCB 探索-利用平衡使 RAP 在有限计算预算下更高效地分配搜索资源。
+这一工作将经典规划算法与 LLM 推理结合，
+其中 MCTS 的应用后来在 OmegaPRM \cite{luo2024omegaprm} 的自动化 process supervision
+和 rStar \cite{qi2024rstar} 的 mutual reasoning 中得到了进一步发展。
+
+\evolution{Chain-of-Thought：线性推理链}{Tree of Thoughts / RAP：树状搜索与规划}{需要回溯和探索}
+
+\paragraph{PAL: 将计算外包给代码解释器。}
+与上述方法让 LLM 在自然语言中完成所有推理不同，
+Gao et al.\ \cite{gao2022pal} 提出了 \textbf{Program-Aided Language models (PAL)}——
+让 LLM 将推理过程生成为\textbf{可执行的程序}（而非自然语言推理链），
+然后由 Python 解释器执行计算。
+这种``推理归语言模型、计算归解释器''的分工策略
+在 GSM8K 上将 PaLM-540B 的准确率从 CoT 的 56.5\% 提升至 \textbf{72.0\%}，
+尤其在需要精确数值计算的问题上优势显著。
+PAL 开创了 \textbf{program-of-thought (PoT)} 范式，
+后续被 MAmmoTH \cite{yue2023mammoth} 等工作吸收为混合 CoT+PoT 训练策略的核心组件，
+并与 Thread~6 中 tool-use 的思想形成呼应（\crossref{6}{sec:thread6}）。
+
+\subsubsection{CoT Distillation: 将推理能力迁移到小模型}
+
+CoT 的一个关键局限在于其 scale-dependent 特性 ---
+小模型无法从 CoT prompting 中获益。
+为解决这一问题，两条平行的研究路线探索了 \textbf{CoT distillation}：
+
+\begin{itemize}[leftmargin=2em]
+  \item Magister et al.\ \cite{magister2023cotdistill} 提出利用大模型生成的 CoT 推理链
+    作为 SFT 数据来训练小模型，
+    使 0.3B 模型在 arithmetic 任务上的性能接近 540B 模型的 CoT prompting 水平。
+
+  \item Hsieh et al.\ \cite{hsieh2023distillstep} 提出 \textbf{Distilling Step-by-Step}，
+    不仅使用大模型的推理链作为 label，
+    还将推理链中的每一步作为额外的 rationale supervision 信号，
+    在数据效率上优于标准 distillation。
+    该方法使 770M T5 模型在某些任务上仅用 12.5\% 的训练数据就超过了 540B PaLM 的 few-shot 性能。
+\end{itemize}
+
+\noindent
+这些 distillation 工作为后续 Thread~4 的一个核心主题奠定了基础：
+\textbf{如何通过 post-training 将推理能力从 inference-time 的 prompt 技巧内化为模型参数的一部分。}
+
+
+% ============================================================
+% 4.2 Foundation: Verification & Reward Modeling for Reasoning
+% ============================================================
+\subsection{奠基方法：推理验证与 Reward Modeling}
+\label{sec:t4-foundation}
+
+CoT prompting 虽然激活了推理链生成能力，
+但单条推理链的可靠性远不足以支撑高stakes的应用场景。
+一条看似流畅的推理链可能在中间某一步犯下一个微妙的逻辑错误，
+而这个错误会传播到后续所有步骤，导致最终答案的错误。
+如何\textbf{验证}推理链的正确性，成为本线程的第二个核心问题。
+
+\subsubsection{Self-Consistency: 多路投票}
+\label{sec:t4-self-consistency}
+
+\landmark{wang2023selfconsistency} 提出了一个直观而有效的策略：
+不依赖单一的 greedy decoding 推理链，
+而是通过 temperature sampling 生成多条\textbf{多样化}的推理路径，
+然后对所有路径得到的最终答案进行\textbf{多数投票}（majority voting）。
+
+\paragraph{核心方法。}
+给定问题 $\mathbf{x}$，Self-Consistency 的解码过程为：
+\begin{enumerate}[leftmargin=2em]
+  \item 从语言模型中采样 $m$ 条推理路径 $(\mathbf{r}_1, a_1), \ldots, (\mathbf{r}_m, a_m)$，
+    其中 $\mathbf{r}_i$ 是推理链，$a_i$ 是对应的最终答案；
+  \item 选择出现次数最多的答案作为最终预测：
+\end{enumerate}
+\begin{equation}
+\label{eq:self-consistency}
+\hat{a} = \arg\max_{a} \sum_{i=1}^{m} \mathbf{1}(a_i = a)
+\end{equation}
+
+\noindent
+这一策略可以被理解为对 CoT 推理过程的\textbf{边际化}：
+Wang et al.\ 指出，Self-Consistency 近似地实现了
+$\hat{a} = \arg\max_a \sum_{\mathbf{r}} P(\mathbf{r}, a \mid \mathbf{x})$，
+即对所有推理路径求和后选择后验概率最大的答案。
+相比 greedy decoding 或 beam search 仅考虑高概率路径，
+这种``sample-and-marginalize''策略能够更好地利用多样化推理路径中的互补信息。
+
+\paragraph{关键实验结果。}
+Self-Consistency 在几乎所有推理基准上都带来了显著且一致的提升：
+\begin{itemize}[leftmargin=2em]
+  \item GSM8K: GPT-3 code-davinci-002 从 CoT 的 60.1\% 提升至 78.0\%（\textbf{+17.9\%}）；
+  \item SVAMP: \textbf{+11.0\%}；AQuA: \textbf{+12.2\%}；
+  \item 该方法对采样策略（温度、top-$k$）具有良好的鲁棒性；
+  \item 与 Zero-Shot CoT 结合时同样有效：GSM8K +26.2\%。
+\end{itemize}
+
+\noindent
+Self-Consistency 的重要性在于它揭示了一个关键原则：
+\textbf{在 inference 时投入更多计算资源（生成更多推理路径）可以系统性地提升推理准确率}。
+这一原则成为后续 test-time compute scaling 研究的直接先驱（见 \S\ref{sec:t4-convergence}）。
+
+\subsubsection{Self-Refine \& Reflexion: 自我迭代改进}
+
+除了 Self-Consistency 的``生成多路 + 投票''范式，
+另一条研究路线探索了让模型\textbf{自我迭代改进}其推理过程。
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Self-Refine} \cite{madaan2023selfrefine}：
+    让模型在生成初始输出后，自我评估（critique）输出的质量，
+    然后根据评估结果进行修改（refinement），如此迭代直至满足停止条件。
+    在 code optimization、dialogue response generation 等任务上展现了持续改进能力。
+
+  \item \textbf{Reflexion} \cite{shinn2023reflexion}：
+    将 self-reflection 过程建模为一种``verbal reinforcement learning''。
+    Agent 在完成任务后生成一段自然语言的 reflection，
+    总结失败原因和改进策略，并将其作为 episodic memory 存储，
+    在后续 trial 中利用这些 reflection 来避免重复错误。
+    在 HumanEval 上达到 91\% 的 pass@1。
+\end{itemize}
+
+\paragraph{Self-Correction 的局限。}
+然而，Huang et al.\ \cite{huang2024selfcorrect} 的系统性研究表明，
+\textbf{LLM 在没有外部反馈的情况下实际上无法可靠地 self-correct 其推理}。
+在多个推理基准上，self-correction 甚至导致性能下降。
+只有当模型获得外部反馈信号（如 ground truth、工具输出、更强模型的评价）时，
+迭代改进才能真正奏效。
+这一发现强调了\textbf{外部验证机制}的不可替代性。
+
+\subsubsection{Outcome Reward Model (ORM) \& GSM8K}
+\label{sec:t4-orm}
+
+如果说 Self-Consistency 通过多数投票隐式地利用了推理路径的多样性，
+那么 \textbf{训练一个专门的 verifier} 来显式地评估推理链的质量，
+则是更加精细的验证策略。
+
+\landmark{cobbe2021gsm8k} 的工作在这一方向上做出了开创性贡献。
+Cobbe et al.\ 提出了两个相互关联的贡献：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{GSM8K 数据集}：8.5K 道高质量的小学数学应用题，
+    每道题需要 2--8 步推理，答案为整数。
+    该数据集成为后续推理研究最广泛使用的基准之一。
+
+  \item \textbf{Outcome-based Verifier}（后被称为 Outcome Reward Model, ORM）：
+    训练一个 verifier 模型来判断一条推理链的最终答案是否正确。
+    在 inference 时，生成 $N$ 条候选推理链，
+    用 verifier 对每条链打分，选择得分最高的答案。
+    相比多数投票，verifier-guided selection 在相同采样数量下达到更高准确率。
+\end{enumerate}
+
+\noindent
+ORM 的思想直接继承了 Thread~2 中 reward modeling 的框架
+（\crossref{2}{sec:pref}）---
+将人类对推理质量的判断训练成一个可自动化的评分模型。
+但 ORM 的一个根本性局限在于：
+\textbf{它只评估最终答案的正确性，无法定位推理链中间步骤的错误}。
+一条得到正确答案但推理过程有误的链（``right answer for wrong reasons''）
+会被 ORM 评为正确，这在需要可靠推理的场景中是不可接受的。
+
+\subsubsection{Process Reward Model (PRM): Let's Verify Step by Step}
+\label{sec:t4-prm}
+
+\landmark{lightman2023prm} 的工作直接回应了 ORM 的上述局限。
+Lightman et al.\ 提出了 \textbf{Process Reward Model (PRM)}：
+不再只评估最终答案，而是对推理链中\textbf{每一步}都给出独立的正确性判断。
+
+\paragraph{核心方法。}
+PRM 对推理链 $(s_1, s_2, \ldots, s_K)$ 的评分方式如下：
+\begin{equation}
+\label{eq:prm-score}
+\text{PRM-score}(\mathbf{s}) = \prod_{k=1}^{K} P(\text{correct} \mid s_1, \ldots, s_k)
+\end{equation}
+其中每一步 $s_k$ 被标注为 positive、negative 或 neutral 三个类别之一。
+PRM 的训练数据来自人工逐步标注。
+
+\paragraph{PRM800K 数据集。}
+为训练高质量的 PRM，Lightman et al.\ 构建了 \textbf{PRM800K} 数据集：
+\begin{itemize}[leftmargin=2em]
+  \item 约 800,000 条 step-level 标注，覆盖 75,000 条解题过程，对应 12,000 道 MATH 数据集问题；
+  \item 每一步标注为 positive（正确）、negative（错误）或 neutral（无法判断）；
+  \item 使用 \textbf{active learning} 策略选择最有信息量的样本进行标注，
+    实现了 \textbf{2.6 倍}的标注效率提升
+    （即在固定标注预算下达到同等性能所需的样本量减少为 1/2.6）。
+\end{itemize}
+
+\paragraph{关键实验结果：PRM 大幅超越 ORM。}
+在 MATH 数据集上的 best-of-$N$ 评估中（$N = 1860$）：
+\begin{itemize}[leftmargin=2em]
+  \item PRM (best-of-$N$): \textbf{78.2\%}
+  \item ORM (best-of-$N$): 72.4\%
+  \item Majority Voting: 69.6\%
+\end{itemize}
+
+\noindent
+PRM 比 ORM 高出 \textbf{5.8 个百分点}，比 majority voting 高出 \textbf{8.6 个百分点}。
+这一结果有力地证明了 \textbf{process-level supervision 优于 outcome-level supervision}。
+
+\begin{openproblembox}
+PRM800K 的标注成本极高（需要数学领域专家逐步检查）。
+如何自动化 process supervision 的标注过程成为后续研究的核心开放问题。
+\end{openproblembox}
+
+\subsubsection{自动化 Process Supervision}
+
+PRM 的强大性能和高昂标注成本之间的矛盾催生了一系列自动化 process supervision 的工作。
+
+\paragraph{Math-Shepherd。}
+Wang et al.\ \cite{wang2024mathshepherd} 提出 \textbf{Math-Shepherd}，
+通过一种基于 \textbf{completer model} 的自动标注方法来替代人工标注。
+对于推理链中的每一步 $s_k$，
+Math-Shepherd 从 $s_k$ 开始让模型 ``complete'' 剩余推理步骤多次，
+如果多数完成路径能够到达正确答案，则将该步标注为正确。
+这一方法在无需任何人工 step-level 标注的情况下，
+训练出的 PRM 在多个数学推理基准上接近甚至超过了基于人工标注的 PRM 的性能。
+
+\paragraph{OmegaPRM。}
+Luo et al.\ \cite{luo2024omegaprm} 提出 \textbf{OmegaPRM}，
+采用 Monte Carlo tree search (MCTS) 来高效地自动标注推理步骤的正确性。
+与 Math-Shepherd 的``平铺完成''不同，
+OmegaPRM 通过树搜索策略更加高效地分配计算资源，
+在需要精细判断的关键步骤上投入更多采样，
+在简单步骤上快速通过，显著提升了标注效率。
+
+\paragraph{GenRM: 生成式验证。}
+Zhang et al.\ \cite{zhang2024genrm} 提出了一种不同的验证范式 \textbf{GenRM}
+（Generative Reward Model）：
+不再将验证建模为判别式分类问题（``这一步正确 vs 错误''），
+而是让验证模型以\textbf{自然语言生成}的方式输出验证过程和判断。
+GenRM 利用了语言模型在 CoT reasoning 方面的优势，
+在验证过程中也展开推理链来判断每一步的正确性，
+在 out-of-distribution 泛化能力上优于传统判别式 PRM。
+
+\evolution{人工标注 PRM (PRM800K)}{自动化 PRM (Math-Shepherd, OmegaPRM)}{标注成本瓶颈}
+
+
+% ============================================================
+% 4.3 RL for Reasoning: Bootstrapping & Policy Optimization
+% ============================================================
+\subsection{RL for Reasoning: 自我提升与策略优化}
+\label{sec:t4-rl}
+
+前两节讨论的方法 --- CoT prompting、Self-Consistency、PRM ---
+主要在 \textbf{inference 时}通过 prompt 设计或 verifier-guided search 提升推理能力。
+本节转向一个更具野心的目标：
+\textbf{通过 post-training（修改模型参数）将推理能力内化到模型之中}，
+使模型在不依赖精巧 prompt 或大量采样的情况下也能展现出强大的推理能力。
+
+\subsubsection{STaR: 自我教学推理}
+\label{sec:t4-star}
+
+\landmark{zelikman2022star} 提出了 \textbf{STaR}（Self-Taught Reasoner），
+一种通过\textbf{迭代自我训练}来提升推理能力的方法。
+STaR 的核心思想朴素而深刻：
+让模型自己生成推理链，只保留那些最终得到正确答案的推理链作为训练数据，
+然后在这些``成功案例''上进行 fine-tuning，如此迭代。
+
+\paragraph{算法流程。}
+STaR 的每一轮迭代包含以下步骤：
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{生成}：对每道训练题 $(x_i, y_i)$，
+    让当前模型 $M_t$ 生成推理链 $\hat{r}_i$ 和答案 $\hat{y}_i$；
+  \item \textbf{过滤}：只保留 $\hat{y}_i = y_i$ 的样本（正确答案）；
+  \item \textbf{Rationalization}：对于模型未能正确回答的问题，
+    将正确答案 $y_i$ 作为 hint 提供给模型，
+    让模型``反向''生成一条能到达正确答案的推理链。
+    这些 rationalized 样本也加入训练集；
+  \item \textbf{训练}：在收集到的（推理链, 正确答案）对上 fine-tune 模型，
+    得到 $M_{t+1}$；
+  \item 回到步骤 1，重复迭代。
+\end{enumerate}
+
+\paragraph{Rationalization 的妙处。}
+STaR 最关键的创新在于 \textbf{rationalization} 机制。
+如果仅保留模型已经能正确回答的问题，
+训练分布会偏向``简单题''，模型无法在更难的问题上取得进步。
+Rationalization 通过提供正确答案作为 hint，
+使模型能够为那些它原本无法解决的难题也生成合理的推理链，
+从而将``学习边界''推向更高难度。
+
+\paragraph{与 RL 的深层联系。}
+Zelikman et al.\ 证明了 STaR 可以被理解为 REINFORCE 算法的一种特殊形式。
+定义训练目标为：
+\begin{equation}
+\label{eq:star-rl}
+J(M, X, Y) = \sum_{(x,y) \in (X,Y)} \mathbb{E}_{\hat{r} \sim M(\cdot|x)}
+\left[ \mathbf{1}(\hat{y} = y) \right]
+\end{equation}
+其中 $\hat{y}$ 是从推理链 $\hat{r}$ 中提取的答案。
+通过 log-derivative trick，可以得到该目标的梯度：
+\begin{equation}
+\label{eq:star-gradient}
+\nabla J = \sum_{(x,y)} \mathbb{E}_{\hat{r} \sim M}
+\left[ \mathbf{1}(\hat{y} = y) \cdot \nabla \log P_M(\hat{r} \mid x) \right]
+\end{equation}
+这与 REINFORCE 算法的梯度形式完全一致
+（reward 为 $\mathbf{1}(\hat{y} = y)$，policy 为 $P_M(\hat{r} \mid x)$）。
+STaR 的``过滤正确样本 + SFT''操作实际上是 REINFORCE 梯度的一种近似实现。
+
+\paragraph{关键结果。}
+在 CommonsenseQA 上，
+STaR 从 GPT-J 6B 的初始 36.6\% 经过迭代自训练提升至 72.5\%，
+接近 GPT-3 175B few-shot fine-tuned 的 73.0\%（仅用 \textbf{1/30} 的参数量）。
+在 GSM8K 上达到 10.7\%，虽然绝对数字不高，但展示了 bootstrapping 的可行性。
+
+\subsubsection{V-STaR \& Quiet-STaR: 扩展}
+
+\paragraph{V-STaR。}
+Hosseini et al.\ \cite{hosseini2024vstar} 提出 \textbf{V-STaR}，
+在 STaR 的基础上引入了 \textbf{verifier}。
+关键创新在于：STaR 丢弃的错误推理链并非废料，
+而是训练 verifier 的宝贵负样本。
+V-STaR 在每轮迭代中同时训练 generator（使用正确样本 SFT）和 verifier（使用正确/错误样本对），
+两者相互促进：generator 生成更多样化的推理链，
+verifier 学会更准确地区分正确与错误的推理路径。
+
+\paragraph{Quiet-STaR。}
+Zelikman et al.\ \cite{zelikman2024quietstar} 将 STaR 的思想推广到
+\textbf{所有 token 的生成}，而不仅仅是显式的推理任务。
+Quiet-STaR 让模型在生成每一个 token 之前都先进行``内部思考''
+（生成但不输出的 thought tokens），
+然后基于 thought tokens 的 hidden states 来改进下一个 token 的预测。
+这一工作的野心在于：让推理成为语言模型的\textbf{默认行为模式}，
+而非仅在被提示时才激活的特殊模式。
+
+\subsubsection{ReST \& ReST\textsuperscript{EM}: 强化自训练}
+
+\paragraph{ReST。}
+Gulcehre et al.\ \cite{gulcehre2023rest} 提出 \textbf{ReST}（Reinforced Self-Training），
+本质上是 STaR 的一种更系统化的版本。
+ReST 包含两个交替步骤：
+\textbf{Grow}（使用当前 policy 生成样本并用 reward model 过滤）和
+\textbf{Improve}（在过滤后的高质量样本上进行 SFT）。
+这一框架可以使用比 STaR 更通用的 reward 信号，而不限于 binary correctness。
+
+\paragraph{ReST\textsuperscript{EM}。}
+Singh et al.\ \cite{singh2024restem} 将 ReST 重新诠释为一种
+\textbf{Expectation-Maximization (EM)} 算法：
+E-step 对应``生成并过滤''，M-step 对应``在过滤样本上训练''。
+ReST\textsuperscript{EM} 系统地研究了该框架在推理任务上的扩展特性，
+发现在 MATH 和 HumanEval 等基准上，
+多轮迭代可以持续但递减地提升性能（2--3 轮后收益显著下降），
+且使用更多生成样本（更大的候选池）和更高质量的过滤标准可以带来更好的最终效果。
+
+\subsubsection{GRPO: Group Relative Policy Optimization}
+\label{sec:t4-grpo}
+
+\landmark{shao2024grpo} 在 DeepSeekMath 中提出了
+\textbf{Group Relative Policy Optimization (GRPO)}，
+这是对 Thread~2 中 PPO 框架的一次关键简化。
+GRPO 的算法细节和统一视角已在 \S\ref{sec:pref:grpo} 中详细推导，
+此处聚焦其对推理任务的特殊意义。
+
+\paragraph{为什么推理任务尤其需要 GRPO？}
+PPO 在 reasoning 任务上面临两个比通用对话场景更严峻的挑战：
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Value model 的估计困境}：
+    数学推理的 reward 是 sparse 且 binary 的（答案对或错），
+    中间步骤的价值信号极度稀疏，
+    使得 value function 的估计比通用 RLHF 场景困难得多；
+  \item \textbf{大规模采样的必要性}：
+    推理任务的正确率通常远低于通用对话任务，
+    需要更大的 group size $G$ 来保证组内存在正例，
+    这使得 PPO 的四模型架构在内存上捉襟见肘。
+\end{enumerate}
+
+\noindent
+GRPO 通过完全去除 value model，
+用 group-relative reward normalization 替代 advantage estimation
+（公式见 Eq.~\ref{eq:pref:grpo-advantage}--\ref{eq:pref:grpo-obj}），
+同时解决了这两个问题。
+在 DeepSeekMath 7B 上，GRPO 在 MATH 上达到 51.7\%（PPO: 50.1\%, SFT: 46.8\%），
+在 GSM8K 上达到 88.2\%（PPO: 84.0\%），
+不仅性能最优，且因去除 value model 而显著降低了计算开销。
+这一方法后来成为 DeepSeek-R1 训练的核心算法组件。
+
+
+% ============================================================
+% 4.4 Convergence: Reasoning-Native Models
+% ============================================================
+\subsection{收敛与前沿：推理原生模型}
+\label{sec:t4-convergence}
+
+2024 年下半年，前述所有研究路线 --- CoT、verification、RL for reasoning、test-time compute ---
+汇聚成了一个全新的模型范式：\textbf{reasoning-native models}。
+这些模型在 post-training 阶段通过大规模 RL 训练习得了
+在 inference 时自主展开长链推理的能力，
+不再依赖人工设计的 CoT prompt 或 few-shot 示例。
+
+\subsubsection{OpenAI o1: 转折点}
+\label{sec:t4-o1}
+
+\landmark{openai2024o1} 的发布标志着这一范式的正式确立。
+虽然 OpenAI 未公开完整的技术细节，
+但其 system card 和后续技术报告揭示了以下核心要素：
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{大规模 RL 训练}：
+    在 post-training 阶段使用强化学习，让模型学会在 inference 时
+    自主生成一条长而详细的``hidden chain of thought''；
+  \item \textbf{Hidden CoT}：
+    模型在回答前先生成一段不向用户展示的内部推理过程，
+    这段推理可以长达数千甚至数万 token；
+  \item \textbf{Test-time compute scaling}：
+    o1 的推理能力随 inference 时投入的计算资源（思考时间）而持续提升，
+    展现出一种新型的 scaling law。
+\end{itemize}
+
+\paragraph{关键结果。}
+\begin{itemize}[leftmargin=2em]
+  \item AIME 2024（美国数学邀请赛）：83.3\%（o1）vs 13.4\%（GPT-4o）
+  \item Codeforces 竞赛评分：89\textsuperscript{th} percentile
+  \item GPQA Diamond（研究生级别科学问题）：78.0\%，超越领域专家
+\end{itemize}
+
+\noindent
+o1 的意义超越了具体的基准分数。
+它证明了一个核心命题：
+\textbf{post-training 不仅可以教会模型``如何回答''（instruction following），
+还可以教会模型``如何思考''（reasoning）}。
+这为 post-training 研究开辟了全新的维度。
+
+\subsubsection{DeepSeek-R1: 推理能力的涌现}
+\label{sec:t4-r1}
+
+\landmark{deepseek2025r1} 是对 o1 范式的一次重要开源复现和深化。
+DeepSeek-R1 的最大贡献在于揭示了一个惊人的现象：
+\textbf{推理能力可以从纯 RL 训练中自发涌现}。
+
+\paragraph{R1-Zero: 无 SFT 的纯 RL 推理。}
+DeepSeek 首先进行了一个大胆的实验：
+在 DeepSeek-V3-Base（一个仅经过 pre-training 的模型）上，
+\textbf{不进行任何 SFT}，直接使用 GRPO 进行 RL 训练。
+Reward 信号极为简单 --- 仅包含两个基于规则的组件：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Accuracy reward}：最终答案是否与 ground truth 一致（binary，0 或 1）；
+  \item \textbf{Format reward}：输出是否遵循指定格式
+    （将推理过程包裹在 \texttt{<think>...</think>} 标签中，
+    最终答案放在 \texttt{<answer>...</answer>} 标签中）。
+\end{itemize}
+
+\noindent
+结果令人震惊。随着训练的推进，R1-Zero 展现出以下涌现行为：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{推理链自动延长}：
+    模型的 average response length 从初始的数百 token 逐步增长到数千 token，
+    表明模型自主学会了``花更多时间思考''；
+
+  \item \textbf{Self-reflection 的涌现}：
+    模型在推理链中自发地出现了 ``Wait, let me reconsider...''、
+    ``Hmm, that doesn't seem right...'' 等自我反思和回溯行为，
+    \textbf{这些行为完全没有在训练数据或 reward 中被显式编码}；
+
+  \item \textbf{``Aha moment''}：
+    DeepSeek 团队观察到模型在某些训练阶段突然``顿悟''---
+    在推理链中出现类似 ``I found an interesting trick'' 的表述，
+    随后推理准确率出现跳跃式提升。
+\end{enumerate}
+
+\noindent
+这些涌现现象在 AI 研究中具有深远意义。
+它表明\textbf{推理不是一种需要显式教授的技能，
+而是可以通过正确的 RL 信号从 pre-training 中``结晶''出来的能力}。
+
+\paragraph{R1-Zero 的局限。}
+尽管 R1-Zero 展示了令人印象深刻的推理能力
+（AIME 2024: 71.0\% pass@1，86.7\% majority voting），
+它存在三个主要问题：
+（1）可读性差 --- 推理链混杂多种语言，格式不规范；
+（2）发散 --- 有时推理链无限延长而不收敛到答案；
+（3）通用性不足 --- 在非数学/逻辑任务上的表现不理想。
+
+\paragraph{R1 四阶段训练流程。}
+为克服 R1-Zero 的局限，DeepSeek 设计了完整的 R1 四阶段训练流程：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Stage 1: Cold-start SFT}\\
+    收集数千条高质量的长 CoT 数据（通过 few-shot prompting + human annotation），
+    对 base model 进行 SFT。
+    目的是为模型提供一个良好的``思维格式''起点，
+    避免 R1-Zero 中观察到的格式混乱问题。
+
+  \item \textbf{Stage 2: Reasoning-oriented RL}\\
+    在 cold-start SFT 模型上进行大规模 GRPO 训练，
+    使用 rule-based rewards（accuracy + format），
+    集中在数学、编程和逻辑推理等可自动验证的任务上。
+    这一阶段的训练量极大，是推理能力大幅提升的核心阶段。
+
+  \item \textbf{Stage 3: Rejection sampling + SFT}\\
+    使用 Stage 2 的 RL 模型生成大量推理链，
+    通过 rejection sampling 筛选高质量的样本。
+    同时混入通用任务（写作、翻译、问答等）的高质量 SFT 数据，
+    在综合数据集上进行 SFT，
+    使模型在保持推理能力的同时恢复通用能力。
+
+  \item \textbf{Stage 4: All-scenario RL}\\
+    最终阶段的 RL 训练使用\textbf{混合 reward}：
+    对推理任务继续使用 rule-based reward（accuracy），
+    对通用任务使用 preference-based reward model
+    （\crossref{2}{sec:pref}），
+    以同时优化 helpfulness 和 harmlessness。
+\end{enumerate}
+
+\paragraph{R1 关键结果。}
+经过完整四阶段训练的 DeepSeek-R1 达到了以下性能：
+\begin{itemize}[leftmargin=2em]
+  \item AIME 2024: \textbf{79.8\%} pass@1, 与 OpenAI-o1-0912 持平
+  \item MATH-500: \textbf{97.3\%}
+  \item Codeforces: 2029 Elo rating（超过 96.3\% 人类选手）
+  \item GPQA Diamond: \textbf{71.5\%}
+  \item 在 open-ended 对话和写作任务上也保持了良好的通用能力
+\end{itemize}
+
+\paragraph{Distillation 实验。}
+R1 还证实了推理能力的可蒸馏性：
+使用 R1 生成的长 CoT 数据对 Qwen-2.5 和 Llama-3 系列的 1.5B--70B 模型进行 SFT，
+蒸馏后的小模型在推理基准上显著超过了同等规模的标准模型。
+例如 DeepSeek-R1-Distill-Qwen-32B 在 AIME 2024 上达到 72.6\%，
+甚至超过了 OpenAI o1-mini（63.6\%）。
+这表明\textbf{大模型 RL 训练获得的推理能力
+可以通过简单的 SFT 蒸馏迁移到小模型}，
+呼应了 \S\ref{sec:t4-origin} 中讨论的 CoT distillation 工作。
+
+\subsubsection{Kimi k1.5}
+
+Moonshot AI 的 Kimi k1.5 \cite{moonshot2025kimi} 从另一个角度验证了
+reasoning-native model 范式的有效性。
+k1.5 的独特贡献在于提出了 \textbf{long2short} 策略：
+先训练一个``长思考''模型（允许极长推理链），
+然后通过 distillation 和 RL 将推理效率压缩，
+在保持推理质量的同时大幅缩短推理链长度。
+这一策略直接关联到 test-time compute 的效率优化问题。
+
+\subsubsection{2025--2026: Thinking Models 的普及}
+\label{sec:t4-thinking-models}
+
+2025 年标志着 reasoning-native models 从``前沿实验''演变为``行业默认范式''。
+o1 和 R1 证明了推理能力可以通过 RL 习得之后，
+后续一年半的发展沿三条主线展开：
+\textbf{（1）闭源前沿的持续推进}（o3 系列），
+\textbf{（2）开源推理模型的爆发式增长}（DeepSeek 后续演进、Qwen3），
+\textbf{（3）RLVR 训练方法论的系统性突破}（DAPO 及其后续）。
+
+\paragraph{OpenAI o3 系列。}
+OpenAI 在 2025 年发布了 o1 的后继系列 \cite{openai2025o3}：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{o3}（2025 年 4 月）：在 AIME 2025 上达到 \textbf{88.9\%}，
+    较 o1 的 83.3\% 有显著提升；
+    在 ARC-AGI 基准上的性能是 o1 的 3 倍以上；
+  \item \textbf{o4-mini}（2025 年 4 月）：轻量级推理模型，
+    在保持强大推理能力的同时大幅降低 inference 成本；
+  \item \textbf{o3-pro}（2025 年 6 月）：面向复杂科学和工程问题的高性能版本。
+\end{itemize}
+o3 系列的一个关键转变是引入了\textbf{原生多模态推理}和\textbf{agentic 能力}---
+模型不再只是文本推理器，还能在推理过程中调用工具、浏览网页和分析图像
+（\crossref{6}{sec:thread6}）。
+这标志着 reasoning 和 agentic 两条线程的首次深度融合。
+
+\paragraph{DeepSeek 后 R1 演进。}
+DeepSeek 在 R1 之后持续迭代：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{R1-0528}（2025 年 5 月）：R1 的增强版本，
+    在原有架构上进一步扩大 RL 训练规模，
+    在多个推理基准上取得显著提升；
+  \item \textbf{V3.1}（2025 年 8 月） \cite{deepseek2024v3}：
+    引入了\textbf{思考/非思考混合模式}，
+    一个模型同时支持快速直答和深度推理两种模式，
+    用户可通过 API 参数控制是否启用推理链生成。
+    这一设计理念后来成为行业标准；
+  \item \textbf{V3.2}（2025 年 12 月） \cite{deepseek2025v32}：
+    推理能力达到 \textbf{IMO 金牌水平}，
+    在数学奥林匹克级别的问题上展现了接近人类顶尖选手的表现。
+\end{itemize}
+
+\noindent
+从 R1 到 V3.2 的演进揭示了一个重要趋势：
+\textbf{推理不再作为独立的模型类别存在}，
+而是作为通用模型的一种可切换模式。
+``thinking models''正在成为 default paradigm。
+
+\paragraph{Qwen3 与 QwQ。}
+阿里巴巴的 Qwen3 \cite{yang2025qwen3} 贡献了一套系统化的推理模型训练方法论。
+其 post-training 采用\textbf{四阶段流水线}：
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Long CoT cold start}：使用精选长推理链数据进行 SFT；
+  \item \textbf{Reasoning RL}：在可验证任务上进行大规模 GRPO/DAPO 训练；
+  \item \textbf{Thinking mode fusion}：将推理模式与非推理模式在单一模型中融合，
+    使模型能够根据问题复杂度自适应地选择是否启用推理链；
+  \item \textbf{General RL}：混合 reward 的全场景 RL 训练。
+\end{enumerate}
+第三阶段的 thinking mode fusion 是 Qwen3 的独特贡献 ---
+它在 DeepSeek V3.1 的``双模式''概念上更进一步，
+使推理模式切换成为 post-training 流水线的一个显式训练阶段。
+QwQ-32B \cite{qwen2025qwq} 作为 Qwen3 系列的首个推理模型，
+在 AIME 2024 上达到 79.5\%，验证了该训练方法论的有效性。
+
+\paragraph{DAPO 与 RLVR 范式。}
+\landmark{yu2025dapo} 对 GRPO 进行了系统性的改进，
+将其在 AIME 上的表现从 \textbf{30\% 提升至 50\%}（7B 模型），
+同时为 RLVR（Reinforcement Learning with Verifiable Rewards）
+范式提供了一套可复现的开源实践。
+DAPO 的核心技术贡献包括四项改进：
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Clip-higher}：在 PPO/GRPO 的 clipping 机制中，
+    对正 advantage 样本使用更宽松的上界 clip（$1 + \varepsilon_{\text{high}}$），
+    鼓励模型更大胆地探索高 reward 的推理路径；
+  \item \textbf{Dynamic sampling}：根据训练进度动态调整采样策略，
+    在训练早期使用更高温度以增加探索，后期逐步降温以利用；
+  \item \textbf{Token-level loss}：将 GRPO 的 sequence-level loss
+    分解为 token-level loss，提供更精细的梯度信号；
+  \item \textbf{KL 约束去除}：完全移除 KL 散度惩罚项，
+    允许 policy 更自由地偏离 reference model，
+    在 reasoning 任务上这一``去约束''策略带来了显著增益。
+\end{enumerate}
+DAPO 的成功验证了 RLVR 范式的核心洞察：
+\textbf{对于拥有自动化验证器的任务（数学、编程），
+rule-based reward 远比 learned reward model 更可靠和高效}。
+这一结论深刻影响了 Thread~2 的研究方向（\crossref{2}{sec:pref}）。
+
+\paragraph{开源推理模型的爆发。}
+2025 年见证了开源推理模型的寒武纪大爆发：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Marco-o1 v2} \cite{yin2025marcoo1v2}：
+    探索了推理能力蒸馏的瓶颈问题，
+    提出了扩展蒸馏天花板的方法论；
+  \item \textbf{OpenR} \cite{wang2024openr}：
+    提供了开源的高级推理框架，
+    集成了 PRM、MCTS 和多种 RL 算法；
+  \item 大量基于 R1 蒸馏数据训练的小型推理模型涌现，
+    使得推理能力不再是大模型的专利。
+\end{itemize}
+
+\paragraph{``Thinking Models''作为默认范式。}
+到 2026 年初，一个清晰的行业共识已经形成：
+\textbf{推理不再是一个独立的模型类别，而是一种可切换的模型能力}。
+OpenAI、DeepSeek、Qwen、Anthropic 等主要厂商的最新模型
+都将推理作为默认或可选模式内置于通用模型之中。
+这一转变的意义在于：
+post-training 的目标从``训练一个会推理的专用模型''
+演变为``在通用模型中训练一种可按需激活的推理模式''。
+
+\subsubsection{数学推理的基准与方法}
+\label{sec:t4-math}
+
+数学推理是验证推理能力最严格的测试场景。
+本节概述这一领域的关键基准和方法。
+
+\paragraph{基准数据集。}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{MATH} \landmark{hendrycks2021math}：
+    12,500 道竞赛级数学题，涵盖 7 个主题、5 个难度级别，
+    每道题配有 step-by-step 解答。
+    2021 年发布时最强模型准确率仅 6.9\%，
+    到 2025 年 DeepSeek-R1 已达 97.3\%（MATH-500 子集）。
+
+  \item \textbf{GSM8K} \cite{cobbe2021gsm8k}：
+    8.5K 道小学水平应用题，需要 2--8 步推理。
+    作为入门级基准，GSM8K 上的进步清晰地反映了推理方法论的演进。
+\end{itemize}
+
+\paragraph{数学推理的 SFT 方法。}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{WizardMath} \cite{luo2023wizardmath}：
+    使用 Evol-Instruct 策略在数学领域生成多样化的指令数据，
+    对 Llama-2 70B 进行 SFT + RLHF，在 GSM8K 上达到 81.6\%。
+
+  \item \textbf{Llemma} \cite{azerbayev2023llemma}：
+    对 Code Llama 在大规模数学语料（Proof-Pile-2，55B token）上进行
+    continued pre-training，构建面向数学的 open language model。
+    Llemma 在 few-shot 设置下即可在多个数学基准上超过 general-purpose 模型。
+
+  \item \textbf{MAmmoTH} \cite{yue2023mammoth}：
+    构建了 MathInstruct 数据集，混合 CoT 和 program-of-thought (PoT) 两种推理方式，
+    在需要精确计算的问题上使用 PoT，在需要概念推理的问题上使用 CoT。
+
+  \item \textbf{OpenMathInstruct-1} \cite{toshniwal2024openmath}：
+    使用 Mixtral 大规模生成数学推理数据，并通过严格的 answer-based 过滤确保质量，
+    构建了 1.8M 样本的开源数学 instruction 数据集。
+
+  \item \textbf{DART-Math} \cite{tong2024dartmath}：
+    提出 \textbf{Difficulty-Aware Rejection Tuning}，
+    在 rejection sampling 时给予难题更高的采样预算，
+    解决了标准 rejection sampling 中难题样本不足的问题。
+\end{itemize}
+
+\subsubsection{开源推理模型}
+
+o1 和 R1 的成功激发了开源社区对推理模型复现和创新的热潮。
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Qwen2.5} \cite{qwen2024qwen25}：
+    阿里巴巴的 Qwen 系列在 2.5 版本中大幅强化了推理能力，
+    通过精心设计的 SFT + RL pipeline 在数学和编程任务上取得了开源模型的领先水平。
+
+  \item \textbf{Sky-T1} \cite{novasky2025skyt1}：
+    NovaSky-AI 证明了仅用 \textbf{\$450} 的训练成本
+    就可以复现 o1-level 的推理能力（在 MATH-500 和 AIME 上接近 o1-preview）。
+    这一工作极大地降低了推理模型研究的入门门槛。
+
+  \item \textbf{rStar} \cite{qi2024rstar}：
+    提出 \textbf{Mutual Reasoning}，让两个较小的 LLM 通过 MCTS 相互验证推理过程，
+    在不依赖大模型的情况下提升小模型的推理能力。
+    在 GSM8K 上使 Phi3-mini 3.8B 的准确率从 86.4\% 提升至 \textbf{90.0\%}。
+\end{itemize}
+
+
+% ============================================================
+% 4.5 Test-Time Compute Scaling & Open Problems
+% ============================================================
+\subsection{Test-Time Compute Scaling 与开放问题}
+\label{sec:t4-open}
+
+\subsubsection{Test-Time Compute Scaling: 新型 Scaling Law}
+\label{sec:t4-ttc}
+
+传统的 LLM scaling law \cite{kaplan2020scaling,hoffmann2022chinchilla}
+关注的是 \textbf{training-time} 的资源分配：
+给定固定的训练计算预算，如何在模型大小和训练数据量之间最优分配。
+2024 年出现了一种互补的 scaling 范式：
+\textbf{test-time compute scaling}，即在 inference 阶段通过投入更多计算来持续提升性能。
+
+\paragraph{Snell et al.\ 的 Compute-Optimal 框架。}
+\landmark{snell2024testtimescaling} 的工作首次系统化地研究了
+test-time compute 的最优分配策略。
+
+Snell et al.\ 考虑了两种在 inference 时利用额外计算的机制：
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Search against a verifier}：
+    生成多个候选回答，使用 PRM 进行搜索和排序。
+    包括 best-of-$N$ sampling、beam search 等策略。
+
+  \item \textbf{Revising proposals}：
+    让模型基于之前的尝试迭代修改其回答。
+    通过将之前的（错误）回答作为上下文输入，
+    让模型生成改进版本。
+\end{enumerate}
+
+\paragraph{核心发现：难度依赖的最优策略。}
+最关键的发现是：\textbf{test-time compute 的最优分配策略取决于问题的难度}。
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{简单问题}：
+    revision-based 策略（迭代修改）更有效，
+    因为模型只需要在已有较好答案的基础上做小幅修正；
+  \item \textbf{困难问题}：
+    search-based 策略（parallel sampling + PRM verification）更有效，
+    因为困难问题需要探索更广泛的解题路径空间。
+\end{itemize}
+
+\noindent
+基于这一发现，Snell et al.\ 提出了 \textbf{compute-optimal} 策略：
+根据问题难度动态选择最佳的 test-time compute 分配方式。
+在相同 test-time compute budget 下，
+compute-optimal 策略比 best-of-$N$ 节省了 \textbf{4 倍}计算资源。
+
+\paragraph{小模型 + 更多思考时间 $\approx$ 大模型。}
+最具实践意义的发现是：
+在 MATH 基准上，
+\textbf{一个较小的模型 + 充分的 test-time compute
+可以达到甚至超过参数量 14 倍大的模型}的性能。
+这意味着在某些部署场景下，
+可以用一个小而灵活的模型 + 动态的推理预算来替代一个笨重的大模型，
+从而实现更好的成本-性能权衡。
+
+\paragraph{Inference Scaling Laws。}
+Wu et al.\ \cite{wu2024inferencescaling} 从更理论化的角度研究了
+inference scaling 的规律。
+他们发现 test-time compute 的增益遵循一种 \textbf{log-linear} 模式：
+每翻倍 test-time compute，性能提升大致恒定但递减，
+类似于 training-time scaling 中观察到的 power law。
+
+\paragraph{s1: 简单的 Budget Forcing。}
+Muennighoff et al.\ \cite{muennighoff2025s1} 提出了
+一种极为简洁的 test-time scaling 方法 \textbf{s1}：
+在推理过程中通过插入特殊 token 来``强制''模型继续思考（budget forcing），
+或通过提前插入 end-of-thinking token 来缩短推理。
+s1 仅使用 1,000 条精选数据 + budget forcing，
+在 AIME 2024 上达到了 \textbf{与 o1-preview 相当}的水平，
+展示了 test-time compute scaling 方法的简洁性和有效性。
+
+\subsubsection{统一框架：Train-Time vs Test-Time Compute}
+
+将 train-time 和 test-time compute scaling 统一来看，
+Zeng et al.\ \cite{zeng2024roadmapo1} 提供了一个系统性的 roadmap：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Train-time scaling}（更大的模型、更多的数据）
+    $\rightarrow$ 更强的 base capability；
+  \item \textbf{Test-time scaling}（更多的采样、更深的搜索、更长的推理链）
+    $\rightarrow$ 在已有能力基础上更充分地利用；
+  \item \textbf{Post-training}（RL, PRM, GRPO）
+    $\rightarrow$ 连接两者的桥梁 --- 通过 post-training 习得的推理策略
+    决定了 test-time compute 的利用效率。
+\end{itemize}
+
+\subsubsection{开放问题}
+
+\begin{openproblembox}
+\textbf{开放问题 1: Process Supervision 的自动化与泛化}\\
+PRM 在数学推理领域已证明了其价值，
+但如何将 process supervision 扩展到\textbf{不可形式化验证的领域}
+（如科学推理、法律推理、创意写作中的逻辑一致性）
+仍然是一个根本性的开放问题。
+当没有 ground truth 答案可供 completer model 验证时，
+如何自动生成可靠的 step-level reward？
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{开放问题 2: Reasoning 的 Scaling Ceiling}\\
+DeepSeek-V3.2 \cite{deepseek2025v32} 在 IMO 级别数学竞赛中达到金牌水平，
+o3 在 AIME 2025 上达到 88.9\% \cite{openai2025o3}，
+表明传统竞赛基准正在迅速饱和。
+但这是否意味着推理能力已经``解决''？
+在需要创造性洞察（而非标准解法）的开放式数学问题、
+多步科学推导、以及跨领域推理等方面，
+当前模型的 ceiling 在哪里？
+更关键的是，RLVR 范式中存在一个``makes models faster not smarter''的争论 ---
+DAPO 等方法显著提升了模型在已知任务类型上的 pass rate，
+但是否真正拓展了模型的推理能力边界？
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{开放问题 3: Test-Time Compute 的效率边界}\\
+当前的 test-time compute scaling 方法
+（无论是 parallel sampling 还是 sequential revision）
+的效率增益呈对数递减。
+是否存在从根本上更高效的 test-time compute 利用方式？
+例如，模型能否学会\textbf{自适应地}分配推理预算 ---
+对简单问题快速作答，对困难问题投入大量思考 ---
+而不需要外部的 difficulty estimator？
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{开放问题 4: RL for Reasoning 的理论理解}\\
+DeepSeek-R1-Zero 中观察到的推理涌现现象
+（self-reflection、aha moment、推理链自动延长）
+缺乏理论解释。
+为什么简单的 binary reward + GRPO 就能催生如此复杂的推理行为？
+这种涌现是否需要特定的 pre-training 条件（如训练数据中包含足够的推理语料）？
+是否可以在更小的模型上可靠地复现？
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{开放问题 5: 推理可靠性与安全性}\\
+长链推理引入了新的安全挑战：
+hidden CoT 可能包含不当内容（如 ``reasoning'' about harmful topics），
+推理链的不透明性使得 audit 变得困难
+（\crossref{3}{sec:t3-safety}），
+而 test-time compute 的无限扩展可能导致拒绝服务（DoS）攻击。
+如何在保持推理能力的同时确保推理过程的安全性和可审计性？
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{开放问题 6: Thinking Mode Fusion 的最优策略}\\
+DeepSeek V3.1、Qwen3 \cite{yang2025qwen3} 等模型已经实现了
+推理模式与非推理模式在单一模型中的融合。
+但当前的融合策略仍然粗糙 ---
+模型何时应该``深度思考''、何时应该``快速回答''的决策边界尚不清晰。
+更根本的问题是：
+如何在 post-training 阶段优化这一模式切换策略，
+使模型在推理深度与响应延迟之间达到 Pareto 最优？
+Qwen3 的四阶段流水线提供了一种显式的训练方案，
+但该方案中第三阶段的 thinking mode fusion 的最优混合比例和训练策略
+仍缺乏系统性的研究。
+\end{openproblembox}
+
+\subsection{小结}
+
+Thread~4 的演化轨迹清晰地展现了 post-training 领域的一个核心范式转变：
+从 \textbf{inference-time prompting}（CoT、Self-Consistency）
+到 \textbf{training-time internalization}（STaR、GRPO、R1），
+到 \textbf{两者的深度融合}（test-time compute scaling with RL-trained models），
+再到 \textbf{推理作为默认模式}（thinking models 成为行业标准，2025--2026）。
+
+\evolution{CoT Prompting (2022): 推理作为 prompt 技巧}%
+{Thinking Models (2025--2026): 推理作为模型默认模式}%
+{RLVR + Thinking Mode Fusion}
+
+\noindent
+几个核心启示：
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{数据结构决定一切}：
+    从 ORM 到 PRM 的转变本质上是对推理验证``数据结构''的升级 ---
+    从 sequence-level label 到 step-level label。
+    正如 Linus 所言，好的程序员关注的是数据结构而非代码。
+
+  \item \textbf{简单方法 + 充分计算 > 复杂方法}：
+    GRPO 去除了 PPO 中的 value model，
+    R1-Zero 使用最简单的 binary reward，
+    s1 仅用 1,000 条数据 + budget forcing。
+    在推理领域，\textbf{简洁的设计 + 充分的 train/test-time compute}
+    一再击败复杂的工程方案。
+
+  \item \textbf{跨线程思想流动的典范}：
+    Thread~4 可能是所有线程中与其他线程交互最密集的：
+    reward modeling 来自 Thread~2，safety 考量来自 Thread~3，
+    downstream 应用流向 Thread~6，efficiency 需求来自 Thread~7。
+    推理能力的提升是整个 post-training 生态系统协同演化的结果。
+\end{enumerate}

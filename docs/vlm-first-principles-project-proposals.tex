@@ -1,0 +1,555 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[UTF8,fontset=fandol]{ctex}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{tcolorbox}
+\usepackage{makecell}
+
+\definecolor{propOne}{HTML}{C0392B}
+\definecolor{propTwo}{HTML}{2980B9}
+\definecolor{propThree}{HTML}{16A085}
+\definecolor{propFour}{HTML}{8E44AD}
+\definecolor{propFive}{HTML}{D35400}
+
+\newtcolorbox{proposalbox}[2][]{%
+  colback=#2!5,colframe=#2!70,boxrule=0.5pt,
+  fonttitle=\bfseries,title={#1},
+  left=6pt,right=6pt,top=4pt,bottom=4pt
+}
+
+\newtcolorbox{insightbox}[1][]{%
+  colback=yellow!5,colframe=yellow!60!black,boxrule=0.4pt,
+  fonttitle=\bfseries,title={Core Insight},#1
+}
+
+\newtcolorbox{whybox}[1][]{%
+  colback=gray!5,colframe=gray!60,boxrule=0.4pt,
+  fonttitle=\bfseries,title={First-Principles Chain},#1
+}
+
+\newtcolorbox{expbox}[1][]{%
+  colback=blue!3,colframe=blue!40,boxrule=0.3pt,
+  fonttitle=\bfseries,title={Minimal Viable Paper},#1
+}
+
+\newtcolorbox{riskbox}[1][]{%
+  colback=red!3,colframe=red!40,boxrule=0.3pt,
+  fonttitle=\bfseries,title={Main Risk and Mitigation},#1
+}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black!70,
+  citecolor=blue!60!black,
+  urlcolor=blue!70!black,
+}
+
+\title{\textbf{VLM 多模态 Post-Training Project Proposals}\\
+\large{从第一性原理出发的高影响力后训练方向}\\[6pt]
+\normalsize{Strictly Post-Training, Not General VLM Capability Proposals}}
+
+\author{Jinhong Lin}
+\date{March 2026}
+
+\begin{document}
+
+\maketitle
+
+\section*{先划清边界}
+
+你刚才指出的问题是对的：
+如果 proposal 讲的是新 backbone、新视觉中间层、新 video world model 架构，
+那已经开始滑向 ``general VLM research''，
+而不是严格意义上的 ``post-training''。
+
+所以这份改写版先把边界划清：
+
+\begin{insightbox}
+本文把 \textbf{post-training} 严格限定为 base VLM 已经存在之后的干预手段：
+\begin{enumerate}[leftmargin=2em]
+  \item instruction tuning / rejection sampling
+  \item preference data construction
+  \item DPO / RLHF / RLAIF / RLVR
+  \item process reward model / critic / verifier
+  \item self-improvement loop
+  \item data selection / curriculum / mixture design
+\end{enumerate}
+
+本文\textbf{不}把下面这些作为主角：
+\begin{enumerate}[leftmargin=2em]
+  \item 新的视觉 encoder
+  \item 新的多模态 backbone
+  \item 新的 3D 或 world-model architecture
+  \item 大规模 pretraining corpus 设计
+\end{enumerate}
+\end{insightbox}
+
+在这个定义下，真正值得做的 high-impact proposal，
+应该回答的是：
+\textbf{给定一个已经存在的 VLM，我们在后训练阶段到底该喂它什么数据、用什么监督、优化什么 reward、训练什么 verifier、按什么 curriculum 继续塑形？}
+
+\section*{为什么 VLM post-training 比 LLM post-training 更难}
+
+\begin{whybox}
+\textbf{Why} can't we just copy text-only post-training recipes into VLMs?\\
+$\rightarrow$ 因为 text-only 模型的监督几乎总是围绕``输出像不像好答案''展开，
+但 VLM 的关键问题是``答案是否真的依赖视觉证据''。\\[3pt]
+\textbf{Why} is answer quality alone insufficient?\\
+$\rightarrow$ 因为很多 multimodal 样本即使不看图，模型也能靠语言先验、数据偏置或模板猜对一部分。\\[3pt]
+\textbf{Why} is preference learning especially fragile here?\\
+$\rightarrow$ 因为 chosen / rejected 对往往只说明``哪个答案更好''，
+却不说明``哪个视觉因素决定了好坏''。\\[3pt]
+\textbf{Why} are humans not enough to fix this?\\
+$\rightarrow$ 因为多模态偏好、逐步推理、局部 grounding、局部编辑后的偏好变化，人工标注成本非常高。\\[3pt]
+\textbf{Root cause:}\\
+当前 VLM post-training 最大的问题不是 optimizer，
+而是 \textbf{supervision target 不够视觉化，reward 不够条件化，data mixture 不够筛选化}。
+\end{whybox}
+
+\subsection*{一页 Shortlist}
+
+\renewcommand{\arraystretch}{1.25}
+\begin{center}
+\begin{tabular}{>{\raggedright\arraybackslash}p{3.2cm} >{\raggedright\arraybackslash}p{4.8cm} >{\raggedright\arraybackslash}p{4.6cm}}
+\toprule
+\textbf{方向} & \textbf{Root Cause} & \textbf{真正的 Post-Training 杠杆} \\
+\midrule
+Visual Commitment Alignment & reward 只看答案，不看证据来源 & SFT format + preference pairs + grounded RL reward \\
+Multimodal Process Supervision & outcome label 无法定位视觉推理错在哪一步 & PRM / critic / verifier + best-of-N + RL \\
+Counterfactual Preference Data Engine & 偏好数据没编码``哪个视觉因素重要'' & edited pairs/triples + DPO/RL on directional preferences \\
+Self-Improving AI Feedback Loop & 人类多模态反馈太贵，规模上不去 & critic-generated feedback + synthetic revision + RLAIF \\
+Stage-Aware Data Selection \& Curriculum & 训练混合里太多 text-solvable 或高噪声样本 & sample scoring + filtering + stage-wise post-training \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\newpage
+\section{Proposal 1: Visual Commitment Alignment}
+
+\begin{proposalbox}[让后训练奖励``先看图，再回答''而不是``答对就行'']{propOne}
+\textbf{一句话摘要：}
+VLM post-training 最大的错配是 reward modality-blind。
+如果 reward 只看最终答案，
+模型就会自然学会更依赖语言 shortcut，
+而不是更依赖视觉证据。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} do VLMs often become more language-prior driven after preference optimization or RL?\\
+$\rightarrow$ 因为 reward 只关心最终答案是否更好，不关心模型到底有没有真的用图。\\[3pt]
+\textbf{Why} is this not a minor issue?\\
+$\rightarrow$ 因为 language backbone 的先验本来就比视觉分支更强，
+所以在 reward 最大化时，shortcut 是阻力最小路径。\\[3pt]
+\textbf{Why} don't standard preference pairs solve it?\\
+$\rightarrow$ 因为 standard chosen / rejected 对只编码``这个回答更优''，
+没有编码``它之所以更优，是因为它更 grounded''。\\[3pt]
+\textbf{Root cause:}\\
+当前 post-training objective 奖励的是回答质量，
+而不是 \textbf{evidence-first answering policy}。
+\end{whybox}
+
+\subsection{为什么这是一条真正的 post-training 方向}
+
+这条线的核心干预不是改 backbone，
+而是改后训练阶段的：
+\begin{enumerate}[leftmargin=2em]
+  \item 输出格式
+  \item preference 数据构造
+  \item reward design
+\end{enumerate}
+
+也就是把当前 ``answer-only alignment''
+改成 ``observation-first alignment''。
+
+\subsection{方法草案}
+
+\begin{enumerate}[leftmargin=2em]
+  \item 在 instruction tuning 阶段引入固定回答格式：
+    先输出 \texttt{visual commitments}，再输出结论。
+  \item 用工具、teacher model 或人工小规模标注，构造 grounded 与 ungrounded 的 preference pairs。
+  \item 在 DPO 或 RL 阶段把 reward 分成三部分：
+    answer reward、commitment fidelity reward、commitment-to-answer consistency reward。
+  \item 专门加入语言先验与视觉证据冲突的 hard set，
+    让``不看图也能蒙对''变得不可持续。
+\end{enumerate}
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=2em]
+  \item 第一篇 paper 不需要动 backbone，只动 post-training recipe。
+  \item 比较四种设置：SFT、standard DPO、mDPO-style conditional preference、visual commitment alignment。
+  \item 不只汇报 accuracy，还汇报 grounding error、counterfactual sensitivity、answer-right-but-for-wrong-reason 的比例。
+\end{enumerate}
+\end{expbox}
+
+\subsection{为什么 high impact}
+
+这是最底层的 post-training objective 问题。
+只要 reward 仍然是模态盲的，
+很多后续方法都只是局部修补。
+如果这条线成立，它会直接影响 multimodal DPO、RLHF-V、RLAIF-V 和 reasoning VLM 的训练范式。
+
+\begin{riskbox}
+\textbf{Main risk:}
+模型可能学会形式化地``先说几句观察''，但并没有真的依赖这些观察。\\
+\textbf{Mitigation:}
+核心评测必须是 counterfactual：
+同一问题、同一语言上下文，只改图像局部。
+如果 commitments 不跟着变，就直接说明对齐是假的。
+\end{riskbox}
+
+\newpage
+\section{Proposal 2: Multimodal Process Supervision}
+
+\begin{proposalbox}[把 VLM 后训练从 outcome-only 推到 step-aware]{propTwo}
+\textbf{一句话摘要：}
+如果只给最终答案对错，
+VLM post-training 永远学不会``视觉推理到底是哪一步错了''。
+真正的机会在于 process reward model、critic 和 verifier。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} is outcome supervision weak for multimodal reasoning?\\
+$\rightarrow$ 因为最终答错时，我们不知道是 object recognition 错、局部读取错、关系推理错，还是纯语言推理错。\\[3pt]
+\textbf{Why} is this especially damaging in VLMs?\\
+$\rightarrow$ 因为视觉错误一旦被语言总结覆盖，后续链条会看起来很流畅，却建立在错误视觉前提上。\\[3pt]
+\textbf{Why} can't a text-only PRM solve this?\\
+$\rightarrow$ 因为它最多判断``文字步骤像不像合理推理''，
+却不一定能判断``这一步有没有违背图像事实''。\\[3pt]
+\textbf{Root cause:}\\
+当前后训练缺的是 \textbf{visual-grounded process supervision}，
+而不只是更多 outcome labels。
+\end{whybox}
+
+\subsection{为什么这是一条真正的 post-training 方向}
+
+这条线依赖的是后训练阶段新增的监督器：
+\begin{enumerate}[leftmargin=2em]
+  \item process reward model
+  \item multimodal critic
+  \item verifier-guided best-of-N 或 RL
+\end{enumerate}
+
+它不要求换模型架构，
+而是要求换 ``训练时谁来打分、怎么打分''。
+
+\subsection{方法草案}
+
+\begin{enumerate}[leftmargin=2em]
+  \item 构造 step-level multimodal trajectories，
+    每一步都带局部 grounding 或局部验证信号。
+  \item 训练 visual PRM，判断某一步是否与图像证据一致。
+  \item 用 critic 进行 rejection sampling、best-of-N reranking，
+    再进一步进入 RL。
+  \item 把 step reward 分解为 perception correctness、relation correctness、reasoning consistency 三类。
+\end{enumerate}
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=2em]
+  \item 第一篇 paper 可只做 PRM + best-of-N，不必直接做 full RL。
+  \item 比较 outcome reward、text PRM、multimodal PRM 三者。
+  \item 在 counting、spatial relation、diagram reasoning 上先证明 step reward 的价值，再扩展到更复杂 benchmark。
+\end{enumerate}
+\end{expbox}
+
+\subsection{为什么 high impact}
+
+2025 年以后 reasoning VLM 的主战场一定会越来越像 text-side 的 PRM / verifier 之战。
+如果谁先把 ``visual PRM'' 这件事做对，
+谁就更有机会定义下一代 multimodal reasoning post-training pipeline。
+
+\begin{riskbox}
+\textbf{Main risk:}
+critic 最后学到的是文本风格打分器，而不是视觉过程监督器。\\
+\textbf{Mitigation:}
+训练 critic 时必须加入图像编辑、区域打乱、局部遮挡等 counterfactual step labels，
+逼它学会对视觉变化敏感。
+\end{riskbox}
+
+\newpage
+\section{Proposal 3: Counterfactual Preference Data Engine}
+
+\begin{proposalbox}[让偏好数据显式编码``哪个视觉因素决定答案'' ]{propThree}
+\textbf{一句话摘要：}
+当前很多 multimodal preference data 的问题不是数量不够，
+而是 chosen / rejected 对没有说明：
+到底是哪一个视觉因素让答案应该变或不该变。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} can preference optimization in VLMs become effectively unconditional?\\
+$\rightarrow$ 因为 chosen / rejected 对往往只比较回答质量，
+而没有把图像变化和偏好变化绑在一起。\\[3pt]
+\textbf{Why} is that fatal?\\
+$\rightarrow$ 因为模型可以学到一个全局偏好风格，
+却不学到``当图像局部变化时，答案应该怎样跟着变''。\\[3pt]
+\textbf{Why} is static instruction data insufficient here?\\
+$\rightarrow$ 因为静态样本只能告诉模型世界长什么样，
+不能告诉模型``如果把这个因素单独改掉，答案会不会跟着变''。\\[3pt]
+\textbf{Root cause:}\\
+当前 preference data 没有把 \textbf{visual causality} 编码进 chosen / rejected 结构里。
+\end{whybox}
+
+\subsection{为什么这是一条真正的 post-training 方向}
+
+这条线本质上是一个 \textbf{post-training data engine} 方向：
+不改 backbone，不改 pretraining，
+而是专门生产更有条件信息的 preference tuples，
+供 DPO / mDPO / RL 使用。
+
+\subsection{方法草案}
+
+\begin{enumerate}[leftmargin=2em]
+  \item 从原图或原视频出发，构造局部编辑、对象替换、计数变化、遮挡变化、时序交换等 intervention。
+  \item 生成三元组或四元组：
+    原样本、干预样本、chosen response、rejected response。
+  \item 训练两个目标：
+    \texttt{directional preference} 和 \texttt{invariance preference}。
+  \item 与 standard DPO 相比，明确优化 ``视觉变化 $\rightarrow$ 偏好变化'' 的条件依赖。
+\end{enumerate}
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=2em]
+  \item 第一篇 paper 可只做 image QA，不必一开始碰 video。
+  \item 先从最可控的计数、空间关系、属性变化入手。
+  \item 对比 random preference pairs、standard DPO pairs、counterfactual preference pairs。
+\end{enumerate}
+\end{expbox}
+
+\subsection{为什么 high impact}
+
+这条线的价值在于它不是又一个优化器小改动，
+而是在重新定义 multimodal preference data 应该长什么样。
+如果成立，它会直接影响 DPO、RLAIF、critic training 甚至 benchmark 设计。
+
+\begin{riskbox}
+\textbf{Main risk:}
+如果干预过于合成，模型可能只在 edited images 上提升。\\
+\textbf{Mitigation:}
+三种数据一起做：程序化编辑、真实图像编辑、人工构造 hard set。
+只有三者都提升，才能说明学到的是可迁移的条件偏好。
+\end{riskbox}
+
+\newpage
+\section{Proposal 4: Self-Improving AI Feedback Loop}
+
+\begin{proposalbox}[把多模态后训练的人类反馈瓶颈换成 AI feedback engine]{propFour}
+\textbf{一句话摘要：}
+人类多模态反馈太贵，规模上不去。
+但很多视觉错误其实是可自检、可复核、可自动纠正的。
+真正值得做的是一个能持续产出 revision data 的 self-improving post-training loop。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} is multimodal RLHF expensive?\\
+$\rightarrow$ 因为相比 text-only，评判一个 VLM 回答是否真的 grounded，
+往往需要人同时检查图像、局部区域、推理和最终答案。\\[3pt]
+\textbf{Why} do we still have hope without large-scale human labels?\\
+$\rightarrow$ 因为许多 multimodal 错误其实可以被第二个 critic、区域回看、OCR、检测器或程序验证器发现。\\[3pt]
+\textbf{Why} is this a post-training opportunity rather than a model-design issue?\\
+$\rightarrow$ 因为你真正缺的不是新 backbone，
+而是一个能持续生产 revised trajectories、preference pairs 和 rejection samples 的反馈引擎。\\[3pt]
+\textbf{Root cause:}\\
+当前 VLM 后训练最稀缺的不是模型参数，
+而是 \textbf{scalable multimodal feedback}。
+\end{whybox}
+
+\subsection{为什么这是一条真正的 post-training 方向}
+
+这条线完全围绕后训练数据闭环展开：
+\begin{enumerate}[leftmargin=2em]
+  \item draft answer
+  \item critic diagnosis
+  \item targeted re-check
+  \item revised answer
+  \item synthetic preference / revision data
+  \item 再训练 policy
+\end{enumerate}
+
+\subsection{方法草案}
+
+\begin{enumerate}[leftmargin=2em]
+  \item 让 base VLM 先回答。
+  \item 让 multimodal critic 指出最可疑的句子、对象、区域或 step。
+  \item 调用回看、OCR、detector、captioner 或第二模型做 targeted verification。
+  \item 产出 critique、rewrite、chosen/rejected pair 和 revised CoT。
+  \item 用这些 synthetic signals 做 SFT、RLAIF 或 DPO，形成多轮自举。
+\end{enumerate}
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=2em]
+  \item 第一篇 paper 不用追求 fully autonomous loop，
+    先证明 AI feedback 产生的数据能否替代一部分人工 preference data。
+  \item 比较 human-only、AI-only、human+AI 三种后训练管线。
+  \item 重点分析：哪类错误最适合 AI feedback，哪类仍需人工。
+\end{enumerate}
+\end{expbox}
+
+\subsection{为什么 high impact}
+
+如果这条线成立，multimodal post-training 的瓶颈会从 ``标不出足够多的人类偏好''
+转向 ``能否设计更好的 feedback engine''。
+这对开源社区尤其关键，因为它决定了 open multimodal alignment 能不能扩起来。
+
+\begin{riskbox}
+\textbf{Main risk:}
+critic 和 policy 可能一起共谋，产生自洽但错误的 synthetic feedback。\\
+\textbf{Mitigation:}
+引入异构验证器、周期性人工审计，以及 counterfactual hard set。
+关键不是让 AI feedback 完全替代人，而是让它在可验证子任务上先跑通。
+\end{riskbox}
+
+\newpage
+\section{Proposal 5: Stage-Aware Data Selection \& Curriculum}
+
+\begin{proposalbox}[先解决``喂什么数据''，再谈``怎么优化'' ]{propFive}
+\textbf{一句话摘要：}
+很多 VLM 后训练 recipe 不稳定，不是因为 optimizer 不行，
+而是因为训练混合里混着太多 text-solvable、视觉冗余、或高噪声样本。
+如果 sample selection 不做，后面再强的 DPO 或 RL 都会被带偏。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} do many multimodal post-training pipelines saturate quickly?\\
+$\rightarrow$ 因为大量样本其实不要求真正的视觉依赖，
+模型很快就用语言 shortcut 学完了。\\[3pt]
+\textbf{Why} is more data not an automatic fix?\\
+$\rightarrow$ 因为更多数据里往往也包含更多 text-solvable 样本和噪声偏好，
+导致训练信号被稀释。\\[3pt]
+\textbf{Why} is a single mixed-stage recipe suboptimal?\\
+$\rightarrow$ 因为 perception grounding、local compositional reasoning、counterfactual robustness、abstention calibration
+这几类能力的监督难度和目标完全不同。\\[3pt]
+\textbf{Root cause:}\\
+当前 VLM 后训练仍然缺少 \textbf{sample valuation} 与 \textbf{stage-wise curriculum}。
+\end{whybox}
+
+\subsection{为什么这是一条真正的 post-training 方向}
+
+这条线不发明新模型，
+而是直接优化后训练 pipeline 的两个最核心杠杆：
+\begin{enumerate}[leftmargin=2em]
+  \item 哪些样本值得喂
+  \item 这些样本应该按什么顺序喂
+\end{enumerate}
+
+\subsection{方法草案}
+
+\begin{enumerate}[leftmargin=2em]
+  \item 为样本打三个分：
+    visual dependence score、perception difficulty、reasoning difficulty。
+  \item 过滤掉明显 text-solvable 或噪声过高的样本。
+  \item 分阶段后训练：
+    grounding-first，then local reasoning，then counterfactual / compositional data，最后再做 preference / RL。
+  \item 在每一阶段单独设计 validation set，
+    防止模型靠某一类 shortcut 在总分上掩盖退化。
+\end{enumerate}
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=2em]
+  \item 第一篇 paper 不需要新模型，只需证明：
+    在相同 token budget 下，selection + curriculum 比 random mixture 更有效。
+  \item 对比三类 recipe：random mix、filtered mix、stage-aware curriculum。
+  \item 重点汇报 same-compute gain，而不是绝对堆料后的 gain。
+\end{enumerate}
+\end{expbox}
+
+\subsection{为什么 high impact}
+
+这是最容易被低估的一条线。
+因为一旦 data mixture 本身是错的，
+后面的 DPO、RLAIF、PRM、critic 都是在脏信号上优化。
+如果这条线做对，它会成为其他所有 post-training 方法的底座。
+
+\begin{riskbox}
+\textbf{Main risk:}
+样本打分 proxy 可能不准，导致把真正有价值的 hard examples 错删。\\
+\textbf{Mitigation:}
+先用小规模人工审计集合校准 scoring proxy，
+再把 filtering 做成 soft weighting，而不是一刀切 hard filtering。
+\end{riskbox}
+
+\newpage
+\section*{我会优先押注哪两条}
+
+\textbf{如果你要最像 frontier post-training 的两条：}
+\begin{enumerate}[leftmargin=2em]
+  \item Visual Commitment Alignment
+  \item Multimodal Process Supervision
+\end{enumerate}
+
+因为这两条最直接对应当前 multimodal DPO / RL / reasoning 的核心瓶颈：
+\textbf{reward 到底该奖励什么，verifier 到底该检查什么。}
+
+\textbf{如果你要最稳、最容易先做出 paper 的两条：}
+\begin{enumerate}[leftmargin=2em]
+  \item Counterfactual Preference Data Engine
+  \item Stage-Aware Data Selection \& Curriculum
+\end{enumerate}
+
+因为这两条主要动的是 data engine 和 training recipe，
+实现门槛通常低于 full RL，但同样非常 post-training。
+
+\section*{近期论文线索}
+
+下面这些工作不是要重复做，
+而是用来说明：问题已经暴露出来，但后训练解法还远没收敛。
+
+\begin{enumerate}[leftmargin=2em]
+  \item \href{https://arxiv.org/abs/2312.00849}{RLHF-V}：
+    说明多模态 hallucination 与细粒度 correction feedback 的重要性。
+  \item \href{https://arxiv.org/abs/2405.17220}{RLAIF-V}：
+    说明 open AI feedback 在 VLM alignment 里是现实方向。
+  \item \href{https://arxiv.org/abs/2312.10665}{Silkie}：
+    说明 preference distillation 在 VLM 中已经可行，但监督粒度仍然偏粗。
+  \item \href{https://arxiv.org/abs/2406.11839}{mDPO}：
+    直接指出在 MLLM 中必须更认真处理 conditioned preference，而不是照搬 text-only DPO。
+  \item \href{https://arxiv.org/abs/2403.08730}{Bootstrapped Preference Optimization}：
+    指出 VLM 可能被 pretrained bias 主导，偏好优化并不天然等于更强视觉依赖。
+  \item \href{https://arxiv.org/abs/2404.14233}{Fine-Grained AI Feedback for MLLMs}：
+    说明 AI feedback 可以比粗粒度偏好更有信息量。
+  \item \href{https://arxiv.org/abs/2410.02712}{LLaVA-Critic}：
+    说明 multimodal evaluator / critic 正在成为独立角色。
+  \item \href{https://arxiv.org/abs/2503.10291}{VisualPRM}：
+    说明 process reward model 已经进入多模态 reasoning 主线。
+  \item \href{https://arxiv.org/abs/2505.23941}{Vision Language Models are Biased}：
+    说明 VLM 对 language/context bias 的依赖是真实且结构性的。
+  \item \href{https://arxiv.org/abs/2505.19406}{Unveiling the Compositional Ability Gap in Vision-Language Reasoning Model}：
+    说明即使推理训练增强了能力，跨模态组合泛化仍有明显缺口。
+\end{enumerate}
+
+\section*{结论}
+
+如果严格从 post-training 的角度看，
+未来一到两年最值得做的 VLM proposal，
+不是再造一个更复杂的 backbone，
+而是回答五个更具体的后训练问题：
+
+\begin{enumerate}[leftmargin=2em]
+  \item 怎样让 reward 奖励视觉承诺，而不是只奖励最终答案？
+  \item 怎样让 PRM / critic 真正检查视觉过程，而不是只检查文字表面？
+  \item 怎样把反事实视觉变化编码进 preference data？
+  \item 怎样把可扩展的 AI feedback 变成持续产数的数据引擎？
+  \item 怎样在同样算力下，用 selection 和 curriculum 把后训练 token 用得更值？
+\end{enumerate}
+
+这五个问题都属于严格意义上的 post-training。
+如果真正打穿其中一条，就已经足够成为 high-impact proposal。
+
+\end{document}

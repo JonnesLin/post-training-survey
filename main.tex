@@ -1,0 +1,65 @@
+\documentclass[12pt,a4paper]{article}
+
+\input{preamble}
+
+\title{\textbf{LLM/VLM Post-Training: A Survey Through the Lens of Evolution}\\
+\large{从演化视角审视大语言模型与视觉语言模型的后训练}}
+
+\author{Jinhong Lin}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+本文从演化视角系统地梳理了大语言模型（LLM）和视觉语言模型（VLM）post-training 领域的发展脉络。
+不同于传统 survey 按方法分类的组织方式，本文将该领域划分为七条问题驱动的演化线程（thread），
+在每条线程内追踪"问题 $\rightarrow$ 解决方案 $\rightarrow$ 新问题 $\rightarrow$ 改进方案"的发展链条，
+并通过跨线程的交叉引用揭示不同研究方向之间的思想流动。
+七条线程分别是：
+(1) Instruction Following \& SFT，
+(2) Reward Modeling \& Preference Optimization，
+(3) Safety \& Alignment，
+(4) Reasoning \& Verification，
+(5) Multimodal Post-training，
+(6) Tool Use \& Agentic Capabilities，
+(7) Efficiency \& Data Engineering。
+本文对每条线程中的 landmark 论文进行深入分析，同时通过宏观趋势分析揭示 post-training 领域的整体演变方向。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% === Chapter 0: Introduction ===
+\input{chapters/00-introduction}
+
+% === Thread 1: Instruction Following & SFT ===
+\input{chapters/01-sft}
+
+% === Thread 2: Reward Modeling & Preference Optimization ===
+\input{chapters/02-preference}
+
+% === Thread 3: Safety & Alignment ===
+\input{chapters/03-safety}
+
+% === Thread 4: Reasoning & Verification ===
+\input{chapters/04-reasoning}
+
+% === Thread 5: Multimodal Post-training ===
+\input{chapters/05-multimodal}
+
+% === Thread 6: Tool Use & Agentic Capabilities ===
+\input{chapters/06-agentic}
+
+% === Thread 7: Efficiency & Data Engineering ===
+\input{chapters/07-efficiency}
+
+% === Conclusion ===
+\input{chapters/08-conclusion}
+
+% === Bibliography ===
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

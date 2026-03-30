@@ -1,0 +1,848 @@
+% === Thread 1: Instruction Following & SFT ===
+\section{Thread 1: Instruction Following \& SFT}
+\label{sec:sft}
+
+\begin{quote}
+\textit{Core Question: 如何让 pre-trained language model 学会理解并遵循人类指令？}
+\end{quote}
+
+Instruction following 是 post-training 最早且最基本的目标。
+一个仅经过 pre-training 的 language model 本质上是一个 next-token predictor：
+给定 prompt ``What is the capital of France?''，它可能续写 ``What is the capital of Germany?''，
+而非回答 ``Paris''。
+Supervised Fine-Tuning（SFT）通过在 (instruction, response) 数据对上进行有监督训练，
+教会模型理解指令意图并生成符合预期格式的输出。
+
+本章追踪 SFT 领域从问题提出到当前 open problems 的完整演化链条。
+我们将看到该领域如何沿着两条核心轴线演进：
+\textbf{数据维度}（从人工标注到合成生成，从追求数量到重视质量）
+和\textbf{任务维度}（从单一任务到 multi-task scaling，从通用能力到 domain-specific specialization）。
+
+\evolution{Pre-trained LM 只会续写，不会回答}{Instruction-tuned LM 理解指令意图}{SFT on (instruction, response) pairs}
+
+
+% ========================================================
+\subsection{问题起源：为什么预训练模型不够？}
+\label{sec:sft:origin}
+
+Pre-training 的目标函数——无论是 autoregressive language modeling 还是 masked language modeling——
+与用户的实际使用方式之间存在根本性的 misalignment。
+这一问题可以从三个层面理解：
+
+\begin{problembox}
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{目标函数 mismatch}：
+    Pre-training 优化的是 $\mathcal{L}_{\text{PT}} = -\sum_t \log P(x_t \mid x_{<t})$，
+    即对 training corpus 中所有 token 的预测概率取对数似然。
+    这一目标对所有 token 一视同仁，不区分指令理解、知识回忆和格式遵循。
+    但用户需要的是：给定一个 instruction $x$，模型应生成一个 helpful、accurate 且 safe 的 response $y$。
+
+  \item \textbf{行为模式 mismatch}：
+    Pre-trained model 学到的是 web-scale corpus 中最常见的文本分布。
+    这意味着它会模仿训练数据中的各种风格——新闻报道、社交媒体帖子、代码注释——
+    而非专注于作为 AI assistant 的对话模式。
+    换言之，pre-trained model 知道很多东西，但不知道如何以一个 assistant 的身份表达。
+
+  \item \textbf{格式 mismatch}：
+    Pre-trained model 缺乏对输出格式的认知。
+    当用户要求 ``List 5 benefits of exercise''，模型可能生成一篇散文而非编号列表；
+    当用户提问 ``Is X true?''，模型可能继续生成更多问题而非给出回答。
+\end{enumerate}
+\end{problembox}
+
+\noindent
+Instruction tuning 的核心思想是通过少量但高质量的 (instruction, response) 数据
+对模型进行 supervised fine-tuning，使其学会：
+(1) 从 instruction 中提取用户意图，
+(2) 调用 pre-training 阶段习得的知识来回应，
+(3) 以符合预期的格式和风格组织输出。
+
+\begin{solutionbox}
+给定 instruction-response 数据集 $\mathcal{D} = \{(x_i, y_i)\}_{i=1}^N$，
+SFT 的训练目标为：
+\[
+  \mathcal{L}_{\text{SFT}} = -\sum_{i=1}^{N} \sum_{t=1}^{|y_i|}
+    \log P_\theta(y_{i,t} \mid x_i, y_{i,<t})
+\]
+注意 loss 只在 response tokens $y$ 上计算（instruction tokens $x$ 被 mask），
+这确保模型学习的是"如何回应指令"而非"如何生成指令"。
+\end{solutionbox}
+
+
+值得注意的是，instruction tuning 并非适配 pre-trained LM 的唯一路径。
+Prompt tuning \citep{lester2021prompt} 和 Prefix-Tuning \citep{li2021prefix}
+采用了另一种思路——冻结模型参数，仅优化输入端的连续 prompt embedding。
+这类 parameter-efficient 方法在特定任务上表现优异，
+但难以赋予模型通用的 instruction following 能力。
+FLAN 的后续实验（Fig.~10）甚至表明，instruction tuning 可以\emph{促进}
+后续的 prompt tuning 效果，暗示两者并非竞争关系而是互补关系。
+
+% ========================================================
+\subsection{奠基方法：早期探索与范式确立}
+\label{sec:sft:foundation}
+
+2021--2022 年间，三项独立且几乎同时的工作从不同角度证明了
+instruction tuning 的有效性，奠定了该领域的基础范式。
+
+
+% --- FLAN ---
+\subsubsection{FLAN: Instruction Tuning for Zero-Shot Generalization}
+\label{sec:sft:flan}
+
+\landmark{wei2022flan}
+FLAN（Finetuned Language Net）是最早系统性地验证
+instruction tuning 可以提升模型 zero-shot 泛化能力的工作之一。
+
+\paragraph{核心设计。}
+FLAN 的实验基于 LaMDA-PT（137B 参数的 decoder-only Transformer），
+使用 62 个 NLP 数据集，按任务类型组织为 10 个 cluster
+（如 Natural Language Inference, Sentiment Analysis, Reading Comprehension 等）。
+对于每个数据集，作者手工编写 10 个 instruction template，将传统 NLP 样本转化为
+自然语言指令格式。
+例如，一个 NLI 样本 (\texttt{premise}, \texttt{hypothesis}, \texttt{label})
+被转化为 ``Premise: [P]. Hypothesis: [H]. Does the premise entail the hypothesis?''。
+
+\paragraph{关键实验发现。}
+FLAN 的实验设计极为精巧——在评估某个 cluster 的 zero-shot 性能时，
+训练数据中\textbf{排除}该 cluster 的所有任务，确保评测的是真正的跨任务泛化能力：
+
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Zero-shot FLAN 超越 zero-shot GPT-3}：
+    在 25 个评测任务中的大多数上，FLAN 的 zero-shot 性能优于 GPT-3 的 zero-shot 性能，
+    甚至在部分任务上接近或超越 GPT-3 的 few-shot 性能。
+
+  \item \textbf{Task cluster 数量的 scaling 效应}：
+    随着训练中包含的 task cluster 数量从 1 增加到 7，
+    held-out cluster 上的平均性能从 49.9\% 持续提升至 63.5\%，
+    呈现近乎线性的增长趋势。
+    这证明了 instruction tuning 的泛化能力随任务多样性单调递增。
+
+  \item \textbf{模型规模的阈值效应}：
+    Instruction tuning 对大模型（$\geq$ 100B 参数）有显著提升，
+    但对小模型（$\leq$ 8B 参数）反而可能造成性能下降。
+    作者推测这是因为小模型的容量不足以同时学习多个任务的 instruction following，
+    导致 catastrophic forgetting。
+
+  \item \textbf{Instruction 的关键作用}：
+    消融实验表明，使用自然语言 instruction 模板（55.2\%）
+    与不使用 instruction 的 baseline（37.3\%）之间存在近 18 个百分点的巨大差距，
+    证明 instruction 本身——而非仅仅是多任务训练——是泛化能力提升的关键。
+\end{enumerate}
+
+\paragraph{FLAN 的意义与局限。}
+FLAN 确立了 instruction tuning 的基本范式：
+通过在多个任务的 instruction 格式数据上训练，模型可以泛化到未见过的任务。
+但 FLAN 也存在明显局限：
+(1) 所有 instruction template 均为人工编写，扩展成本高；
+(2) 任务类型受限于传统 NLP benchmark，缺乏开放域对话和创意生成等真实用户场景；
+(3) 仅在 137B 规模验证，对较小模型的适用性存疑。
+
+
+% --- T0 ---
+\subsubsection{T0: Prompted Training for Zero-Shot Generalization}
+\label{sec:sft:t0}
+
+\landmark{sanh2022multitask}
+T0 与 FLAN 几乎同时发表，独立地验证了相似的核心思想，
+但在实验设计和模型选择上有所不同。
+
+T0 基于 encoder-decoder 架构的 T5（11B 参数），
+使用 Public Pool of Prompts (P3) 数据集——
+涵盖 62 个数据集的 2,073 个人工编写的 prompt template。
+在 11 个 held-out 任务上，T0 的 zero-shot 性能
+在 7 个任务上匹配或超越了 GPT-3 的 few-shot（16-shot）性能，
+尽管 T0 的参数量仅为 GPT-3 的 $1/16$。
+
+T0 与 FLAN 的互补性体现在：
+(1) T0 证明了 encoder-decoder 架构同样受益于 instruction tuning，不限于 decoder-only；
+(2) P3 的大规模 prompt template 库为后续研究提供了宝贵的数据资源；
+(3) T0 的 prompt engineering 实践积累了关于 template 设计对性能影响的经验知识。
+
+与 FLAN 同时期，\citet{mishra2021crossfit} 提出了利用 crowdsourcing 方式
+收集 cross-task instruction 数据的方法，
+\citet{wang2022supernaturalinstructions} 则将这一思路扩展为
+Super-NaturalInstructions——一个包含 1,616 个任务的大规模 benchmark，
+为后续的 multi-task instruction tuning 提供了重要的数据基础设施。
+
+
+% --- InstructGPT ---
+\subsubsection{InstructGPT: 确立三阶段训练范式}
+\label{sec:sft:instructgpt}
+
+\landmark{ouyang2022instructgpt}
+如果说 FLAN 和 T0 证明了 instruction tuning 在学术 benchmark 上的有效性，
+InstructGPT 则将其推向了真实用户场景，
+并确立了影响深远的 ``SFT $\rightarrow$ Reward Model $\rightarrow$ PPO'' 三阶段训练范式。
+
+\paragraph{SFT 阶段的技术细节。}
+InstructGPT 的 SFT 阶段使用约 13,000 条由人类标注者撰写的 demonstration 数据。
+这些数据来自两个来源：
+(1) OpenAI API 收集的真实用户 prompt（经过筛选和脱敏），
+(2) 标注者根据 task distribution 主动编写的 prompt。
+训练配置：16 epochs，cosine learning rate decay，残差连接上的 dropout（$p=0.2$）。
+作者发现在小数据集上多 epoch 训练是有效的——尽管训练数据量远小于 pre-training 语料，
+但 SFT 仍能显著改变模型的行为模式。
+
+\paragraph{核心发现。}
+InstructGPT 最震撼的结论是：
+\textbf{1.3B 参数的 SFT+RLHF 模型在人类评估中以 85$\pm$3\% 的胜率超越了 175B 参数的原始 GPT-3}。
+这意味着 post-training 可以在不增加模型规模的前提下实现质的飞跃——
+参数量相差 100 倍以上，但经过 alignment 的小模型更受用户青睐。
+此外，InstructGPT 在 truthfulness 上的表现约为 GPT-3 的两倍（TruthfulQA），
+hallucination 率从 41\% 降至 21\%。
+
+\paragraph{Alignment Tax。}
+InstructGPT 首次系统性地识别了 \textbf{alignment tax}——
+即 post-training 在提升 instruction following 和安全性的同时，
+可能导致模型在传统 NLP benchmark 上的性能下降。
+作者通过在 PPO 目标中加入 pre-training 数据的混合训练（PPO-ptx）来缓解这一问题：
+\[
+  \text{objective}(\theta) =
+    \mathbb{E}_{(x,y) \sim \pi_{\text{RL}}} \big[ r_\theta(x,y) - \beta \log \frac{\pi_{\text{RL}}(y|x)}{\pi_{\text{SFT}}(y|x)} \big]
+    + \gamma \, \mathbb{E}_{x \sim \mathcal{D}_{\text{pretrain}}} \big[ \log \pi_{\text{RL}}(x) \big]
+\]
+其中第二项通过保持模型在 pre-training 分布上的性能来减轻 alignment tax。
+\crossref{2}{sec:pref}
+
+\paragraph{InstructGPT 对后续研究的影响。}
+InstructGPT 的影响远超其技术贡献本身。
+它确立了两个持续至今的 paradigm：
+(1) SFT 作为 RLHF/DPO pipeline 的必要前置阶段
+（几乎所有后续的 preference optimization 工作都从一个 SFT checkpoint 开始）；
+(2) 人类评估（human evaluation）作为 instruction-following 模型的金标准评测方式
+（而非仅依赖 automatic metrics）。
+
+
+% ========================================================
+\subsection{局限与分支：数据挑战与解决路径的分化}
+\label{sec:sft:branching}
+
+FLAN、T0 和 InstructGPT 确立了 instruction tuning 的有效性，
+但也暴露了一个核心瓶颈：\textbf{高质量 instruction 数据的获取成本极高}。
+InstructGPT 的 13,000 条 demonstration 数据由 40 名专业标注者花费数月完成，
+这对学术界和开源社区而言是不可承受的成本。
+
+\begin{problembox}
+如何以低成本获取大规模、高质量的 instruction tuning 数据？
+\end{problembox}
+
+这一问题催生了两条几乎相反的解决路径：
+\textbf{Branch A} 追求数据数量的扩展（通过合成生成降低成本），
+\textbf{Branch B} 追求数据质量的提纯（通过精心筛选以少胜多）。
+两者之间的张力构成了 SFT 领域最核心的 debate。
+
+\evolution{人工标注数据成本高昂}{Branch A: 合成数据 / Branch B: 数据精选}{降低 instruction data 获取门槛}
+
+
+% --- Branch A: Synthetic Data ---
+\subsubsection{Branch A: 合成数据生成——以量取胜}
+\label{sec:sft:synthetic}
+
+利用 language model 自身生成训练数据的思想可以追溯到
+\citet{schick2021generating}，他们证明 GPT-2 级别的模型
+即可为 SuperGLUE 任务生成有效的标注数据，
+且在部分任务上生成数据训练的模型性能接近人工标注数据。
+这一结果预示了 ``LM 既是学生也是老师'' 的可能性。
+
+\paragraph{Self-Instruct: 从 LM 自身 bootstrap 指令数据。}
+\landmark{wang2023selfinstruct}
+Self-Instruct 将这一思路从特定任务的标注数据扩展到\textbf{通用 instruction 数据}的生成，
+成为 synthetic instruction data 领域最具影响力的工作。
+它开创了利用模型自身能力来生成训练数据的 bootstrap 范式。
+
+\textbf{Pipeline 设计。}
+Self-Instruct 的 pipeline 包含四个阶段：
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Instruction 生成}：
+    从 175 个人工编写的 seed task 出发，通过 in-context learning 让
+    vanilla GPT-3（text-davinci-001）生成新的 instruction。
+    每轮从 task pool 中采样 6 个人工 seed + 2 个模型生成的 instruction 作为 few-shot example。
+
+  \item \textbf{分类识别}：
+    判断每个 instruction 是 classification task 还是 non-classification task，
+    因为两者需要不同的 instance 生成策略。
+
+  \item \textbf{Instance 生成}：
+    对 non-classification task 采用 input-first approach（先生成 input 再生成 output），
+    对 classification task 采用 output-first approach（先确定 label 再生成 input），
+    后者可以有效避免 label 分布的偏斜。
+
+  \item \textbf{过滤}：
+    使用 ROUGE-L $< 0.7$ 的阈值过滤与已有数据过于相似的新生成样本，
+    确保数据多样性。
+\end{enumerate}
+
+\textbf{结果。}
+从 175 个 seed task 出发，Self-Instruct 生成了 52,445 条 instruction 和 82,439 个 instance。
+质量评估显示：92\% 的生成 instruction 是有效的，54\% 的样本在所有字段上均有效。
+在 SuperNI benchmark 上，使用 Self-Instruct 数据微调的 GPT-3
+比 vanilla GPT-3 高出 33.1\% ROUGE-L，
+人类评估中仅落后 InstructGPT$_{\text{001}}$ 约 5\%。
+整个数据生成过程的 API 成本仅约 \$600。
+
+\textbf{意义。}
+Self-Instruct 的意义在于证明了 \textbf{LM 自身可以作为 instruction data 的来源}，
+这一思想直接催生了一系列后续工作。
+
+\paragraph{Alpaca: 将 Self-Instruct 工业化。}
+Stanford Alpaca \citep{taori2023alpaca} 将 Self-Instruct 的思路应用于 LLaMA 7B，
+使用 GPT-3.5（text-davinci-003）生成 52K 条 instruction 数据，
+微调成本仅约 \$600（API）+ \$100（训练）。
+Alpaca 在 human evaluation 中展现了与 GPT-3.5 相当的性能，
+成为开源 instruction-following 模型的里程碑。
+但 Alpaca 也暴露了 synthetic data 的局限：
+生成数据中存在显著的 hallucination 和 style mimicry（模仿 teacher model 的语言风格
+而非真正学习底层能力），引发了对 synthetic data ceiling 的讨论。
+与此同时，Vicuna \citep{chiang2023vicuna} 提供了一条对比路径：
+它使用 ShareGPT 平台收集的约 70K 条\textbf{真实用户与 ChatGPT 的对话}
+对 LLaMA 13B 进行微调，在 GPT-4 评估中达到了 ChatGPT 约 90\% 的质量。
+Vicuna 的成功表明，真实对话数据在捕捉用户交互模式方面具有
+synthetic data 难以替代的优势——用户的提问方式、多轮对话的上下文依赖、
+以及 implicit preference 都蕴含在真实交互中。
+Alpaca（synthetic data）与 Vicuna（real conversation data）
+的并行发展，为后续关于数据来源选择的讨论奠定了实证基础。
+
+\paragraph{WizardLM: Evol-Instruct 渐进式复杂化。}
+\citet{xu2024wizardlm} 提出 Evol-Instruct 方法——
+不直接从头生成 instruction，而是对已有的简单 instruction 进行迭代进化。
+每轮进化通过 prompt 让 LLM 对 instruction 执行以下操作之一：
+添加约束条件、增加推理步骤、具体化场景、增加输入复杂度。
+经过多轮进化后，简单的 ``Write a poem about spring'' 可能变为
+``Write a Shakespearean sonnet about spring, incorporating at least three
+metaphors related to scientific phenomena, and ending with a volta
+that challenges the reader's expectations''。
+这一方法在 instruction 复杂度维度上实现了有控制的数据增强。
+
+\paragraph{其他合成数据工作。}
+\citet{honovich2022unnatural} 的 Unnatural Instructions 采用与 Self-Instruct 类似的方法
+但使用更少的 seed（15 个），验证了 bootstrap 的鲁棒性。
+\citet{peng2023gpt4instruct} 使用 GPT-4 生成更高质量的 instruction 数据，
+展示了 teacher model 能力对 synthetic data 质量的决定性影响。
+Orca \citep{mukherjee2023orca} 提出了 progressive learning 策略——
+从 GPT-4 的 detailed reasoning trace 中学习，
+不仅模仿最终答案，更模仿推理过程（system message 中要求 GPT-4 ``explain step by step''），
+这一思想预示了 Thread 4 中 reasoning distillation 的发展方向
+\crossref{4}{sec:thread4}。
+Baize \citep{xu2023baize} 则探索了利用 ChatGPT 自我对话生成多轮对话数据的方法。
+
+
+% --- Branch B: Data Quality ---
+\subsubsection{Branch B: 数据质量精选——以质取胜}
+\label{sec:sft:quality}
+
+\paragraph{LIMA: Superficial Alignment Hypothesis。}
+\landmark{zhou2023lima}
+LIMA 提出了 SFT 领域最具争议性的假说之一——
+\textbf{Superficial Alignment Hypothesis}（表层对齐假说）：
+\textit{模型的知识和能力几乎全部在 pre-training 阶段习得，
+alignment 的作用仅在于教会模型正确的输出格式和交互风格}。
+
+\textbf{实验设计。}
+LIMA 仅使用 1,000 条精心筛选的训练样本对 LLaMA 65B 进行微调。
+数据来源的多样性经过精心设计：
+750 条来自社区问答平台（Stack Exchange 答案中选取回复质量最高的、
+wikiHow 文章、Reddit 高赞帖子），
+250 条由作者手动编写（确保涵盖特定的对话能力和安全行为）。
+训练配置看似简单但经过仔细调优：
+15 epochs，AdamW 优化器，residual dropout 从底层的 $p_d = 0.0$ 线性增加到顶层的 $p_d = 0.3$。
+这种 \textbf{layer-wise increasing dropout} 是一个值得注意的细节——
+它保护了底层（更接近 pre-training 知识）的表示稳定性，
+同时允许顶层（更接近输出格式）有更大的学习自由度。
+
+\textbf{核心结果。}
+在人类评估中，LIMA 的表现令人惊讶：
+\begin{itemize}[leftmargin=1.5em]
+  \item 50\% 的输出被评为 ``excellent''，88\% 为 ``pass'' 或更好
+  \item 与 Alpaca 65B 对比：53\% 的情况下 LIMA 被偏好
+  \item 与 DaVinci003 对比：44\% 的情况下 LIMA 被偏好或持平
+  \item 与 GPT-4 对比：43\% 的情况下 LIMA 表现相当或更优
+\end{itemize}
+
+\textbf{消融实验}（在 7B 模型上进行）提供了更精细的洞见：
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{多样性 $>$ 同质性}：
+    多样化的 Stack Exchange 数据（rating 3.83/6）优于同质化的 wikiHow 数据（3.49/6），
+    证明来源多样性比数据量更重要。
+  \item \textbf{质量筛选有效}：
+    经过人工筛选的数据（3.83/6）显著优于未筛选的数据（3.33/6）。
+  \item \textbf{数量 scaling 存在天花板}：
+    从 2K 样本增加到 4K 样本后，性能提升趋于饱和。
+  \item \textbf{少量对话数据有大作用}：
+    仅加入 30 条多轮对话样本，就将 ``excellent'' 评级从 45.2\% 提升至 76.1\%。
+\end{itemize}
+
+\textbf{LIMA 的争议。}
+LIMA 的 Superficial Alignment Hypothesis 引发了持续的讨论。
+支持者认为它揭示了 SFT 的本质——不是教模型新知识，而是激活已有能力的正确表达方式。
+批评者则指出：
+(1) 1,000 条数据的实验结论能否泛化到更复杂的能力（如 multi-step reasoning、code generation）尚不明确；
+(2) LIMA 使用了 65B 参数的 LLaMA——对于更小的模型，SFT 可能确实需要传授新知识而非仅仅调整格式；
+(3) LIMA 的评估主要基于单轮开放域问答，对专业领域和长程任务的覆盖不足。
+
+\paragraph{数据选择方法论。}
+LIMA 的成功激发了一系列数据选择方法的研究。
+\citet{li2023ifd} 提出 Instruction-Following Difficulty (IFD) 指标——
+通过比较模型在有/无 instruction 条件下的输出概率差异来衡量每条数据的信息量，
+选择 IFD 最高的样本进行训练。
+DEITA \citep{liu2024deita} 提出了基于 complexity、quality 和 diversity 三维度的
+自动化数据评分框架，使用 ChatGPT 对数据进行评分排序，
+然后通过 embedding-based 多样性过滤选择最优子集。
+\citet{chen2023maybeonly} 发现仅使用 0.5\% 的 Alpaca 数据即可达到全量训练 90\% 以上的性能。
+Instruction Mining \citep{cao2023instructionmining} 则通过训练一个 quality predictor
+来自动化数据筛选过程。
+
+\paragraph{开源数据集与社区贡献。}
+OpenAssistant Conversations \citep{kopf2023openassistant} 提供了
+一个由 13,500 名志愿者贡献的多语言对话数据集（161,443 条消息，35 种语言），
+展示了 crowdsourcing 在 instruction data 收集中的潜力。
+Dolly \citep{conover2023dolly} 由 Databricks 的 5,000 名员工在工作时间贡献约 15,000 条数据，
+是最早的企业级开源 instruction 数据集之一。
+
+
+% --- Multi-task Scaling ---
+\subsubsection{Branch C: Multi-task Scaling——任务数量维度的扩展}
+\label{sec:sft:multitask}
+
+\paragraph{Flan-v2: 将 instruction tuning 推向极致。}
+\landmark{chung2022flan}
+Flan-v2 是 FLAN 的大规模后续工作，
+将 instruction tuning 的任务规模推向了前所未有的高度。
+
+\textbf{数据规模。}
+Flan-v2 整合了四个主要的 task collection：
+Muffin（80 个任务）、T0-SF（193 个任务）、NIV2（1,554 个任务）、以及 CoT（9 个推理任务），
+总计 1,836 个任务（473 个 unique 数据集，146 个任务类别）。
+这一规模比原始 FLAN 的 62 个任务扩大了约 30 倍。
+
+\textbf{核心发现。}
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{跨架构有效性}：
+    Flan-v2 在 T5（encoder-decoder, 80M--11B）、
+    PaLM（decoder-only, 8B--540B）以及 cont-PaLM 和 U-PaLM 上均验证了有效性，
+    证明 instruction tuning 的收益与模型架构无关。
+
+  \item \textbf{任务 scaling 的边际效应}：
+    性能随任务数量的增加持续提升，但大部分收益集中在前 282 个任务，
+    后续任务的边际贡献递减。
+    这提示了一个重要的 practical insight：
+    达到"足够好"的性能不需要穷尽所有可能的任务。
+
+  \item \textbf{极端的效率优势}：
+    以 PaLM 540B 为例，Flan 微调仅使用 512 个 v4 TPU chips 训练 37 小时，
+    计算量仅为 pre-training 的 \textbf{0.2\%}。
+    但效果显著：Flan-PaLM 540B 在 MMLU 上达到 75.2\%（5-shot, with CoT + self-consistency），
+    normalized average 提升 9.4--15.5\%。
+    更惊人的是，\textbf{Flan-T5-XL 3B 在 MMLU 上达到 52.4\%，超越了 GPT-3 175B 的 43.9\%}——
+    一个 $1/58$ 参数量的模型在 instruction tuning 后超越了 $58\times$ 大的模型。
+
+  \item \textbf{CoT 微调的关键作用}：
+    Flan-v2 中一个被低估但极其重要的发现是关于 Chain-of-Thought 微调的。
+    不包含 CoT 数据的 instruction tuning 会\textbf{损害}模型的推理能力；
+    但将 CoT 数据与 non-CoT 数据联合训练，
+    不仅保持了推理能力，还同时提升了两类任务的性能。
+    此外，CoT 微调 unlocked 了 zero-shot CoT 能力——
+    仅通过在 prompt 末尾添加 ``Let's think step by step''
+    就能激发模型的推理行为，无需提供 few-shot reasoning example。
+    这一发现预示了 Thread 4 中 reasoning post-training 的发展方向
+    \crossref{4}{sec:thread4}。
+\end{enumerate}
+
+Flan Collection \citep{longpre2023flancollection} 随后开源了 Flan-v2 的完整数据混合方案和模板，
+为社区提供了可复现的基础。
+OPT-IML \citep{iyer2022optiml} 在 Meta 的 OPT 模型上复现了类似的 multi-task instruction tuning 实验。
+BLOOMZ/mT0 \citep{muennighoff2022bloomz} 将 multi-task instruction tuning
+扩展到多语言场景（crosslingual instruction tuning with xP3 dataset），
+证明了该范式在非英语语言上的有效性。
+
+
+% --- Domain-specific SFT ---
+\subsubsection{Branch D: Domain-Specific SFT——专业领域的精准适配}
+\label{sec:sft:domain}
+
+随着通用 instruction tuning 趋于成熟，研究者开始将 SFT 技术应用于
+需要专业知识的垂直领域，催生了 domain-specific SFT 的研究热潮。
+
+\paragraph{Code: 数据质量可以打破 scaling law。}
+\landmark{gunasekar2023phi1}
+phi-1 是 code SFT 领域最具颠覆性的工作。
+这项来自 Microsoft Research 的研究使用仅 1.3B 参数的模型，
+在 HumanEval 上达到 50.6\% pass@1，在 MBPP 上达到 55.5\% pass@1——
+在当时超越了许多参数量大一个数量级的模型。
+
+\textbf{核心创新在于数据工程。}
+phi-1 的训练数据包含三个精心设计的组成部分：
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Filtered code-language corpus}（约 6B tokens）：
+    从 The Stack 和 StackOverflow 中使用随机森林分类器筛选
+    ``textbook quality'' 的代码片段。
+    分类器训练在 GPT-4 标注的少量样本上（对每个代码片段标注其 educational value），
+    然后用于对整个语料库进行大规模筛选。
+
+  \item \textbf{Synthetic textbooks}（$< 1$B tokens）：
+    使用 GPT-3.5 生成类似教科书风格的 Python 教学内容，
+    包含概念解释、代码示例和循序渐进的练习。
+
+  \item \textbf{CodeExercises}（$< 180$M tokens）：
+    使用 GPT-3.5 生成函数级别的编程练习（function docstring + solution），
+    作为 fine-tuning 阶段的训练数据。
+\end{itemize}
+
+\textbf{关键洞见。}
+phi-1 的成功挑战了传统的 scaling law 思维——
+它证明 \textbf{数据质量可以在一定程度上替代模型规模和数据量}。
+一个 10$\times$ 小的模型在 100$\times$ 少的数据上训练，
+可以匹配甚至超越大模型的性能。
+更有趣的是，phi-1 在 fine-tuning 后展现出一些\textbf{emergent capabilities}——
+包括使用 Pygame、Tkinter 等外部库的能力以及 chat-style 的交互模式——
+这些能力并未在 fine-tuning 数据中出现过，暗示高质量数据可能有助于模型
+更好地组织和泛化 pre-training 阶段习得的知识。
+这一发现与 LIMA 的 Superficial Alignment Hypothesis 形成了有趣的呼应。
+
+WizardCoder \citep{luo2023wizardcoder} 将 WizardLM 的 Evol-Instruct 方法应用于代码领域，
+通过对编程 instruction 进行渐进式复杂化来生成高难度训练数据。
+Magicoder \citep{wei2023magicoder} 提出 OSS-Instruct——
+从真实的开源代码片段出发，让 LLM 为这些代码生成对应的 instruction，
+确保训练数据的代码风格和复杂度与真实项目一致。
+
+\paragraph{Math: 推理增强的 SFT。}
+数学推理是 domain-specific SFT 的另一个活跃方向。
+WizardMath \citep{luo2023wizardmath} 将 Evol-Instruct 扩展到数学领域，
+结合 Reinforced Evol-Instruct 进一步提升数据质量。
+MAmmoTH \citep{yue2023mammoth} 构建了混合 CoT 和 Program-of-Thought（PoT）的
+instruction 数据集——对适合符号计算的问题使用 Python 代码作为推理步骤，
+对需要语义理解的问题使用自然语言 CoT。
+MetaMath \citep{yu2023metamath} 提出对数学问题进行 question bootstrapping——
+通过改写问题的表述方式（同义替换、条件反转、自问自答分解）来增强数据多样性，
+同时保持数学内容的正确性。
+RFT \citep{yuan2023rft}（Rejection sampling Fine-Tuning）
+研究了在数学推理中的 sampling-then-filtering 策略：
+对每个数学问题让模型生成多个候选答案，仅保留最终答案正确的样本用于 SFT，
+并分析了 sampling 数量与最终性能之间的 scaling relationship。
+
+\paragraph{Multilingual \& Other Domains.}
+Aya Model \citep{ustun2024aya} 是 multilingual instruction tuning 的重要里程碑，
+覆盖 101 种语言，展示了 instruction tuning 在极端多语言场景下的可行性和挑战。
+Gorilla \citep{patil2023gorilla} 专注于 API 调用能力，
+通过在 API 文档和调用示例上进行 SFT，使模型能准确生成复杂的 API 调用代码
+\crossref{6}{sec:thread6}。
+Platypus \citep{lee2023platypus} 针对 STEM 领域进行了小规模精选 SFT。
+LongForm \citep{koksal2023longform} 则聚焦于长文本生成任务的 instruction tuning。
+
+
+% ========================================================
+\subsection{收敛与前沿：系统性综合与方法论融合}
+\label{sec:sft:convergence}
+
+2023 年下半年，SFT 领域从百花齐放的探索期进入系统性综合的阶段。
+多个工作开始整合前述 branch 的经验，试图回答：
+\textbf{如何将数据工程、multi-task training 和 domain specialization
+融合为一个统一的最佳实践？}
+
+\evolution{Branch A (合成) / Branch B (精选) / Branch C (scaling) 各自发展}%
+  {系统性综合: 融合多条路径的最佳实践}{实验驱动的 recipe 研究}
+
+
+% --- Tulu ---
+\subsubsection{Tulu: 开源 SFT Recipe 的系统性探索}
+\label{sec:sft:tulu}
+
+Tulu \citep{wang2023tulu} 是第一个系统性地比较不同 instruction data
+sources 和 training strategies 的开源工作。
+通过在 LLaMA 上控制变量实验，Tulu 回答了多个实践性问题：
+哪些数据源的组合最有效？数据混合比例如何影响性能？
+Human-written 和 synthetic data 在不同任务上的相对优势如何？
+
+Tulu 2 \citep{ivison2023tulu2} 进一步扩展了这一研究，
+将实验范围从 SFT 扩展到完整的 post-training pipeline（SFT + DPO），
+并在 LLaMA 2 系列模型上验证了最优 recipe。
+Tulu 2 的核心贡献在于提供了一个 reproducible 的 training recipe——
+包括数据混合策略、超参数配置和评估 protocol——
+使开源社区可以在此基础上迭代优化。
+
+\subsubsection{Zephyr \& OpenChat: 从强模型到弱模型的知识蒸馏}
+\label{sec:sft:distillation}
+
+Zephyr \citep{tunstall2023zephyr} 提出了 Direct Distillation 方法：
+先使用 GPT-4 作为 teacher model 生成高质量 instruction 数据进行 SFT，
+再使用 GPT-4 的偏好标注进行 DPO 训练。
+整个过程完全不需要人工标注，实现了从 proprietary model 到开源模型的
+端到端 knowledge distillation。
+Zephyr-7B 在 MT-Bench 上的表现超过了当时大部分 70B 规模的开源模型，
+证明了 distillation + alignment 在小模型上的极端有效性
+\crossref{7}{sec:efficiency}。
+
+OpenChat \citep{wang2023openchat} 关注另一个实际问题：
+当训练数据来自混合质量的来源时（如一部分来自 GPT-4、一部分来自 GPT-3.5），
+如何有效利用这些数据？
+OpenChat 提出了 Conditioned RLFT（C-RLFT）——
+通过 class-conditioned 的训练策略，让模型能区分并利用不同质量的数据，
+而非简单地将低质量数据视为噪声丢弃。
+
+
+\subsubsection{Scaling Laws 与理论分析}
+\label{sec:sft:scaling}
+
+\citet{muennighoff2023scaling} 系统性地研究了
+data-constrained 场景下 instruction-tuned LM 的 scaling behavior。
+当可用的 instruction data 有限时（这在实际中极为常见），
+是否应该在有限数据上多训练几轮（repeat），还是应该将有限数据增强后训练一轮？
+他们的实验表明，数据重复训练存在明确的 diminishing returns——
+超过 4 个 epoch 后性能增长显著放缓，
+这为 LIMA 等小数据方法的 epoch 数选择提供了理论支撑。
+
+Instruction Tuning Survey \citep{zhang2023instruction} 提供了
+对整个 instruction tuning 领域的系统性综述，梳理了从 FLAN 到 LIMA 的发展脉络，
+并总结了数据构建、训练策略和评估方法方面的最佳实践。
+
+
+\subsubsection{2025: SFT 作为推理模型训练流水线的基石}
+\label{sec:sft:2025}
+
+2025 年的推理模型浪潮（\crossref{4}{sec:t4-thinking-models}）
+为 SFT 赋予了新的角色：
+SFT 不再仅是``教会模型遵循指令''的最终步骤，
+而成为多阶段 post-training 流水线中的\textbf{基础设施层}。
+
+\paragraph{Qwen3 的四阶段流水线。}
+Qwen3 \cite{yang2025qwen3} 的 post-training 流水线清晰地展示了 SFT 在现代训练范式中的多重角色：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Stage 1: Long CoT cold start}（SFT 作为``推理格式初始化''）；
+  \item \textbf{Stage 2: Reasoning RL}（在 SFT 基础上进行 RLVR 训练）；
+  \item \textbf{Stage 3: Thinking mode fusion}（SFT 用于融合推理模式和非推理模式）；
+  \item \textbf{Stage 4: General RL}（混合 reward 的全场景 RL）。
+\end{itemize}
+SFT 出现在 Stage 1 和 Stage 3 中，
+分别承担``推理能力冷启动''和``多模式融合''的功能。
+这标志着 SFT 从``一次性训练步骤''演变为``可在流水线中多次使用的通用对齐工具''。
+
+\paragraph{Llama 4 的原生多模态 SFT。}
+Meta 的 Llama 4 \cite{meta2025llama4} 将 SFT 的应用范围扩展到了原生多模态场景，
+在一个统一的框架中对图像、文本和代码进行联合 instruction tuning，
+进一步拓宽了 SFT 方法论的适用边界。
+
+\subsubsection{2026: Token-Level SFT 与 SFT-RL 协同}
+\label{sec:sft:2026}
+
+2026 年初，SFT 领域呈现出两个显著趋势：
+\textbf{训练粒度从 sample-level 下沉到 token-level}，
+以及\textbf{SFT 被重新定位为 RL 训练的``最优初始化器''}。
+
+\paragraph{Token-Level SFT: 从均匀损失到选择性训练。}
+传统 SFT 对序列中所有 token 施加均匀的 cross-entropy loss，
+但 2026 年多项独立研究同时挑战了这一假设。
+Shen et al.\ \cite{shen2026tokenpriority} 将这一新兴范式形式化为
+\textbf{Token Priority}，
+指出 fine-grained 的自回归生成被 coarse 的均匀监督信号所制约，
+并将已有工作归纳为两类：
+\emph{Positive Priority}（过滤噪声 token，保留高信息量 token）
+和 \emph{Signed Priority}（对有害模式执行负向权重）。
+
+ProFit \cite{liu2026profit} 提供了一个具体实例：
+通过分析 token 的生成概率分布，
+发现\textbf{高概率 token 承载核心逻辑框架，低概率 token 多为可替换表达}。
+基于此观察，ProFit 选择性保留高概率 token 进行训练，
+抑制对低概率、非核心 token 的 surface-level overfitting。
+TOSS \cite{li2026toss} 则从\textbf{安全维度}切入 token-level 选择：
+通过测量 safety-degraded model 与 utility-oriented model 之间的逐 token loss 差异，
+量化每个 token 的安全风险，
+实现了在保持任务能力的同时维护安全性的精细平衡
+（\crossref{3}{sec:t3-safety}）。
+
+\evolution{Sample-level data selection（LIMA, DEITA）}{Token-level selective training（ProFit, TOSS）}{均匀 loss 浪费了对非关键 token 的梯度信号}
+
+\paragraph{数据选择方法论的深化。}
+在 sample-level 选择方面，2026 年的进展同样显著。
+NAIT \cite{chen2026nait} 提出\textbf{基于神经元激活模式}的数据选择框架：
+分析 instruction tuning 数据集与目标能力之间的\emph{神经元激活相似性}，
+仅用 Alpaca-GPT4 数据集的 10\% 即持续优于依赖外部强模型的方法。
+NAIT 还揭示了一个有趣的发现：
+逻辑推理和编程类数据在神经元层面展现出强泛化性，
+能够跨能力维度迁移。
+Skill-Aware Data Selection \cite{zhang2026skillaware}
+则面向推理蒸馏场景，
+提出以\textbf{技能覆盖}为导向的数据选择策略：
+优先选择目标模型薄弱技能对应的样本，
+从 100K 语料中仅选 1K 样本即超越随机 SFT 基线。
+
+在合成数据生成方面，
+DS$^2$-Instruct \cite{xu2026ds2instruct} 引入 Bloom 认知层级分类法
+构建领域特定指令数据集：
+通过将领域关键词与不同认知层级配对，
+在 7 个专业领域上实现了显著的零样本性能提升。
+Terminal-Task-Gen \cite{pi2026terminaltaskgen} 则展示了
+面向终端/CLI 任务的系统化数据工程流水线，
+结合 seed-based 和 skill-based 任务构建、
+数据过滤、课程学习等策略，
+训练出的 Nemotron-Terminal 32B 在 Terminal-Bench 2.0 上达到 27.4\%。
+
+\paragraph{PEAR: SFT 的目标应是为 RL 做准备。}
+\landmark{pear2026sftrl}
+2026 年最具范式意义的发现或许来自 PEAR：
+\textbf{经过相同 RL 训练后，更强的 SFT checkpoint 反而可能显著弱于更弱的 SFT checkpoint}。
+根本原因在于 offline SFT 数据与 online RL rollout 之间的
+\emph{distribution mismatch}——
+SFT 阶段过度拟合到 teacher 数据的分布，
+限制了 RL 阶段的探索空间。
+
+PEAR 通过在 SFT loss 中引入 \textbf{importance sampling}
+（在 token、block、sequence 三个层级重新加权），
+缓解了这一分布错配。
+在 AIME2025 上，PEAR 初始化的模型经 RL 训练后
+pass@8 提升高达 14.6\%。
+这一结果从根本上重新定义了 SFT 的优化目标：
+\textbf{好的 SFT 不是让模型在 SFT 任务上表现最优，
+而是让模型成为 RL 阶段的最佳起点}。
+
+\begin{openproblembox}
+\textbf{Open Problem 6: SFT 的最优粒度。}
+Token-level selective training 的成功表明，
+均匀的 sequence-level loss 可能不是最优选择。
+但最优的训练粒度是什么？
+Token-level？Span-level？Skill-level？
+不同粒度的选择对下游 RL 训练的影响如何？
+PEAR 的发现暗示 SFT 的评估标准本身需要重新审视——
+不应以 SFT 任务本身的性能为准，
+而应以``RL-readiness''为优化目标。
+\end{openproblembox}
+
+% ========================================================
+\subsection{未解决问题与未来方向}
+\label{sec:sft:open}
+
+尽管 SFT 是 post-training 中最成熟的技术，多个核心问题仍未解决：
+
+\begin{openproblembox}
+\paragraph{Open Problem 1: Synthetic Data 的天花板在哪里？}
+Self-Instruct 和 Alpaca 开启了 synthetic instruction data 的浪潮，
+但多项研究观察到 synthetic data 训练的模型存在 \textbf{style mimicry without substance} 的问题——
+模型学会了 teacher model 的输出风格，但在面对需要深层理解的 out-of-distribution 问题时表现脆弱。
+phi-1 通过 ``textbook quality'' 的数据筛选部分缓解了这一问题，
+但一个更根本的问题是：\textbf{synthetic data 是否存在理论上的 capability ceiling？}
+也即，student model 能否通过 synthetic data 超越 teacher model 的能力边界？
+这与 knowledge distillation 中的经典问题相关，但在 instruction tuning 的语境下
+引入了额外的复杂性（instruction following 能力 vs. 知识本身的迁移）。
+\end{openproblembox}
+
+\begin{openproblembox}
+\paragraph{Open Problem 2: SFT 与 Preference Optimization 的最优配合方式。}
+InstructGPT 确立的 ``SFT $\rightarrow$ RLHF/DPO'' pipeline 已成为事实标准，
+但 SFT 阶段应该训练到什么程度？
+过度 SFT（over-fitting 到 instruction data）可能限制后续 RLHF/DPO 的探索空间；
+欠训练的 SFT 则可能导致 RLHF 阶段的不稳定。
+Zephyr 和 Tulu 2 的实验提供了一些 empirical guidance，
+但对 SFT 强度（训练步数、数据量）与下游 alignment 效果之间关系的系统性理解仍然缺乏
+\crossref{2}{sec:pref}。
+\end{openproblembox}
+
+\begin{openproblembox}
+\paragraph{Open Problem 3: 小模型的 Instruction Following 能力边界。}
+FLAN 观察到 instruction tuning 对小模型（$\leq$ 8B）可能造成性能下降，
+LIMA 的 Superficial Alignment Hypothesis 暗示 SFT 效果高度依赖于 pre-training 质量。
+那么，对于 1B--3B 级别的模型，instruction following 的能力边界在哪里？
+phi-1 在 1.3B 规模上展示了令人印象深刻的代码能力，
+但这是否可以泛化到更广泛的 instruction following 场景？
+在边缘计算和移动设备场景下，理解小模型的 SFT 效率上限具有重大实际意义
+\crossref{7}{sec:efficiency}。
+\end{openproblembox}
+
+\begin{openproblembox}
+\paragraph{Open Problem 4: Catastrophic Forgetting 的系统性解决方案。}
+SFT 不可避免地会覆盖 pre-training 阶段习得的部分知识，
+InstructGPT 的 alignment tax 和 Flan-v2 中 CoT 数据缺失导致推理能力下降
+都是这一问题的具体表现。
+虽然 PPO-ptx 和 CoT 混合训练等 ad hoc 方案在特定场景下有效，
+但一个统一的、有理论保证的 continual learning 框架仍然缺失。
+如何在 SFT 过程中精确控制"学习新行为"与"保持已有知识"之间的平衡，
+是 post-training 领域一个跨线程的根本性挑战。
+\end{openproblembox}
+
+\begin{openproblembox}
+\paragraph{Open Problem 5: 评估标准的碎片化。}
+当前 instruction-tuned model 的评估方式高度碎片化：
+学术界依赖 benchmark（MMLU, SuperNI, HumanEval），
+工业界依赖 human evaluation 和 LLM-as-judge（如 MT-Bench, AlpacaEval）。
+这些评估维度之间的相关性低且不稳定——
+一个在 MMLU 上表现出色的模型可能在 human evaluation 中表现平庸，反之亦然。
+建立一个既能 scale 又能准确反映用户实际体验的评估框架，
+仍然是该领域最迫切的基础设施需求之一。
+\end{openproblembox}
+
+
+\subsection{本章小结}
+\label{sec:sft:summary}
+
+\begin{figure}[!ht]
+\centering
+\begin{tikzpicture}[
+  node distance=0.6cm and 1.2cm,
+  every node/.style={font=\small},
+  milestone/.style={rectangle, rounded corners, draw=thread1, fill=thread1!10,
+    text width=3.8cm, minimum height=0.8cm, align=center, font=\small\bfseries},
+  branch/.style={rectangle, rounded corners, draw=gray!60, fill=gray!5,
+    text width=3.2cm, minimum height=0.7cm, align=center, font=\small},
+  arrow/.style={-{Stealth[length=2.5mm]}, thick, thread1!70},
+  brancharrow/.style={-{Stealth[length=2mm]}, gray!60, thick},
+]
+% Timeline nodes
+\node[milestone] (flan) {FLAN / T0 (2021)\\Multi-task Instruction Tuning};
+\node[milestone, below=1.2cm of flan] (igpt) {InstructGPT (2022)\\SFT$\rightarrow$RM$\rightarrow$PPO Pipeline};
+\node[milestone, below=1.2cm of igpt] (si) {Self-Instruct (2022)\\Bootstrap from LM};
+
+% Branching
+\node[branch, below left=1.2cm and 0.5cm of si] (brA) {Branch A: 合成数据\\Alpaca, WizardLM, Orca};
+\node[branch, below right=1.2cm and 0.5cm of si] (brB) {Branch B: 数据精选\\LIMA (2023)};
+
+% Convergence
+\node[milestone, below=2.8cm of si] (flanv2) {Flan-v2 (2022)\\1836 Tasks Scaling};
+\node[milestone, below=1.2cm of flanv2] (phi1) {phi-1 (2023)\\Textbook-Quality Data};
+\node[branch, below=1.2cm of phi1] (conv) {Convergence: Tulu, Zephyr\\Recipe \& Distillation};
+
+% Arrows
+\draw[arrow] (flan) -- (igpt);
+\draw[arrow] (igpt) -- (si);
+\draw[brancharrow] (si) -- (brA);
+\draw[brancharrow] (si) -- (brB);
+\draw[arrow] (si) -- (flanv2);
+\draw[arrow] (flanv2) -- (phi1);
+\draw[brancharrow] (brA) -- (conv);
+\draw[brancharrow] (brB) -- (conv);
+\draw[arrow] (phi1) -- (conv);
+\end{tikzpicture}
+\caption{Thread 1 演化路径：从 instruction tuning 的提出到数据工程方法论的收敛。
+红色节点为 landmark 工作，灰色节点为重要分支。}
+\label{fig:sft-evolution}
+\end{figure}
+
+Thread 1 的演化遵循一条清晰的路径：
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{问题提出}（2021）：FLAN 和 T0 证明 multi-task instruction tuning
+    可以解锁 pre-trained LM 的 zero-shot 泛化能力。
+  \item \textbf{范式确立}（2022）：InstructGPT 将 SFT 嵌入更大的 alignment pipeline，
+    确立了 ``SFT $\rightarrow$ RM $\rightarrow$ PPO'' 三阶段训练范式。
+  \item \textbf{路径分化}（2022--2023）：围绕数据获取成本问题，
+    领域分化为合成数据（Self-Instruct $\rightarrow$ Alpaca $\rightarrow$ WizardLM）
+    和数据精选（LIMA $\rightarrow$ DEITA $\rightarrow$ IFD）两条路径。
+  \item \textbf{规模化与专业化}（2022--2023）：Flan-v2 将 multi-task scaling 推向极致，
+    phi-1 证明数据质量可以打破 scaling law，
+    domain-specific SFT 在 code、math、multilingual 等领域全面展开。
+  \item \textbf{收敛与融合}（2023--）：Tulu、Zephyr 等工作开始系统性整合
+    多条路径的经验，寻求可复现的最优 training recipe。
+\end{enumerate}
+
+\noindent
+本章的核心 takeaway 是：
+\textbf{SFT 的本质是数据工程问题}。
+无论是 Self-Instruct 的合成数据 pipeline、
+LIMA 的 Superficial Alignment Hypothesis、
+phi-1 的 textbook-quality 数据筛选，
+还是 Flan-v2 的大规模 task mixing——
+所有 breakthrough 都围绕着如何构建最优训练数据这一核心问题展开。
+模型架构和训练算法（standard cross-entropy loss on response tokens）
+在整个演化过程中几乎没有变化，
+变化的始终是数据的\textbf{来源}、\textbf{质量}、\textbf{多样性}和\textbf{规模}。
+
+这一洞见也指向了 SFT 与其他 thread 的深层联系：
+Thread 2（preference optimization）通过引入偏好信号补充了 SFT 的 binary supervision；
+Thread 4（reasoning）通过 CoT 和 process reward 扩展了 SFT 的训练目标；
+Thread 7（efficiency）通过 LoRA 等方法使得 SFT 在资源受限场景下可行。
+这些跨线程的联系将在后续章节中逐一展开。

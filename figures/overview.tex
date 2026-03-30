@@ -1,0 +1,234 @@
+% === Overview: Hybrid Problem-Evolution Graph ===
+% 7 horizontal lanes (one per thread), shared x-axis 2017--2026,
+% landmark papers as nodes, dashed cross-thread arrows.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    >=Stealth,
+    node distance=0.6cm,
+    paper/.style={
+        rounded corners=2pt,
+        font=\scriptsize\bfseries,
+        inner sep=3pt,
+        minimum height=0.5cm,
+        text=white,
+        drop shadow={shadow xshift=0.5pt, shadow yshift=-0.5pt, opacity=0.3},
+    },
+    crossarrow/.style={
+        ->,
+        dashed,
+        thick,
+        gray!70,
+        shorten >=2pt,
+        shorten <=2pt,
+    },
+    lanelabel/.style={
+        font=\small\bfseries,
+        anchor=east,
+        text width=3.8cm,
+        align=right,
+    },
+]
+
+% --- Geometry ---
+\def\laneheight{1.4}   % vertical spacing between lanes
+\def\xmin{0}
+\def\xmax{20}          % total width
+% Year mapping: 2017 = 0, 2026 = 20  =>  1 year = 2 units
+\newcommand{\yearx}[1]{\fpeval{(#1-2017)*2}}
+
+% --- Year axis ---
+\foreach \y in {2017,2018,2019,2020,2021,2022,2023,2024,2025,2026} {
+    \draw[gray!40] (\yearx{\y}, 0.5*\laneheight) -- (\yearx{\y}, -6.5*\laneheight);
+    \node[font=\footnotesize, gray!80, anchor=south] at (\yearx{\y}, 0.7*\laneheight) {\y};
+}
+
+% --- Lane backgrounds ---
+\foreach \i/\col in {0/thread1,1/thread2,2/thread3,3/thread4,4/thread5,5/thread6,6/thread7} {
+    \fill[\col, opacity=0.06]
+        (\xmin, -\i*\laneheight+0.45*\laneheight)
+        rectangle
+        (\xmax, -\i*\laneheight-0.45*\laneheight);
+}
+
+% =====================================================================
+% Thread 1: Instruction Following & SFT (lane y=0)
+% =====================================================================
+\def\laneA{0}
+\node[lanelabel, text=thread1] at (-0.3, \laneA*\laneheight)
+    {T1: Instruction\\Following \& SFT};
+
+\node[paper, fill=thread1] (flan)
+    at (\yearx{2022}-1.0, \laneA*\laneheight) {FLAN};
+\node[paper, fill=thread1] (instructgpt-sft)
+    at (\yearx{2022}+0.8, \laneA*\laneheight) {InstructGPT-SFT};
+\node[paper, fill=thread1] (selfinstruct)
+    at (\yearx{2023}-0.2, \laneA*\laneheight) {Self-Instruct};
+\node[paper, fill=thread1] (lima)
+    at (\yearx{2023}+1.2, \laneA*\laneheight) {LIMA};
+
+% =====================================================================
+% Thread 2: Reward Modeling & Preference Optimization (lane y=-1)
+% =====================================================================
+\def\laneB{-1}
+\node[lanelabel, text=thread2] at (-0.3, \laneB*\laneheight)
+    {T2: Reward Modeling \&\\Preference Opt.};
+
+\node[paper, fill=thread2] (rlhf-og)
+    at (\yearx{2017}+1.0, \laneB*\laneheight) {RLHF};
+\node[paper, fill=thread2] (instructgpt-rlhf)
+    at (\yearx{2022}+0.8, \laneB*\laneheight) {InstructGPT};
+\node[paper, fill=thread2] (dpo)
+    at (\yearx{2023}+0.6, \laneB*\laneheight) {DPO};
+\node[paper, fill=thread2] (grpo)
+    at (\yearx{2024}+1.0, \laneB*\laneheight) {GRPO};
+\node[paper, fill=thread2] (dapo)
+    at (\yearx{2025}+1.0, \laneB*\laneheight) {DAPO/RLVR};
+
+% =====================================================================
+% Thread 3: Safety & Alignment (lane y=-2)
+% =====================================================================
+\def\laneC{-2}
+\node[lanelabel, text=thread3] at (-0.3, \laneC*\laneheight)
+    {T3: Safety \&\\Alignment};
+
+\node[paper, fill=thread3] (cai)
+    at (\yearx{2022}+1.5, \laneC*\laneheight) {Constitutional AI};
+\node[paper, fill=thread3] (saferlhf)
+    at (\yearx{2023}+1.0, \laneC*\laneheight) {Safe RLHF};
+\node[paper, fill=thread3] (jailbreak)
+    at (\yearx{2024}+0.5, \laneC*\laneheight) {Jailbreak Arms Race};
+
+% =====================================================================
+% Thread 4: Reasoning & Verification (lane y=-3)
+% =====================================================================
+\def\laneD{-3}
+\node[lanelabel, text=thread4] at (-0.3, \laneD*\laneheight)
+    {T4: Reasoning \&\\Verification};
+
+\node[paper, fill=thread4] (cot)
+    at (\yearx{2022}+0.3, \laneD*\laneheight) {CoT};
+\node[paper, fill=thread4] (prm)
+    at (\yearx{2023}+0.5, \laneD*\laneheight) {PRM};
+\node[paper, fill=thread4] (oone)
+    at (\yearx{2024}+0.2, \laneD*\laneheight) {o1};
+\node[paper, fill=thread4] (deepseekr1)
+    at (\yearx{2025}-0.5, \laneD*\laneheight) {DeepSeek-R1};
+\node[paper, fill=thread4] (othree)
+    at (\yearx{2025}+0.8, \laneD*\laneheight) {o3};
+\node[paper, fill=thread4] (v32)
+    at (\yearx{2026}-0.3, \laneD*\laneheight) {V3.2};
+
+% =====================================================================
+% Thread 5: Multimodal Post-training (lane y=-4)
+% =====================================================================
+\def\laneE{-4}
+\node[lanelabel, text=thread5] at (-0.3, \laneE*\laneheight)
+    {T5: Multimodal\\Post-training};
+
+\node[paper, fill=thread5] (llava)
+    at (\yearx{2023}+0.5, \laneE*\laneheight) {LLaVA};
+\node[paper, fill=thread5] (vlmrlhf)
+    at (\yearx{2024}-0.3, \laneE*\laneheight) {VLM-RLHF};
+\node[paper, fill=thread5] (halluc)
+    at (\yearx{2024}+1.3, \laneE*\laneheight) {Halluc. Reduction};
+
+% =====================================================================
+% Thread 6: Tool Use & Agentic (lane y=-5)
+% =====================================================================
+\def\laneF{-5}
+\node[lanelabel, text=thread6] at (-0.3, \laneF*\laneheight)
+    {T6: Tool Use \&\\Agentic};
+
+\node[paper, fill=thread6] (toolformer)
+    at (\yearx{2023}-0.2, \laneF*\laneheight) {Toolformer};
+\node[paper, fill=thread6] (funccall)
+    at (\yearx{2023}+1.5, \laneF*\laneheight) {Function Calling};
+\node[paper, fill=thread6] (agenttune)
+    at (\yearx{2024}+0.8, \laneF*\laneheight) {Agent Tuning};
+\node[paper, fill=thread6] (mcp)
+    at (\yearx{2025}+1.0, \laneF*\laneheight) {MCP/Agents};
+
+% =====================================================================
+% Thread 7: Efficiency & Data Engineering (lane y=-6)
+% =====================================================================
+\def\laneG{-6}
+\node[lanelabel, text=thread7] at (-0.3, \laneG*\laneheight)
+    {T7: Efficiency \&\\Data Engineering};
+
+\node[paper, fill=thread7] (lora)
+    at (\yearx{2021}+1.0, \laneG*\laneheight) {LoRA};
+\node[paper, fill=thread7] (datasel)
+    at (\yearx{2023}+0.8, \laneG*\laneheight) {Data Selection};
+\node[paper, fill=thread7] (synthdata)
+    at (\yearx{2024}+0.5, \laneG*\laneheight) {Synthetic Data};
+
+% =====================================================================
+% Cross-thread arrows (dashed, idea flow)
+% =====================================================================
+
+% T1 -> T2: InstructGPT-SFT feeds into InstructGPT-RLHF
+\draw[crossarrow, thread1!70] (instructgpt-sft.south) -- (instructgpt-rlhf.north);
+
+% T2 -> T3: RLHF ideas feed into Constitutional AI
+\draw[crossarrow, thread2!70] (instructgpt-rlhf.south) -- (cai.north);
+
+% T2 -> T4: Reward modeling feeds reasoning verification (PRM)
+\draw[crossarrow, thread2!70] (dpo.south)
+    to[out=-90, in=90] (prm.north);
+
+% T4 -> T2: Reasoning verification inspires GRPO
+\draw[crossarrow, thread4!70] (prm.east)
+    to[out=0, in=180] (grpo.south west);
+
+% T1 -> T5: SFT pipeline adopted by LLaVA
+\draw[crossarrow, thread1!70] (selfinstruct.south)
+    to[out=-90, in=90] (llava.north);
+
+% T2 -> T5: RLHF adopted for VLM alignment
+\draw[crossarrow, thread2!70] (dpo.south)
+    to[out=-100, in=90] (vlmrlhf.north);
+
+% T1 -> T6: Instruction tuning enables tool use
+\draw[crossarrow, thread1!70] (selfinstruct.south)
+    to[out=-90, in=90] (toolformer.north);
+
+% T7 -> T1: LoRA enables efficient SFT
+\draw[crossarrow, thread7!70] (lora.north)
+    to[out=90, in=-90] (flan.south);
+
+% T7 -> T2: Efficient training enables broader RLHF
+\draw[crossarrow, thread7!70] (datasel.north)
+    to[out=90, in=-90] (grpo.south);
+
+% T3 -> T4: Safety constraints shape reasoning alignment
+\draw[crossarrow, thread3!70] (saferlhf.south)
+    to[out=-90, in=90] (oone.north);
+
+% T4 -> T6: Reasoning enables agent planning
+\draw[crossarrow, thread4!70] (oone.south)
+    to[out=-90, in=90] (agenttune.north);
+
+% T2 -> T4: RLVR (DAPO) feeds reasoning training
+\draw[crossarrow, thread2!70] (dapo.south)
+    to[out=-90, in=90] (othree.north);
+
+% T4 -> T5: Reasoning RL migrates to multimodal (R1-VL, MM-Eureka)
+\draw[crossarrow, thread4!70] (deepseekr1.south)
+    to[out=-90, in=90] (halluc.north east);
+
+% T4 -> T6: Thinking models empower agent planning
+\draw[crossarrow, thread4!70] (othree.south)
+    to[out=-90, in=90] (mcp.north);
+
+\end{tikzpicture}%
+}% end resizebox
+\caption{Post-training 领域的 Hybrid Problem-Evolution Graph 全景视图。
+七条水平泳道分别对应七条演化线程，
+x 轴为时间线（2017--2026），
+节点为各线程内的 landmark 工作，
+虚线箭头表示跨线程的思想流动与技术迁移。}
+\label{fig:overview}
+\end{figure}

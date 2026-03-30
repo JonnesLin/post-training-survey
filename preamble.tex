@@ -1,0 +1,97 @@
+% === Packages ===
+\usepackage[UTF8]{ctex}                    % Chinese support
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{tikz}
+\usepackage{xcolor}
+\usepackage{natbib}
+\usepackage{caption}
+% \usepackage{subcaption}          % unused - uncomment when adding subfigures
+% \usepackage{algorithm}            % unused - uncomment when adding algorithm pseudocode
+% \usepackage{algorithmic}          % unused - uncomment when adding algorithm pseudocode
+\usepackage{tcolorbox}
+% \usepackage{multirow}             % unused - uncomment when adding multirow table cells
+% \usepackage{makecell}             % unused - uncomment when adding custom table cells
+
+% === TikZ Libraries ===
+\usetikzlibrary{arrows.meta,positioning,calc,backgrounds,fit,shapes.geometric,shadows}
+\usepackage{xfp}  % for \fpeval in TikZ year calculations
+
+% === Thread Colors ===
+\definecolor{thread1}{HTML}{E74C3C}  % SFT - Red
+\definecolor{thread2}{HTML}{3498DB}  % Preference - Blue
+\definecolor{thread3}{HTML}{E67E22}  % Safety - Orange
+\definecolor{thread4}{HTML}{9B59B6}  % Reasoning - Purple
+\definecolor{thread5}{HTML}{2ECC71}  % Multimodal - Green
+\definecolor{thread6}{HTML}{1ABC9C}  % Agentic - Teal
+\definecolor{thread7}{HTML}{F39C12}  % Efficiency - Yellow
+
+% === Thread Color Command ===
+\newcommand{\threadcolor}[1]{%
+  \ifcase#1\relax
+    \or thread1%  1
+    \or thread2%  2
+    \or thread3%  3
+    \or thread4%  4
+    \or thread5%  5
+    \or thread6%  6
+    \or thread7%  7
+  \fi
+}
+
+% === Cross-Reference Commands ===
+% \crossref{thread_number}{section_label} -> colored "-> See Section X.Y"
+\newcommand{\crossref}[2]{%
+  {\color{\threadcolor{#1}}\(\rightarrow\) \textit{见 \S\ref{#2}}}%
+}
+
+% === Landmark Paper Highlight ===
+% \landmark{citekey} -> bold colored citation
+\newcommand{\landmark}[1]{%
+  \textbf{\color{black!80}\citep{#1}}%
+}
+
+% === Evolution Arrow ===
+% \evolution{from_description}{to_description}{reason}
+\newcommand{\evolution}[3]{%
+  \begin{tcolorbox}[colback=gray!5,colframe=gray!50,boxrule=0.3pt,left=4pt,right=4pt,top=2pt,bottom=2pt]
+    \small\textit{#1} \(\xrightarrow{\text{#3}}\) \textit{#2}
+  \end{tcolorbox}
+}
+
+% === Problem Box ===
+\newtcolorbox{problembox}[1][]{%
+  colback=red!3,colframe=red!40,boxrule=0.4pt,
+  fonttitle=\bfseries,title={Problem},#1
+}
+
+% === Solution Box ===
+\newtcolorbox{solutionbox}[1][]{%
+  colback=blue!3,colframe=blue!40,boxrule=0.4pt,
+  fonttitle=\bfseries,title={Solution},#1
+}
+
+% === Open Problem Box ===
+\newtcolorbox{openproblembox}[1][]{%
+  colback=yellow!5,colframe=yellow!60!black,boxrule=0.4pt,
+  fonttitle=\bfseries,title={Open Problem},#1
+}
+
+% === Evolution Box ===
+\newtcolorbox{evolutionbox}[1][]{%
+  colback=green!3,colframe=green!50!black,boxrule=0.4pt,
+  fonttitle=\bfseries,title={Evolution},#1
+}
+
+% === Hyperref Setup ===
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black!70,
+  citecolor=blue!60!black,
+  urlcolor=blue!70!black,
+}

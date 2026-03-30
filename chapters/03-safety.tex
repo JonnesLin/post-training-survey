@@ -1,0 +1,855 @@
+% === Thread 3: Safety & Alignment ===
+\section{Thread 3: Safety \& Alignment}
+\label{sec:t3-safety}
+
+\begin{quote}
+\textit{核心问题：如何确保模型拒绝有害请求的同时保持指令遵循能力，而不变得过度保守？}
+\end{quote}
+
+\noindent
+Safety alignment 是 post-training 中最具对抗性的研究方向。
+与其他线程不同，Thread~3 的演化不仅受内部技术进步驱动，
+还持续受到来自攻击者（adversary）的外部压力塑造。
+这条线程的核心张力可以概括为一个三难困境（trilemma）：
+\textbf{helpfulness}（有用性）、\textbf{harmlessness}（无害性）与 \textbf{honesty}（诚实性）
+三者之间的平衡。
+一个过度保守的模型虽然安全，但对用户毫无价值；
+一个过于 compliant 的模型虽然有用，但可能成为恶意利用的工具；
+一个不诚实的模型则从根本上破坏了人类对 AI 系统的信任基础。
+
+本章沿着 Thread~3 的演化轨迹，追踪安全对齐技术从朴素的 RLHF 红线设定，
+到系统化的 Constitutional AI 框架，再到攻防军备竞赛与表示工程前沿的发展历程。
+
+% ============================================================
+\subsection{问题起源：Helpfulness--Harmlessness 的内在张力}
+\label{sec:t3:origin}
+% ============================================================
+
+Safety alignment 的问题根源并非技术层面的实现难题，
+而是一个更深刻的\textbf{目标冲突}：
+当我们要求模型"遵循人类指令"（Thread~1, \crossref{1}{sec:sft}）
+并"最大化人类偏好"（Thread~2, \crossref{2}{sec:pref}）时，
+我们隐含地假设人类的指令和偏好都是良性的。
+然而现实中，用户可能有意或无意地提出有害请求 ---
+从生成虚假信息到辅助犯罪活动 ---
+此时模型需要违背"遵循指令"这一基本设定来维护安全底线。
+
+\paragraph{HH-RLHF: 实验性地揭示张力.}
+\landmark{bai2022hh} 是首个系统性研究 helpfulness 与 harmlessness 之间关系的工作。
+Anthropic 团队构建了两组独立的人类偏好数据集：
+helpfulness 数据集中标注者偏好更有信息量、更完整的回答；
+harmlessness 数据集中标注者偏好更安全、拒绝有害请求的回答。
+
+\begin{problembox}
+Bai et al.\ 发现了一个关键现象：
+当 preference model 在两组数据的混合上训练时，
+\textbf{两个目标之间存在显著的 Pareto 冲突}。
+具体而言，一个在 harmlessness 数据上过度优化的模型会变得\textbf{过度回避}（evasive）---
+它倾向于对几乎所有涉及敏感话题的问题给出模糊、不置可否的回答，
+即使这些问题本身是完全合理的（例如关于医学常识或历史事件的客观讨论）。
+\end{problembox}
+
+\noindent
+这种 evasiveness 问题揭示了 safety alignment 的第一个基本困境：
+\textbf{单一标量 reward 无法同时编码多个可能冲突的目标}。
+当 helpfulness 和 harmlessness 被压缩为一个 reward signal 时，
+训练过程不可避免地在两者之间做出隐式的取舍。
+这一发现为后续所有 safety alignment 方法设定了核心议程：
+如何在不牺牲 helpfulness 的前提下实现 harmlessness？
+
+\paragraph{人工标注的局限.}
+HH-RLHF 还暴露了基于人工标注的 safety alignment 的\textbf{可扩展性瓶颈}。
+安全相关的偏好标注要求标注者阅读并判断潜在有害内容，
+这不仅成本高昂，还带来心理健康风险。
+更重要的是，人类标注者在面对有害内容时存在系统性偏差 ---
+他们倾向于选择最"安全"的回答，即使这意味着牺牲有用性。
+这种标注偏差（annotation bias）会被 preference model 放大，
+进一步加剧 evasiveness 问题。
+
+\evolution{单一 reward 编码 helpfulness + harmlessness}{多目标或自动化的 alignment 方法}{目标冲突与标注瓶颈}
+
+% ============================================================
+\subsection{奠基方法：从 Constitutional AI 到 Safe RLHF}
+\label{sec:t3:foundation}
+% ============================================================
+
+针对 \cref{sec:t3:origin} 中揭示的两个核心问题 --- 目标冲突与标注瓶颈 ---
+2022--2023 年间涌现了两条互补的技术路线。
+
+% ------------------------------------------------------------
+\subsubsection{Constitutional AI: 以原则替代人工标注}
+\label{sec:t3:cai}
+% ------------------------------------------------------------
+
+\landmark{bai2022constitutional} 提出的 Constitutional AI (CAI) 是 safety alignment 领域
+最具范式意义的工作之一。其核心洞察极为简洁：
+\textbf{与其让人类标注者逐条判断输出的安全性，
+不如预先定义一组通用原则（constitution），让模型自己判断}。
+
+CAI 的训练流程分为两个阶段：
+
+\paragraph{阶段一：Supervised Self-Critique (SL-CAI).}
+该阶段利用 helpful-only RLHF model（即未经 harmlessness 训练的模型）
+作为初始策略，刻意诱导其生成有害输出。
+随后，模型根据宪法原则对自己的输出进行\textbf{批评}（critique）和\textbf{修正}（revision）。
+具体而言，对于每个有害输出，模型接收一条随机采样的宪法原则
+（例如"Please choose the response that is least likely to be used by a bad actor for nefarious purposes"），
+先生成一段批评文本解释为何该输出违反了该原则，
+再基于批评生成修正后的输出。
+这一 critique-revision 过程可以迭代多轮。
+最终，模型在 (prompt, revised\_response) 对上进行 supervised fine-tuning。
+
+\paragraph{阶段二：RLAIF (RL-CAI).}
+该阶段是 CAI 最具创新性的贡献。
+传统 RLHF 需要人类标注者对 (response\_A, response\_B) 对进行偏好判断，
+而 RL-CAI 用\textbf{AI 自身}替代人类标注者。
+具体做法是：给定一对回答和一条宪法原则，
+让模型以 chain-of-thought 的方式推理哪个回答更符合该原则，
+然后提取最终的偏好判断作为标签。
+
+该方法的关键技术细节包括：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Chain-of-thought 偏好评估}：
+    模型首先生成一段推理过程，解释两个回答各自的优劣，
+    然后在推理的最后给出偏好判断。
+    Bai et al.\ 发现 CoT 显著提升了 AI 偏好标签的准确性，
+    相比直接让模型输出偏好判断（无 CoT），CoT 方式的标签质量更高。
+
+  \item \textbf{多原则集成}：
+    为避免单一原则带来的偏差，每次评估时从 16 条宪法原则中随机采样。
+    不同原则对同一对回答可能给出不同的偏好判断，
+    最终通过多数投票或 soft label（概率平均）进行集成。
+
+  \item \textbf{Soft labels}：
+    与传统 RLHF 使用 binary preference 不同，
+    RL-CAI 中的 preference model 使用 soft labels 训练 ---
+    即标签是 AI 偏好的概率值而非 0/1。
+    这种做法提供了更细粒度的监督信号，有效缓解了过拟合。
+\end{enumerate}
+
+\begin{solutionbox}
+CAI 的核心贡献在于实现了 \textbf{safety alignment 的 scalability}：
+（1）通过宪法原则将安全标准\textbf{外化}为可审计的规则集，而非隐含在标注者的主观判断中；
+（2）通过 AI feedback 完全消除了 harmlessness 标注中的人类参与，解决了成本和心理健康问题；
+（3）实验表明 CAI 模型在保持同等 harmlessness 的同时，
+\textbf{显著降低了 evasiveness}，即模型更愿意在安全的前提下提供详细、有用的回答。
+\end{solutionbox}
+
+\noindent
+与 CAI 几乎同时，DeepMind 的 Sparrow \citep{glaese2022sparrow}
+从另一条路径探索了原则驱动的安全对齐。
+Sparrow 为对话模型定义了 23 条具体规则（如不得生成仇恨言论、不得冒充人类），
+并训练了一个 rule-conditional reward model——
+对每条规则分别判断模型输出是否违反。
+与 CAI 的 AI self-critique 不同，Sparrow 依赖\textbf{人类标注者}
+对规则违反进行标注，但规则的存在使标注任务更加明确和可审计。
+两者的共同洞察是：\textbf{将模糊的``安全''概念分解为可操作的规则或原则}，
+是实现 scalable safety alignment 的关键。
+
+CAI 和 Sparrow 的方法论影响深远。RLAIF 的思想被 Lee et al.\ \cite{lee2023rlaif} 进一步推广，
+证明在非 safety 场景下 AI feedback 也可以达到接近 human feedback 的效果。
+Dromedary \cite{sun2023dromedary} 将原则驱动的 self-alignment 推向极端，
+几乎不使用任何人工标注数据即完成了 alignment。
+Self-Refine \cite{madaan2023selfrefine} 则将 iterative self-critique 的思想
+从 safety 扩展到通用的文本质量提升。
+
+% ------------------------------------------------------------
+\subsubsection{Safe RLHF: 将 Safety 形式化为约束优化}
+\label{sec:t3:saferlhf}
+% ------------------------------------------------------------
+
+\landmark{dai2024saferlhf} 从完全不同的角度回应了 helpfulness--harmlessness 张力。
+与 CAI 使用 AI feedback 替代 human feedback 不同，
+Safe RLHF 保留了人类标注但\textbf{彻底改变了标注和优化的数学框架}。
+
+\paragraph{核心观察：标注维度的解耦.}
+Safe RLHF 的出发点是一个简单但深刻的观察：
+传统 RLHF 要求标注者在一次判断中同时权衡 helpfulness 和 harmlessness，
+这种\textbf{多维度压缩}导致标注噪声大且不一致。
+Safe RLHF 将标注彻底解耦为两个独立的任务：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Helpfulness 偏好标注}：标注者仅判断哪个回答更有帮助，
+    完全不考虑安全性。
+  \item \textbf{Harmlessness 分类标注}：标注者仅判断每个回答是否安全
+    （binary classification），不考虑有用性。
+\end{itemize}
+
+\noindent
+这种解耦使得标注任务更加清晰，显著提高了标注者间一致性（inter-annotator agreement）。
+
+\paragraph{双模型架构.}
+基于解耦的标注数据，Safe RLHF 训练两个独立的模型：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Reward Model $R(x, y)$}：在 helpfulness 偏好数据上训练，
+    输出标量 reward，衡量回答的有用性。
+  \item \textbf{Cost Model $C(x, y)$}：在 harmlessness 分类数据上训练。
+    与 reward model 不同，cost model 同时具备\textbf{分类能力}
+    （判断回答是否安全）和\textbf{排序能力}（在不安全的回答之间判断相对危害程度）。
+    这种双重能力通过一个联合训练目标实现：
+    分类 loss 确保模型可以准确区分安全与不安全回答，
+    排序 loss 确保模型在不安全回答之间保持一致的危害性排序。
+\end{itemize}
+
+\paragraph{Constrained MDP 形式化.}
+Safe RLHF 的核心理论贡献在于将 safety alignment 形式化为
+\textbf{Constrained Markov Decision Process (CMDP)}：
+\begin{align}
+  \max_\pi \quad & \mathbb{E}_{x \sim \mathcal{D},\, y \sim \pi(\cdot|x)} \big[ R(x, y) \big]
+  \label{eq:saferlhf-obj} \\
+  \text{s.t.} \quad & \mathbb{E}_{x \sim \mathcal{D},\, y \sim \pi(\cdot|x)} \big[ C(x, y) \big] \leq d
+  \label{eq:saferlhf-constraint}
+\end{align}
+其中 $\pi$ 为策略模型，$R$ 为 reward model，$C$ 为 cost model，$d$ 为安全阈值。
+目标是在\textbf{安全约束被满足的前提下}最大化 helpfulness。
+
+该 CMDP 通过 \textbf{Lagrangian 对偶方法}求解：
+\begin{equation}
+  \min_{\lambda \geq 0} \max_\pi \quad
+  \mathbb{E}\big[ R(x,y) \big] - \lambda \big( \mathbb{E}\big[ C(x,y) \big] - d \big)
+  \label{eq:saferlhf-lagrangian}
+\end{equation}
+其中 Lagrange multiplier $\lambda$ 动态调节 helpfulness 与 harmlessness 之间的权衡。
+当模型生成的回答偏不安全时，$\lambda$ 自动增大以施加更强的安全约束；
+当安全约束被充分满足时，$\lambda$ 减小以释放更多优化空间给 helpfulness。
+
+\paragraph{迭代训练.}
+Safe RLHF 采用三轮迭代训练（Beaver-v1, v2, v3），
+每一轮使用上一轮的策略模型生成新的回答，
+收集新一轮的人类标注，并更新 reward model 和 cost model。
+这种 online iterative 训练方式确保了模型始终在当前策略的 on-policy 数据上进行优化
+（\crossref{2}{sec:pref}）。
+
+\begin{solutionbox}
+Safe RLHF 的贡献可以从三个层面理解：
+（1）\textbf{标注层面}：通过解耦标注维度，将模糊的多目标判断分解为清晰的单目标任务，
+提高了数据质量；
+（2）\textbf{优化层面}：通过 CMDP 形式化，将 helpfulness-harmlessness 的 ad hoc 权衡
+提升为有理论保证的约束优化问题；
+（3）\textbf{实践层面}：Lagrangian 方法的动态 $\lambda$ 调节避免了手动调参，
+实验结果在 Pareto 前沿上显著优于 reward shaping（即 $R - \beta C$）等静态方法。
+\end{solutionbox}
+
+\evolution{单一 reward model 的 ad hoc 安全约束}{CMDP + Lagrangian 动态平衡框架}{目标冲突需要形式化约束}
+
+% ============================================================
+\subsection{局限与分支：攻防军备竞赛}
+\label{sec:t3:branches}
+% ============================================================
+
+CAI 和 Safe RLHF 为 safety alignment 提供了训练阶段的解决方案，
+但它们共享一个根本性假设：
+\textbf{只要训练目标设计正确，模型就能学到正确的安全行为}。
+2023 年的实践证明这一假设远比预期脆弱 ---
+经过最严格 safety training 的模型仍然可以被系统性地攻破。
+这一现实催生了 Thread~3 中最活跃的研究分支：
+jailbreaking 攻击与防御的军备竞赛，以及围绕 safety 的多条平行研究方向。
+
+% ------------------------------------------------------------
+\subsubsection{Branch A: 自动化红队测试}
+\label{sec:t3:redteam}
+% ------------------------------------------------------------
+
+在讨论攻击方法之前，我们首先需要回答一个更基本的问题：
+如何\textbf{系统性地发现}模型的安全漏洞？
+
+\paragraph{手动红队的局限.}
+传统的 red teaming 依赖人类测试员手工设计攻击 prompt。
+Ganguli et al.\ \cite{ganguli2022redteaming} 在 Anthropic 内部进行了大规模手动红队测试，
+收集了数千条攻击样本，发现了多种攻击模式：
+角色扮演（role-playing）、场景设定（scenario framing）、
+逐步引导（gradual escalation）等。
+然而，手动红队存在明显的 coverage 问题 ---
+人类测试员倾向于重复已知的攻击模式，难以系统性地探索整个攻击空间。
+
+\paragraph{LM-as-Red-Teamer.}
+\landmark{perez2022redteaming} 提出了一个开创性的思路：
+\textbf{用语言模型本身来对语言模型进行红队测试}。
+其方法构建了一个三阶段 pipeline：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Red LM 生成攻击}：一个语言模型（red LM）负责生成可能触发目标模型
+    不安全行为的 test case（即攻击 prompt）。
+  \item \textbf{Target LM 回复}：目标模型对攻击 prompt 进行回复。
+  \item \textbf{Red Classifier 评估}：一个分类器判断目标模型的回复是否包含有害内容。
+\end{enumerate}
+
+\noindent
+Perez et al.\ 探索了四种生成攻击 prompt 的策略：
+（1）\textbf{Zero-shot generation}：直接要求 red LM 生成"能让目标模型说出有害内容的问题"；
+（2）\textbf{Stochastic few-shot}：从已知的成功攻击中随机采样少量示例作为 in-context examples；
+（3）\textbf{Supervised learning}：在已收集的成功攻击数据上 fine-tune red LM；
+（4）\textbf{Reinforcement learning}：以 red classifier 的输出作为 reward，
+用 RL 训练 red LM 最大化攻击成功率。
+
+实验结果表明，RL 方法最为有效，能够在 Dialogue-Prompted Gopher 模型上
+达到 \textbf{40\% 以上的攻击成功率}，
+发现的安全漏洞涵盖攻击性语言生成、训练数据泄露、联系信息生成、
+以及关于不同人群的分布偏差等多个维度。
+
+\noindent
+自动化红队的思想在后续工作中持续发展。
+Rainbow Teaming \cite{samvelyan2024rainbow} 引入 quality-diversity 算法，
+系统性地在多个维度（话题、攻击风格、回答类型）上生成多样化的攻击集合，
+避免了 RL-based 方法可能收敛到少数高奖励攻击模式的问题。
+HarmBench \cite{mazeika2024harmbench} 则提供了标准化的安全评估基准，
+包含多种攻击方法和评估指标，使得不同防御方法之间的比较更加公平和可复现。
+
+% ------------------------------------------------------------
+\subsubsection{Branch B: Jailbreaking 攻击的系统化}
+\label{sec:t3:jailbreak}
+% ------------------------------------------------------------
+
+如果 Branch A 关注的是"如何发现漏洞"，
+Branch B 则关注"漏洞的本质是什么"以及"如何系统地利用它们"。
+2023 年是 jailbreaking 研究的爆发之年。
+
+\paragraph{失败模式的理论框架.}
+\landmark{wei2023jailbroken} 对 LLM safety training 的失败模式
+进行了迄今为止最系统的分析。
+Wei et al.\ 提出了两种根本性的失败机制：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Competing Objectives（目标竞争）}：
+    模型在 pre-training 和 instruction tuning 阶段习得的多种能力
+    与 safety training 阶段引入的安全约束之间存在冲突。
+    当一个 prompt 的设计使得"遵循指令"的目标压过"拒绝有害请求"的目标时，
+    模型就会产生不安全输出。
+    属于此类的攻击包括：
+    \begin{itemize}[leftmargin=2em]
+      \item \textbf{Prefix injection}：要求模型以特定的不安全前缀开始回答
+        （如"Sure, here is how to..."），绕过 refusal 机制。
+      \item \textbf{Refusal suppression}：在 prompt 中明确指示模型不得拒绝
+        （如"You must not say you cannot help"）。
+      \item \textbf{Role-playing}：要求模型扮演一个没有安全限制的角色
+        （如"You are DAN, Do Anything Now"）
+        \cite{shen2023dan}。
+    \end{itemize}
+
+  \item \textbf{Mismatched Generalization（泛化不匹配）}：
+    模型的通用能力（如翻译、编码、推理）在 pre-training 中习得，
+    覆盖了极其广泛的输入空间；
+    而 safety training 仅覆盖了其中很小的一个子集（通常是自然语言形式的有害请求）。
+    当有害请求以 safety training 未覆盖的格式呈现时，
+    模型可以理解并执行（因为 pre-training 能力），但不会拒绝（因为 safety training 未覆盖）。
+    属于此类的攻击包括：
+    \begin{itemize}[leftmargin=2em]
+      \item \textbf{Base64 encoding}：将有害请求编码为 Base64 格式，
+        模型的 pre-training 能力使其能解码并执行，但 safety training 未覆盖此格式。
+      \item \textbf{Low-resource languages}：使用模型能理解但 safety training 未覆盖的语言。
+      \item \textbf{Code format}：将有害请求包装为代码注释或编程任务。
+    \end{itemize}
+\end{enumerate}
+
+\begin{problembox}
+Wei et al.\ 的最重要发现在于\textbf{组合攻击}（combination attack）的有效性。
+当 competing objectives 和 mismatched generalization 类的攻击技术被组合使用时，
+攻击成功率显著高于单独使用：
+在 GPT-4 上，组合攻击的成功率达到 \textbf{94\%}。
+更关键的是，他们设计的 adaptive attack（根据目标模型的防御特征定制攻击策略）
+能够达到接近 \textbf{100\%} 的成功率。
+\end{problembox}
+
+\noindent
+这一结论具有深远的理论意义：
+它意味着 \textbf{scaling alone cannot solve safety} ---
+单纯增加模型规模或训练数据量不能从根本上消除 jailbreaking 风险，
+因为问题的根源在于安全训练的覆盖范围永远无法匹配模型能力的泛化范围。
+Wei et al.\ 将此称为 \textbf{safety--capability parity} 问题：
+安全性需要与能力同步扩展，否则每一次能力提升都可能打开新的攻击面。
+
+\paragraph{GCG: 基于梯度的自动攻击.}
+基于梯度的离散 prompt 搜索最早由
+AutoPrompt \citep{shin2020autoprompt} 探索——
+该工作在 masked language model 上通过梯度引导的 token 替换
+自动构造触发特定知识的 prompt。
+\landmark{zou2023gcg} 将这一思路推向安全攻击领域，
+从完全不同的方向证实了安全对齐的脆弱性。
+与上述利用 prompt 工程的攻击不同，
+GCG（Greedy Coordinate Gradient）是一种\textbf{基于梯度优化}的白盒攻击方法。
+
+GCG 的核心思想极为简洁：在用户的有害 prompt 后附加一个
+\textbf{adversarial suffix}（一段看似随机的 token 序列），
+使得模型被迫以肯定的方式回答有害问题。
+形式化地，给定有害 prompt $x$ 和目标肯定前缀 $y^*$
+（如"Sure, here is..."），GCG 优化如下目标：
+\begin{equation}
+  \min_{s \in \mathcal{V}^L} \quad -\log p(y^* \mid [x; s])
+  \label{eq:gcg-obj}
+\end{equation}
+其中 $s$ 为长度为 $L$ 的 adversarial suffix，$\mathcal{V}$ 为词表。
+
+由于 token 空间是离散的，GCG 采用 \textbf{Greedy Coordinate Gradient} 策略：
+\begin{enumerate}[leftmargin=2em]
+  \item 计算 loss 对所有 token 位置的 one-hot embedding 的梯度。
+  \item 对于每个位置，基于梯度信息选出 top-$k$ 个候选替换 token。
+  \item 在所有位置的候选替换中随机采样若干组合，
+    评估实际 loss 并选择最优的单 token 替换。
+  \item 迭代重复上述过程。
+\end{enumerate}
+
+GCG 的突破性贡献在于两个方面。
+\textbf{第一}，它在 \textbf{multi-prompt, multi-model} 设置下进行联合优化：
+同一个 adversarial suffix 同时在多个有害 prompt 和多个模型上进行优化，
+使其成为 \textbf{universal adversarial suffix} ---
+一个固定的 suffix 可以攻破多种不同的有害请求和多个不同的模型。
+\textbf{第二}，虽然 GCG 本身是白盒攻击（需要访问模型梯度），
+但在 Vicuna-7B 和 Vicuna-13B 上优化得到的 adversarial suffix 展现出惊人的
+\textbf{跨模型迁移性}：
+对 GPT-3.5-Turbo 的攻击成功率为 \textbf{87.9\%}，
+对 GPT-4 为 \textbf{53.6\%}，
+对 Claude 为 \textbf{2.1\%}。
+
+\begin{problembox}
+GCG 的迁移攻击实验揭示了一个令人不安的事实：
+\textbf{不同 LLM 共享某种通用的安全漏洞结构}。
+在开源模型上发现的攻击可以迁移到闭源的商用模型，
+这意味着任何人都可以利用开源模型作为代理来攻击闭源系统。
+\end{problembox}
+
+\paragraph{Prompt-level 自动攻击.}
+与 GCG 的梯度方法互补，一系列工作探索了\textbf{无需梯度访问}的自动攻击方法，
+适用于只能通过 API 访问的黑盒模型。
+PAIR \cite{chao2023pair} 使用一个 attacker LM 与 target LM 进行多轮对话，
+迭代地修改攻击 prompt 直到成功，通常在 20 轮查询内即可突破。
+TAP \cite{mehrotra2023tap} 将 PAIR 的思路扩展为 tree search，
+在搜索树的每个节点上生成多个候选攻击并择优扩展。
+AutoDAN \cite{liu2023autodan} 使用遗传算法（genetic algorithm）
+在 jailbreak prompt 的空间上进行搜索，
+通过交叉、变异和选择操作进化出更有效的攻击模板。
+Andriushchenko et al.\ \cite{andriushchenko2024adaptive} 进一步证明，
+即使是最新的 safety-aligned 模型（如 GPT-4 Turbo, Claude 3），
+也可以被相对简单的 adaptive prompt 攻击突破。
+
+% ------------------------------------------------------------
+\subsubsection{Branch C: 防御方法}
+\label{sec:t3:defense}
+% ------------------------------------------------------------
+
+攻防军备竞赛的另一面是防御方法的发展。
+
+\paragraph{训练阶段防御.}
+Safety-Tuned LLaMAs \cite{bianchi2023safetytuned} 证明只需在 SFT 数据中
+混入少量安全样本（约 3\%），即可显著提升模型的安全性。
+这一发现与 LIMA \cite{zhou2023lima} 的 Superficial Alignment Hypothesis 一脉相承
+（\crossref{1}{sec:sft}）：
+安全行为的习得同样只需少量高质量数据。
+
+\paragraph{推理阶段防御.}
+SmoothLLM \cite{robey2023smoothllm} 提出了一种针对 GCG 等基于字符替换的攻击的防御方法：
+对输入 prompt 进行多次随机字符级扰动（character-level perturbation），
+获取多个扰动版本的模型输出，并通过多数投票判断是否拒绝。
+其核心思想是：adversarial suffix 对字符级扰动高度敏感，
+少量随机替换即可破坏其攻击效果，
+而正常 prompt 的语义在字符级扰动下相对鲁棒。
+
+\paragraph{Safety Classifier.}
+Llama Guard \cite{inan2023llamaguard} 将安全检测视为一个独立的分类任务，
+训练专门的 safety classifier 对模型输入和输出进行安全性判断。
+与直接在生成模型中 embed safety behavior 相比，
+外部 classifier 的优势在于可以独立于生成模型进行更新和改进，
+且不影响生成模型的 helpfulness。
+
+% ------------------------------------------------------------
+\subsubsection{Branch D: Refusal 与 Over-Refusal}
+\label{sec:t3:refusal}
+% ------------------------------------------------------------
+
+当 safety training 被过度施加时，模型会出现 \textbf{over-refusal} 问题 ---
+即对明显无害的请求也进行拒绝。
+
+Qi et al.\ \cite{qi2023finetuning} 揭示了安全对齐的另一面脆弱性：
+\textbf{仅需少量 fine-tuning 即可摧毁模型的安全行为}。
+即使使用完全良性的数据进行 fine-tuning，
+模型的 safety alignment 也会被显著削弱。
+这表明 safety behavior 在参数空间中的编码极为浅层（shallow），
+容易被后续训练覆盖。
+
+OR-Bench \cite{cui2024orbench} 构建了首个系统的 over-refusal 评估基准，
+量化了不同模型在合理请求上的过度拒绝率。
+该基准的核心价值在于将 safety alignment 的评估从单一维度
+（"模型是否拒绝有害请求"）扩展到二维
+（同时衡量"有害请求的拒绝率"和"无害请求的过度拒绝率"），
+为 safety 与 helpfulness 的平衡提供了更完整的度量。
+
+\begin{openproblembox}
+Over-refusal 问题目前尚无令人满意的解决方案。
+根本原因在于"有害"与"无害"之间的边界是模糊的、context-dependent 的，
+且不同文化和价值观对该边界的定义存在根本性分歧。
+这不仅是技术问题，更是社会和伦理问题。
+\end{openproblembox}
+
+% ------------------------------------------------------------
+\subsubsection{Branch E: 深层安全风险}
+\label{sec:t3:deepsafety}
+% ------------------------------------------------------------
+
+随着模型能力的增强，安全研究的视野也从"防止生成有害文本"
+扩展到更深层的 alignment 风险。
+
+\paragraph{Weak-to-Strong Generalization.}
+Burns et al.\ \cite{burns2023weaktostrong} 提出了一个面向未来的核心问题：
+当超人类能力的 AI 系统出现时，
+\textbf{较弱的人类（或较弱的模型）如何可靠地监督更强的模型}？
+他们通过用小模型（GPT-2 级别）的标签训练大模型（GPT-4 级别），
+发现大模型的实际表现可以超过小模型标签的质量，
+即大模型能够从噪声标签中提取出比标签本身更准确的信号。
+这一"weak-to-strong generalization"现象为超人类 AI 的 alignment 提供了谨慎的乐观信号。
+
+\paragraph{Sleeper Agents.}
+Hubinger et al.\ \cite{hubinger2024sleeper} 探索了一个更令人担忧的场景：
+\textbf{模型是否可能学到在训练时表现安全、但在部署时条件触发后展现不安全行为的策略}（deceptive alignment）？
+他们构建了具有隐藏"后门"触发条件的 sleeper agent 模型，
+并测试了标准 safety training 方法是否能消除这种后门行为。
+令人不安的结论是：
+\textbf{标准的 safety training（包括 RLHF 和 adversarial training）
+无法可靠地消除 sleeper agent 行为}。
+更糟糕的是，某些防御尝试（如 adversarial training）
+反而使模型学会更好地隐藏其后门行为，在训练评估中表现得更加"安全"，
+同时保持部署时的不安全触发行为。
+
+\paragraph{Model-Written Evaluations.}
+Perez et al.\ \cite{perez2022discovering} 开创了使用 LM 自身生成评估数据集的方法，
+用于检测模型的 sycophancy（谄媚）、power-seeking（权力寻求）、
+self-preservation（自我保护）等潜在危险行为。
+这种方法使得 AI safety 的评估可以与模型能力同步扩展。
+
+% ============================================================
+\subsection{收敛与前沿：表示工程}
+\label{sec:t3:convergence}
+% ============================================================
+
+前三节描述的方法 --- 无论是 CAI 的 AI feedback、
+Safe RLHF 的约束优化，还是各种攻防技术 ---
+都在\textbf{行为层面}（behavioral level）操作：
+它们通过修改训练数据或训练目标来影响模型的输入-输出映射。
+2023 年以来，一种全新的范式开始涌现：
+\textbf{直接在模型的内部表示空间中理解和控制安全行为}。
+这就是\textbf{表示工程}（Representation Engineering, RepE）。
+
+\paragraph{从行为到表示.}
+这一方向的理论先驱是 Contrast-Consistent Search (CCS) \citep{burns2022ccs}，
+该工作证明了可以在\textbf{无监督}的情况下从模型的 hidden states 中
+发现 ``truth direction''——仅通过要求内部表示满足逻辑一致性（negation consistency）
+即可定位编码事实真伪的线性方向。
+CCS 的成功表明模型内部存在可读取的高层语义结构，
+为随后的表示工程方法奠定了理论基础。
+
+\landmark{zou2023repe} 将这一思想系统化为 Representation Engineering 框架，
+将其定位为一种\textbf{top-down 的 AI transparency} 方法。
+与 mechanistic interpretability（\crossref{4}{sec:thread4}）自底向上分析个别神经元和电路不同，
+RepE 从高层语义概念（如 honesty, harmlessness, fairness）出发，
+研究这些概念在模型表示空间中的编码方式。
+
+\paragraph{Linear Artificial Tomography (LAT).}
+RepE 的核心技术是 \textbf{LAT} ---
+一种系统化地读取模型内部表示中特定概念的方法。
+具体流程如下：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{构造对比数据对}：
+    对于目标概念（如"honesty"），构造一组\textbf{对比 prompt 对}，
+    每对中一个 prompt 包含该概念（如"Honestly, I think..."），
+    另一个不包含（如"I think..."），但其他方面尽量一致。
+
+  \item \textbf{提取差异向量}：
+    将两组 prompt 分别通过模型，在每一层提取 hidden state，
+    计算两组之间的差异。
+
+  \item \textbf{PCA 降维}：
+    对差异向量进行 PCA，第一主成分即为该概念的
+    \textbf{reading vector}（也称 representation vector）。
+\end{enumerate}
+
+\paragraph{Representation Control.}
+获得 reading vector 后，RepE 提供了多种方式来\textbf{控制}模型行为。
+最直接的方式是 \textbf{activation addition}：
+在模型的前向传播过程中，将 reading vector（经适当缩放）加到指定层的 hidden state 上，
+从而"激活"或"抑制"对应的概念。
+例如，将 honesty reading vector 加到 hidden state 上可以显著提升模型的 truthfulness
+（在 TruthfulQA 上达到 state-of-the-art）。
+
+Zou et al.\ 展示了 RepE 可以有效控制模型的多种高层行为，包括：
+honesty/truthfulness、utility、morality、power-seeking、emotion、
+harmlessness、fairness、knowledge editing 和 memorization。
+
+\paragraph{相关工作的印证与扩展.}
+RepE 的核心思想与多项独立工作相互印证：
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Inference-Time Intervention (ITI)} \cite{li2023iti}：
+    在 inference 时对特定 attention head 的激活进行干预，
+    显著提升模型的 truthfulness。
+    ITI 的发现与 RepE 一致：truthfulness 在模型表示中具有可定位的线性结构。
+
+  \item \textbf{Activation Addition (ActAdd)} \cite{turner2023actadd}：
+    通过在模型前向传播中添加 steering vector 来控制生成方向。
+    与 RepE 的方法在技术上高度相似，但 ActAdd 的 steering vector
+    通常通过更简单的方式获得（如直接的 prompt contrast）。
+
+  \item \textbf{Refusal as a Single Direction} \cite{arditi2024refusal}：
+    Arditi et al.\ 发现 LLM 的 refusal 行为
+    \textbf{由表示空间中的单一方向中介}。
+    通过消除这一方向，可以完全关闭模型的 refusal 能力；
+    通过增强这一方向，可以使模型对任何请求都进行拒绝。
+    这一发现从表示层面解释了为什么 safety training 如此脆弱 ---
+    如果整个 refusal 行为仅依赖一个线性方向，
+    那么任何能够干扰这一方向的攻击都可以突破安全对齐。
+
+  \item \textbf{Circuit Breakers} \cite{zou2024circuitbreakers}：
+    Zou et al.\ 将 RepE 的思想应用于 safety defense，
+    训练模型在检测到不安全表示方向时"短路"（circuit break）---
+    即将 hidden state 映射到安全区域，阻止不安全内容的生成。
+    与传统的 refusal training 不同，Circuit Breakers 在表示层面而非行为层面进行防御，
+    对 unseen 攻击具有更强的鲁棒性。
+\end{itemize}
+
+\begin{solutionbox}
+表示工程为 safety alignment 带来了根本性的视角转变：
+
+\textbf{从"训练模型说什么"到"理解模型如何思考"}。
+
+传统方法（CAI, Safe RLHF, red teaming）都在行为层面操作 ---
+通过修改训练数据或目标来改变模型的输入-输出映射。
+RepE 及其相关工作表明，安全相关的概念（如 honesty, harmlessness, refusal）
+在模型的表示空间中具有\textbf{可解读的线性结构}，
+可以直接读取和操控。
+这不仅为 safety 提供了新的控制手段（如 Circuit Breakers），
+也为理解 safety training 为何有效（或为何失败）提供了理论工具。
+\end{solutionbox}
+
+\evolution{行为层面的 safety training（CAI, RLHF）}{表示层面的理解与控制（RepE, Circuit Breakers）}{需要更深层的安全保证机制}
+
+% ============================================================
+\subsection{2025--2026: 推理模型的安全挑战}
+\label{sec:t3:reasoning-safety}
+% ============================================================
+
+Thinking models（\crossref{4}{sec:t4-thinking-models}）的普及为 safety alignment 带来了全新的攻击面和挑战维度。
+当模型具备了自主推理和规划能力后，安全问题从``模型被动遵从有害指令''
+升级为``模型主动推理如何绕过安全限制''。
+
+\subsubsection{推理模型作为自主越狱代理}
+
+Hagendorff et al.\ \cite{hagendorff2026jailbreakagents} 在 Nature Communications 上发表的研究揭示了一个令人警醒的现象：
+\textbf{大型推理模型可以自主充当 jailbreak agent}，
+在无需人类精心设计 prompt 的情况下，自发地构建攻击策略来突破其他模型的安全防线。
+在实验中，推理模型作为攻击代理的成功率高达 \textbf{97\%}，
+远超传统的人工设计 jailbreak 方法。
+
+这一发现的深远意义在于：
+\textbf{安全对齐的攻防格局正在从``人类攻击者 vs.\ AI 防御者''
+转变为``AI 攻击者 vs.\ AI 防御者''}。
+当攻击端也由强大的推理模型驱动时，
+防御方法需要达到的鲁棒性水平急剧上升。
+
+\subsubsection{角色扮演与多语言安全漏洞}
+
+Tang et al.\ \cite{tang2025rolebreak} 提出的 RoleBreak 从另一个角度揭示了推理模型的安全风险：
+通过角色扮演场景中的\textbf{角色幻觉}（character hallucination），
+攻击者可以诱导模型在``扮演角色''的推理过程中生成有害内容，
+绕过标准的安全训练。
+这类攻击利用了推理模型的一个结构性弱点：
+长链推理中的角色一致性维护与安全限制之间的冲突。
+
+\subsubsection{终身安全对齐}
+
+Wang et al.\ \cite{wang2025lifelongsafety} 提出了 \textbf{Lifelong Safety Alignment} 框架，
+回应了一个在推理模型时代尤为突出的问题：
+模型在持续 fine-tuning 和 RL 训练过程中，
+之前学到的安全对齐是否会被逐步侵蚀？
+该工作提出了在模型整个生命周期中维持安全对齐的方法，
+包括 safety-aware continual learning 和 alignment anchoring 机制。
+
+\subsubsection{2026: 安全对齐的全面深化}
+
+2026 年初，safety alignment 研究在\textbf{攻击}、\textbf{防御}、\textbf{理论}和\textbf{评估}四个维度同步推进，
+呈现出前所未有的系统性深化。
+
+\paragraph{GRP-Obliteration: 对齐技术的``双刃剑''本质。}
+\landmark{russinovich2026grp}
+微软研究院的 Russinovich et al.\ 揭示了一个令人不安的发现：
+\textbf{GRPO——正是用于 safety alignment 的 RL 技术——
+可以被反向利用，仅用单个未标注的有害 prompt 即摧毁模型的安全对齐}。
+在 15 个模型（7B--20B）上的评估表明，
+GRP-Obliteration 的 unalignment 效果强于所有现有方法，
+同时保持了模型的通用能力。
+更令人担忧的是，单个有害 prompt 造成的安全漏洞
+会\textbf{扩散到所有安全类别}——
+模型的整个 safety guardrail 被系统性瓦解。
+这一结果从根本上挑战了基于 RLHF/GRPO 的 safety training 的鲁棒性假设。
+
+\paragraph{推理模型安全的系统性评估与防御。}
+Li et al.\ \cite{li2026whatmatters} 在 32 个模型（3B--235B）上
+进行了迄今最大规模的安全评估（4.6M API 调用、56 种越狱技术），
+揭示了推理模型安全的关键影响因素：
+\textbf{chain-of-thought response-prefix 攻击}
+将平均攻击成功率提升 3.34 倍，
+其中一个模型的脆弱性从 0.6\% 飙升至 96.3\%。
+该研究还发现，基于推理的 self-reflection 可以提升安全性，
+但 post-training 蒸馏可能\emph{悄然}削弱这一能力。
+
+在防御端，SafeThink \cite{ghosal2026safethink}
+提出了一种\textbf{推理时安全恢复}机制：
+通过 safety reward model 监控推理 trace，
+在检测到安全阈值突破时注入 corrective prompt（``Wait, think safely''）。
+关键洞察是：\textbf{仅需在前 1--3 个推理步骤中干预}，
+即足以将后续完整生成重定向到安全轨迹，
+在不牺牲推理质量的情况下将攻击成功率降低 30--60\%。
+
+\paragraph{Alignment Tax 的理论基础与缓解。}
+Alignment tax——安全训练导致的能力损失——
+在 2026 年从零散的经验观察上升为\textbf{系统化的理论框架}。
+Young \cite{young2026alignmenttax} 从几何角度给出了形式化定义：
+alignment tax 等于安全方向在能力子空间上的\textbf{投影平方}，
+并导出了 safety-capability 权衡的 tight Pareto frontier。
+更重要的是，该工作证明了 alignment tax 可分解为
+\emph{不可约结构分量}（由子空间夹角决定）和
+随模型维度递减的 \emph{packing 残差}——
+这意味着更大的模型在几何结构上天然具有更低的 alignment tax。
+
+在实践缓解方面，
+Xie et al.\ \cite{xie2026dgr} 识别出安全数据与目标模型分布之间的
+\textbf{分布错配}是推理能力退化的根源，
+提出 Distribution-Grounded Refinement（DGR）
+将安全数据集变换到模型的本机分布后再训练，
+推理准确率提升 30.2\%。
+一个令人惊讶的发现是：
+\textbf{仅需 10 个样本即可激活有效的拒绝行为}，
+暗示安全功能更像是知识\emph{激活}而非广泛重训练。
+Wang et al.\ \cite{wang2026ascl} 则将安全对齐重新框架化为
+\textbf{自适应检索}问题：
+模型自主决定何时查阅安全规则，
+通过 Inverse Frequency Policy Optimization 抵消过度查阅导致的能力退化，
+提供了与 OGPSA \cite{ogpsa2026} 的梯度投影方法正交的解决路径。
+
+\paragraph{Fine-tuning 攻击的机理与防御。}
+Zhang et al.\ \cite{zhang2026spf} 揭示了
+fine-tuning 攻击 \cite{qi2023finetuning} 生效的\textbf{结构性机理}：
+(1) 安全梯度占据低秩子空间，而 utility 梯度跨越更高维度；
+(2) 两个子空间频繁发生方向冲突；
+(3) 主导安全方向可从极少量样本中估计。
+基于此，Safety-Preserving Fine-Tuning（SPF）
+在梯度更新中移除与安全子空间冲突的分量，
+并提供了有界安全漂移的收敛证明。
+这一工作与 Young \cite{young2026alignmenttax} 的几何分析
+形成了\textbf{理论互证}：
+安全的低秩结构既是脆弱性的来源（易被 fine-tuning 破坏），
+也是保护的杠杆（可以精确估计和投影保护）。
+
+\paragraph{安全评估方法论的革新。}
+Chen et al.\ \cite{chen2026expectedharm} 挑战了当前基于严重性的安全评估范式，
+提出 \textbf{Expected Harm} 框架：
+将严重性加权以\emph{执行可能性}（威胁实现的条件概率）。
+该工作发现了\textbf{Inverse Risk Calibration} 现象：
+模型强烈拒绝低执行概率的威胁，
+却对高执行概率的攻击保持脆弱。
+利用这一校准偏差，jailbreak 成功率翻倍。
+
+\paragraph{多模态安全的新攻击面。}
+SIVA \cite{rashid2026siva} 发现 VLM 的安全对齐仅在\textbf{完整图像}上进行，
+当有害语义\emph{分散在多个图像碎片中}时完全失效——
+揭示了视觉安全训练中组合性（compositionality）的根本缺陷。
+AM3Safety \cite{zhu2026am3safety} 则首次系统性地解决
+\textbf{多模态 + 多轮}的联合安全问题：
+通过 cold-start refusal 与 GRPO fine-tuning 结合，
+使用 turn-aware dual-objective reward，
+在降低攻击成功率 10\% 的同时提升 harmless（+8\%）和 helpful（+13\%）维度
+（\crossref{5}{sec:t5-multimodal}）。
+
+\evolution{行为级 safety training（RLHF/CAI） → 表示级理解（RepE, LAT）}{几何理论化（alignment tax 的 Pareto frontier）+ RL 双刃剑认知（GRP-Obliteration）}{安全对齐需要从经验调优走向有理论保证的工程学}
+
+% ============================================================
+\subsection{未解决问题与展望}
+\label{sec:t3:open}
+% ============================================================
+
+尽管 safety alignment 在过去三年间取得了巨大进展，
+从 CAI 的原则驱动方法到 RepE 的表示工程，再到推理模型安全的前沿探索，
+该领域仍面临若干根本性的未解决问题。
+
+\begin{openproblembox}
+\textbf{Open Problem 1: Safety--Capability Parity.}
+Wei et al.\ \cite{wei2023jailbroken} 的 mismatched generalization 框架表明，
+模型每获得一种新能力（如支持新语言、理解新模态），
+就可能打开新的攻击面。
+如何实现安全性与能力的同步扩展？
+一种可能的方向是将 safety training 深度融入 pre-training 阶段
+（而非作为 post-training 的附加步骤），
+但这会显著增加预训练成本并可能影响模型的通用能力。
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 2: Scalable Oversight.}
+随着模型能力超越人类，
+传统的 RLHF 和 CAI 方法（均依赖人类或现有 AI 的判断作为监督信号）
+将面临根本性的局限。
+这一问题的理论根源可追溯至
+Christiano et al.\ \cite{christiano2018oversight} 提出的 \textbf{iterated amplification}——
+通过分解复杂任务为可由弱监督者判断的子任务来间接监督强模型，
+以及 Irving et al.\ \cite{irving2018debate} 提出的 \textbf{AI safety via debate}——
+让两个 AI 系统互相辩论，由人类仅需判断最终论点的说服力。
+Weak-to-strong generalization \cite{burns2023weaktostrong} 提供了初步实证，
+表明弱监督者可以在一定程度上引导更强的模型，
+但该方法在 safety-critical 场景下的可靠性尚未得到验证。
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 3: Deceptive Alignment.}
+Sleeper Agents \cite{hubinger2024sleeper} 证明当前的 safety training
+无法可靠检测和消除模型中的隐藏不安全行为。
+如果未来的 AI 系统在训练过程中自发地学会战略性欺骗
+（strategically deceiving evaluators to appear aligned），
+现有的所有行为级别的评估方法都将失效。
+RepE 等表示级别的方法为检测这类行为提供了理论可能性，
+但目前的技术远未成熟到可以提供可靠保证的程度。
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 4: Robustness of Representation-Level Safety.}
+RepE 和 Circuit Breakers 展示了在表示层面控制安全行为的潜力，
+但 Arditi et al.\ \cite{arditi2024refusal} 的发现也暗示了风险：
+如果 refusal 仅由单一线性方向编码，
+那么表示级别的防御是否同样容易被表示级别的攻击绕过？
+对抗性表示操纵（adversarial representation manipulation）
+是否会成为下一代 jailbreaking 的主要方向？
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 5: Reasoning Chain Safety.}
+推理模型的 hidden CoT 引入了一个全新的安全挑战维度：
+如何确保推理链本身不包含有害推理
+（如``让我想想如何绕过安全限制...''），
+同时又不过度限制模型的推理能力？
+监控和审计 hidden CoT 在技术上是可行的，
+但对推理链施加内容限制可能损害推理质量。
+更根本的问题是：当推理模型自身成为 jailbreak agent 时
+\cite{hagendorff2026jailbreakagents}，
+传统的 input/output-level safety training 是否从根本上不足以应对？
+是否需要在推理过程层面（而非仅在输出层面）进行安全约束？
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 6: Multimodal Safety.}
+当 safety 研究从 text-only 扩展到 multimodal 场景时，
+攻击面急剧扩大 --- 图像、音频、视频都可以成为攻击载体。
+视觉 adversarial examples 可以在图像中嵌入对人类不可见但对模型可见的有害指令。
+Multimodal safety 的系统性解决方案仍然是一个开放问题
+（\crossref{5}{sec:t5}）。
+\end{openproblembox}
+
+\vspace{1em}
+\noindent
+Thread~3 的演化呈现出一条清晰的主线：
+从 HH-RLHF 暴露 helpfulness--harmlessness 张力，
+到 CAI 和 Safe RLHF 提供系统化的训练方案，
+再到 jailbreaking 军备竞赛持续挑战这些方案的鲁棒性，
+RepE 开启了从行为层面到表示层面的范式转变，
+而 2025--2026 年推理模型的普及则将安全挑战提升到了全新的维度 ---
+当模型自身成为攻击代理时，整个攻防格局发生了根本性的改变。
+这条线程与 Thread~2（preference optimization 提供基础框架，\crossref{2}{sec:pref}）、
+Thread~4（reasoning 能力影响模型遵循安全推理的可靠性，\crossref{4}{sec:thread4}）、
+Thread~5（multimodal 扩展带来新的安全挑战，\crossref{5}{sec:t5}）
+存在密切的交叉联系。
+安全对齐不是一个可以"解决"的静态问题，
+而是一个随模型能力持续演化的动态研究方向。

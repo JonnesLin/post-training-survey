@@ -1,0 +1,976 @@
+% === Chapter 2: Reward Modeling & Preference Optimization ===
+\section{Thread 2: Reward Modeling \& Preference Optimization}
+\label{sec:pref}
+
+\begin{quote}
+\textit{核心问题：如何将模糊的、难以形式化的人类偏好，转化为可以被梯度下降优化的训练信号？}
+\end{quote}
+
+\noindent
+Post-training 的核心挑战之一在于：人类对"好的回答"的判断往往是整体性的、比较性的，
+而非可以用一个简单的 loss function 直接描述的。
+人类可以轻松判断"回答 A 比回答 B 更好"，但很难给出一个精确的打分函数。
+本章追踪这一问题从提出到（部分）解决的完整演化路径：
+从 RLHF 的基础框架（\S\ref{sec:pref:foundation}），
+到其核心局限性催生的多条分支路径（\S\ref{sec:pref:branches}），
+再到近期方法在效率与效果之间寻找新平衡点的收敛趋势（\S\ref{sec:pref:convergence}），
+最终讨论仍未解决的 open problems（\S\ref{sec:pref:open}）。
+
+% ============================================================
+\subsection{问题起源：为什么 SFT 不够？}
+\label{sec:pref:origin}
+% ============================================================
+
+Supervised Fine-Tuning（SFT）通过 maximum likelihood estimation（MLE）训练模型模仿
+人工标注的 (instruction, response) 对。这一范式虽然简洁有效（\crossref{1}{sec:sft}），
+但存在两个根本性的局限。
+
+\paragraph{局限一：MLE 的 mode-covering 特性与质量信号的缺失。}
+MLE 目标函数 $\mathcal{L}_{\text{SFT}} = -\mathbb{E}_{(x,y)\sim\mathcal{D}}\left[\log \pi_\theta(y|x)\right]$
+对训练集中的所有 response 一视同仁——无论质量高低，模型都试图最大化其对数似然。
+这带来两个后果：
+（1）模型学到的是训练数据分布的"平均水平"，而非向最优 response 看齐；
+（2）当标注者之间存在水平差异时，低质量标注会直接拉低模型性能，
+且 MLE 没有内在机制来区分和过滤这些噪声。
+
+\paragraph{局限二：人类判断的不对称性（judging $\neq$ generating）。}
+一个更深层的观察是：
+人类在"生成高质量回答"和"判断哪个回答更好"这两项任务上的能力是不对称的。
+生成一个满足所有约束（准确、有帮助、安全、流畅）的理想回答极其困难，
+但比较两个已有的回答则相对容易且一致性更高。
+Stiennon et al.\ \cite{stiennon2020summarize} 发现标注者之间的 inter-annotator agreement
+在偏好比较任务上约为 77\%，显著高于直接评分任务。
+InstructGPT \cite{ouyang2022instructgpt} 也报告了类似的发现——
+标注者之间的 pairwise agreement 约为 73\%。
+
+\evolution{MLE 只能模仿"平均水平"}{利用人类比较信号区分质量}{人类更擅长"判断"而非"生成"}
+
+\noindent
+这一观察构成了整个 preference optimization 领域的出发点：
+既然人类更擅长比较判断，那么就应当设计一种训练范式，
+将偏好比较信号（而非直接的示范信号）作为优化目标。
+Christiano et al.\ \cite{christiano2017rlhf} 率先在强化学习领域提出了这一思路。
+Ziegler et al.\ \cite{ziegler2020finetuning} 将其首次迁移到 NLP——
+在文本续写、摘要和风格迁移任务上验证了 reward learning from comparisons 的可行性，
+建立了从 human preference 到 language model fine-tuning 的完整 pipeline。
+随后这一范式被进一步发展为成熟的技术体系。
+
+% ============================================================
+\subsection{奠基方法：RLHF 的经典框架}
+\label{sec:pref:foundation}
+% ============================================================
+
+RLHF（Reinforcement Learning from Human Feedback）的核心思想可以分解为两步：
+（1）训练一个 reward model 从偏好比较中学习人类的质量判断标准；
+（2）使用这个 reward model 作为优化目标，通过 RL 算法（通常是 PPO）调整 language model 的策略。
+本节追踪这一框架从提出到成熟的三个 landmark 工作。
+
+% --- 2.2.1 ---
+\subsubsection{从游戏到语言：Reward Learning from Comparisons}
+\label{sec:pref:christiano}
+
+\landmark{christiano2017rlhf} 在 Atari 游戏和 MuJoCo 连续控制任务上首次证明：
+agent 可以仅从人类对 trajectory segment 的偏好比较中学会复杂行为，
+而无需访问环境的真实 reward function。
+
+\paragraph{动机与问题形式化。}
+传统 RL 假设存在一个明确的 reward function $r: \mathcal{S} \times \mathcal{A} \to \mathbb{R}$，
+但在许多实际场景中（如训练 robot 完成灵巧操控，或训练 agent 表现出"有帮助"的行为），
+设计这样一个 reward function 要么极其困难，要么会导致 reward hacking。
+Christiano et al.\ 的核心洞察是：
+人类虽然不知道确切的 reward function，
+但可以在观察两段 agent 行为后判断哪个更好。
+
+形式化地，给定两个 trajectory segment $\sigma^1 = (s_0^1, a_0^1, \ldots, s_k^1)$ 和
+$\sigma^2 = (s_0^2, a_0^2, \ldots, s_k^2)$，
+人类标注者选择一个 preference label $\mu \in \{(1,0),\; (0,1),\; (0.5, 0.5)\}$。
+
+\paragraph{Reward Model 的训练。}
+假设人类的偏好遵循 Bradley-Terry (BT) model \cite{bradley1952bt}，
+即偏好概率与 reward 之和的指数成正比：
+\begin{equation}
+\label{eq:pref:bt-christiano}
+P[\sigma^1 \succ \sigma^2] = \frac{\exp\!\sum_t \hat{r}(s_t^1, a_t^1)}{\exp\!\sum_t \hat{r}(s_t^1, a_t^1) + \exp\!\sum_t \hat{r}(s_t^2, a_t^2)}
+\end{equation}
+其中 $\hat{r}_\psi$ 是一个由参数 $\psi$ 参数化的 reward model（一个深度神经网络）。
+训练目标是最小化 cross-entropy loss：
+\begin{equation}
+\label{eq:pref:rm-loss-christiano}
+\mathcal{L}_{\text{RM}} = -\mathbb{E}_{(\sigma^1, \sigma^2, \mu)}\left[
+  \mu(1)\log P[\sigma^1 \succ \sigma^2] + \mu(2)\log P[\sigma^2 \succ \sigma^1]
+\right]
+\end{equation}
+
+\paragraph{策略优化。}
+Reward model 训练完成后，使用 PPO \cite{schulman2017ppo} 优化策略 $\pi_\theta$，
+最大化 $\hat{r}_\psi$ 提供的 reward 信号。
+整个系统异步运行三个进程：
+（1）策略 $\pi_\theta$ 与环境交互生成 trajectory；
+（2）人类标注者对 trajectory segment pairs 给出偏好判断；
+（3）reward model $\hat{r}_\psi$ 在偏好数据上持续更新。
+
+\paragraph{关键实验结果。}
+在 Atari 任务中，仅使用约 5,500 次人类比较（约 1 小时标注量），
+RLHF agent 在部分游戏上达到了与 reward shaping 相当的性能；
+在 MuJoCo 任务（如 Hopper、Walker）中，
+RLHF agent 成功学会了与基于真实 reward 训练的 agent 几乎相同的运动行为。
+这些结果证明了一个关键命题：
+\textbf{人类偏好信号足以替代显式 reward function 来训练 RL agent。}
+
+\begin{solutionbox}
+\textbf{核心贡献}：
+建立了 \textit{comparison-based reward learning} 的完整框架——
+从 Bradley-Terry 偏好模型到异步 reward model 训练再到 PPO 策略优化。
+这一框架成为此后所有 RLHF 工作的原型。
+\end{solutionbox}
+
+% --- 2.2.2 ---
+\subsubsection{从游戏到语言：Learning to Summarize}
+\label{sec:pref:summarize}
+
+\landmark{stiennon2020summarize} 将 Christiano et al.\ 的 comparison-based reward learning 框架
+首次完整应用于自然语言生成任务——文本摘要，
+并建立了后来被广泛采用的 \textbf{SFT $\rightarrow$ RM $\rightarrow$ RL} 三阶段 pipeline。
+
+\paragraph{三阶段 Pipeline。}
+
+\textit{Stage 1: Supervised Fine-Tuning.}
+在 TL;DR 数据集上对 GPT-3 系列模型（1.3B 和 6.7B）进行 SFT，
+使模型具备基本的摘要能力。
+
+\textit{Stage 2: Reward Model Training.}
+收集人类标注者对模型生成的摘要对的偏好判断。
+给定 post $x$ 和两个摘要 $y_0, y_1$，
+reward model $r_\psi$ 的训练目标为：
+\begin{equation}
+\label{eq:pref:rm-loss-summarize}
+\mathcal{L}_{\text{RM}}(\psi) = -\mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}} \left[
+  \log \sigma\!\left(r_\psi(x, y_w) - r_\psi(x, y_l)\right)
+\right]
+\end{equation}
+其中 $y_w$ 和 $y_l$ 分别为 preferred（winning）和 dispreferred（losing）response，
+$\sigma$ 是 sigmoid 函数。
+注意，与 \cref{eq:pref:bt-christiano} 中对 trajectory reward 求和不同，
+这里 reward model 直接对完整的 $(x, y)$ 对打分，
+这是 reward modeling 从 RL 领域迁移到 NLP 领域时的一个关键简化。
+
+\textit{Stage 3: RL Optimization.}
+使用 PPO 优化策略 $\pi_\theta$，目标函数为：
+\begin{equation}
+\label{eq:pref:rl-obj-summarize}
+\max_{\pi_\theta}\; \mathbb{E}_{x \sim \mathcal{D},\; y \sim \pi_\theta(\cdot|x)} \left[
+  r_\psi(x, y) - \beta \log \frac{\pi_\theta(y|x)}{\pi_{\text{ref}}(y|x)}
+\right]
+\end{equation}
+其中 $\pi_{\text{ref}}$ 是 SFT 阶段得到的模型（作为 reference policy），
+$\beta$ 是 KL penalty 系数，用于防止 $\pi_\theta$ 偏离 $\pi_{\text{ref}}$ 过远——
+这一设计直接预防了后来被广泛研究的 reward overoptimization 问题（\S\ref{sec:pref:reward-hacking}）。
+
+\paragraph{关键发现。}
+（1）使用人类偏好信号训练的 6.7B 模型的摘要质量超过了仅使用 SFT 的更大模型，
+证明了 \textbf{偏好信号可以弥补模型规模的差距}。
+（2）Reward model 的 agreement rate 约为 77\%，且 reward model score 与人类判断高度相关，
+验证了 Bradley-Terry model 作为人类偏好建模工具的有效性。
+（3）RM score 与 KL divergence 之间存在清晰的权衡关系：
+随着 KL penalty 降低，RM score 持续上升，但真实人类评估的质量在某个点后开始下降——
+这是 reward overoptimization 现象的早期观察。
+
+% --- 2.2.3 ---
+\subsubsection{InstructGPT：RLHF 的工业级落地}
+\label{sec:pref:instructgpt}
+
+\landmark{ouyang2022instructgpt} 将上述三阶段 pipeline 扩展到通用的 instruction-following 场景，
+首次在 production-scale 上证明了 RLHF 的有效性，
+并确立了此后几乎所有 LLM post-training 的标准范式。
+
+\paragraph{Pipeline 的工业化改进。}
+
+\textit{SFT 阶段}：
+在人工标注的 demonstration 数据上训练 GPT-3（175B），
+标注者被要求对 user prompt 撰写"理想回答"。
+
+\textit{RM 阶段}：
+对于每个 prompt，采样模型的 $K$ 个输出（$K \in \{4, 9\}$），
+标注者对所有 $\binom{K}{2}$ 个配对进行排序。
+Reward model 的训练目标为：
+\begin{equation}
+\label{eq:pref:rm-loss-instructgpt}
+\mathcal{L}_{\text{RM}}(\theta) = -\frac{1}{\binom{K}{2}} \mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}} \left[
+  \log \sigma\!\left(r_\theta(x, y_w) - r_\theta(x, y_l)\right)
+\right]
+\end{equation}
+与 \cref{eq:pref:rm-loss-summarize} 相比，关键改进是
+\textbf{同一 prompt 下的所有比较对共享一次 forward pass}，
+大幅降低了训练的计算开销。
+RM 使用 6B GPT-3 模型初始化（而非 175B），
+这一设计选择体现了一个重要的工程原则：
+\textbf{reward model 不必与 policy model 同等规模}。
+
+\textit{PPO 阶段}：
+优化目标在 \cref{eq:pref:rl-obj-summarize} 的基础上增加了 pretraining loss mixing：
+\begin{equation}
+\label{eq:pref:ppo-ptx}
+\max_{\pi_\theta}\; \mathbb{E}_{x \sim \mathcal{D}_{\text{pref}},\; y \sim \pi_\theta}
+  \left[r_\psi(x, y) - \beta \,\text{KL}\!\left[\pi_\theta \| \pi_{\text{ref}}\right]\right]
+  + \gamma\,\mathbb{E}_{x \sim \mathcal{D}_{\text{pretrain}}}\left[\log \pi_\theta(x)\right]
+\end{equation}
+其中第二项（PPO-ptx）将部分 pretraining 数据混入 PPO 训练，
+用于缓解 alignment tax——即 RLHF 对模型在 NLP benchmarks 上性能的损害。
+
+\paragraph{核心实验结果。}
+（1）\textbf{1.3B InstructGPT 在人类评估中优于 175B GPT-3}——
+这是 post-training 领域最具说服力的实验结果之一，
+直接证明了 alignment 可以在不增加模型规模的前提下实现质的飞跃。
+（2）PPO-ptx 在保持 RLHF 对齐效果的同时，
+将 NLP benchmark 上的性能退化控制在极小范围内，
+而纯 PPO 则导致了显著的性能下降。
+（3）标注者间的 pairwise agreement 约为 73\%——
+这个数字既验证了人类偏好判断具有足够的一致性来支撑 RLHF，
+也暗示了 reward model 的性能上界受限于 human agreement ceiling。
+
+\begin{solutionbox}
+\textbf{InstructGPT 的遗产}：
+确立了 ``SFT $\rightarrow$ RM $\rightarrow$ PPO'' 三阶段 pipeline 作为 LLM post-training 的默认范式。
+此后的 Llama 2 \cite{touvron2023llama2}、Claude、GPT-4 等均采用了这一基本框架的变体。
+同时也暴露了 RLHF 的核心瓶颈：
+pipeline 涉及四个独立模型
+（SFT model、reward model、policy model、reference model）的协同训练，
+工程复杂度和计算开销极高。
+\end{solutionbox}
+
+\paragraph{RLHF 经典框架的总结。}
+从 Christiano et al.\ 的原型到 InstructGPT 的工业级实现，
+RLHF 框架经历了三个关键迁移：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{从 trajectory segment 到 full response}：
+    在 NLP 场景中，reward 不再对每个 timestep 求和，
+    而是直接对完整的 $(x, y)$ 对打一个 scalar score。
+  \item \textbf{从实时标注到离线数据集}：
+    Christiano et al.\ 需要人类标注者在线提供反馈，
+    而 InstructGPT 的 RM 使用预先收集的离线偏好数据训练。
+  \item \textbf{从单一优化到 multi-objective balancing}：
+    InstructGPT 引入 KL penalty + pretraining loss mixing，
+    构建了 helpfulness、safety、capability retention 之间的多目标权衡框架。
+\end{enumerate}
+
+% ============================================================
+\subsection{局限与分支：四条分支路径}
+\label{sec:pref:branches}
+% ============================================================
+
+RLHF 的经典框架虽然有效，但在实践中暴露出多个核心瓶颈。
+这些瓶颈催生了四条相对独立的研究分支，
+每条分支试图从不同角度解决 RLHF 的特定局限性。
+
+% --- 2.3.1 ---
+\subsubsection{Branch 1: Reward Hacking 与 Overoptimization}
+\label{sec:pref:reward-hacking}
+
+\begin{problembox}
+当 policy 过度优化 reward model 的输出时，
+RM score 持续上升，但真实的人类偏好评估却开始下降。
+这是 Goodhart's Law 在 RLHF 中的直接体现：
+``When a measure becomes a target, it ceases to be a good measure.''
+\end{problembox}
+
+\paragraph{Gao et al.\ 的 Scaling Laws.}
+\landmark{gao2022overoptimization} 系统性地研究了 reward overoptimization 现象，
+提出了描述 proxy RM score 与 gold RM score 关系的 scaling laws。
+
+令 $d_{\text{KL}} = \text{KL}[\pi_\theta \| \pi_{\text{ref}}]$ 度量 policy 偏离 reference 的程度。
+Gao et al.\ 定义 $d = \sqrt{d_{\text{KL}}}$ 作为规范化的 KL 距离。
+对于 Best-of-$N$ (BoN) 采样和 RL（PPO）优化两种策略，
+gold reward（由更大、更准确的 RM 评估）与 $d$ 之间呈现不同的函数形式：
+
+\begin{align}
+\label{eq:pref:overopt-bon}
+R_{\text{BoN}}^{\text{gold}}(d) &= d\left(\alpha_{\text{BoN}} - \beta_{\text{BoN}} \cdot d\right) \\[4pt]
+\label{eq:pref:overopt-rl}
+R_{\text{RL}}^{\text{gold}}(d) &= d\left(\alpha_{\text{RL}} - \beta_{\text{RL}} \cdot \log d\right)
+\end{align}
+
+\noindent
+其中 $\alpha$ 项捕捉了 reward model 正确学到的信号（初始 reward 增长率），
+$\beta$ 项捕捉了 reward model 的误差被利用的速率（overoptimization 项）。
+关键发现如下：
+
+\begin{itemize}[leftmargin=2em]
+  \item $\alpha$ 和 $\beta$ 均与 RM 参数量呈 \textbf{log-linear scaling} 关系：
+    更大的 RM 具有更高的 $\alpha$（学到更多真实信号）和更低的 $\beta$（更难被 exploit），
+    但 overoptimization 永远不会完全消失。
+  \item BoN 比 RL 更 \textbf{KL-efficient}：
+    在相同的 KL budget 下，BoN 达到的 gold reward 更高。
+    这意味着 RL 更容易 exploit reward model 的漏洞。
+  \item KL penalty 作为对抗 overoptimization 的手段是必要但不充分的：
+    它可以限制 $d$ 的增长，但无法改变 $\beta$ 的大小——
+    即 reward model 的内在漏洞不会因为 KL 约束而消失。
+\end{itemize}
+
+Gao et al.\ 还系统地分析了 Goodhart's Law 的四种形式在 RLHF 中的体现：
+\textit{regressional}（proxy 与 gold reward 之间的回归误差）、
+\textit{extremal}（在分布尾部 proxy 的排序与 gold 不一致）、
+\textit{causal}（优化 proxy 破坏了与 gold 的因果关系）、
+\textit{adversarial}（agent 主动利用 proxy 的漏洞）。
+
+\paragraph{Reward Ensemble 方法。}
+针对 overoptimization 问题，
+Coste et al.\ \cite{coste2023ensemble} 提出使用 reward model ensemble，
+通过多个 RM 的投票或平均来减少单一 RM 的偏差。
+然而 Eisenstein et al.\ \cite{eisenstein2023ensemble} 的后续研究发现，
+虽然 ensemble 可以缓解 overoptimization，
+但无法完全消除——当 policy optimization 足够强时，
+ensemble 中所有 RM 的共同漏洞仍会被利用。
+
+\paragraph{Process Reward Model (PRM).}
+过程监督的思想并非始于 PRM。
+Cobbe et al.\ \cite{cobbe2021gsm8k} 最早提出训练 \textbf{outcome-based verifiers}
+来判断数学推理的最终答案是否正确，在 GSM8K 上证明了
+verifier-guided search（Best-of-$N$）显著优于单次采样。
+Uesato et al.\ \cite{uesato2022process} 则首次系统比较了
+\textbf{process-based feedback}（逐步标注）与 \textbf{outcome-based feedback}（仅标注最终答案），
+发现 process supervision 在 final-answer accuracy 上优于 outcome supervision，
+且对 ``false positive'' solutions（推理过程错误但最终答案碰巧正确）具有更强的鉴别力。
+
+在此基础上，\landmark{lightman2023prm} 提出了一种更系统化的 process reward model，
+将 reward 粒度从 outcome-level 推进到 step-level：
+不是对整个 response 给出一个 scalar reward，
+而是对推理过程的\textbf{每一步}进行独立评估。
+
+具体而言，在数学推理任务中，
+一个 solution 被分解为多个 step $s_1, s_2, \ldots, s_n$，
+PRM 为每个 step 独立判断其正确性：
+\begin{equation}
+\label{eq:pref:prm}
+r_{\text{PRM}}(x, s_1, \ldots, s_n) = \prod_{i=1}^{n} P(s_i \text{ is correct} \mid x, s_1, \ldots, s_{i-1})
+\end{equation}
+
+与 Outcome Reward Model (ORM)——仅根据最终答案正确性给出 reward——相比，
+PRM 提供了更细粒度的信号，能够更精确地定位错误步骤。
+在 MATH 数据集上，PRM 引导的 Best-of-$N$ 采样达到 \textbf{78.2\%} 准确率（$N=1860$），
+而 ORM 为 72.4\%，显著优于后者。
+
+\begin{solutionbox}
+\textbf{PRM 的关键贡献}：
+（1）发布了 PRM800K 数据集——包含约 800K 个 step-level human labels，
+覆盖 75K 个 solutions 和 12K 个数学问题；
+（2）证明了 active learning 在 PRM 训练中具有 \textbf{2.6$\times$} 的数据效率提升；
+（3）将 reward modeling 的粒度从 outcome-level 推进到 process-level，
+这一思想后来深刻影响了 reasoning verification（\crossref{4}{sec:thread4}）和
+GRPO 中的 process supervision（\S\ref{sec:pref:grpo}）。
+\end{solutionbox}
+
+% --- 2.3.2 ---
+\subsubsection{Branch 2: RL-Free 方法——从 RLHF 到 Direct Alignment}
+\label{sec:pref:rlfree}
+
+\begin{problembox}
+RLHF 的 pipeline 涉及四个独立模型（SFT model, reward model, policy, reference）的协同训练。
+PPO 算法在 LLM 上的训练极不稳定，对 hyperparameter 敏感，
+且 reward model 引入的误差通过 RL 优化被放大。
+能否绕过显式 reward model 和 RL 算法，
+直接从偏好数据中优化 language model？
+\end{problembox}
+
+\paragraph{DPO: Direct Preference Optimization.}
+\landmark{rafailov2023dpo} 通过一个关键的数学推导，
+证明了 RLHF 的 RL 阶段可以被完全消除——
+reward model 可以被 language model 本身\textbf{隐式参数化}。
+
+\textit{推导过程}的起点是 RLHF 的标准 RL 目标：
+\begin{equation}
+\label{eq:pref:rl-obj}
+\max_{\pi_\theta}\; \mathbb{E}_{x \sim \mathcal{D},\; y \sim \pi_\theta(\cdot|x)} \left[
+  r(x, y)
+\right] - \beta\, \text{KL}\!\left[\pi_\theta(y|x) \| \pi_{\text{ref}}(y|x)\right]
+\end{equation}
+
+DPO 的核心洞察在于，这个带 KL 约束的优化问题存在\textbf{解析解}。
+对任意 reward function $r(x, y)$，最优策略为：
+\begin{equation}
+\label{eq:pref:optimal-policy}
+\pi_r^*(y|x) = \frac{1}{Z(x)}\, \pi_{\text{ref}}(y|x) \exp\!\left(\frac{r(x, y)}{\beta}\right),
+\quad Z(x) = \sum_y \pi_{\text{ref}}(y|x) \exp\!\left(\frac{r(x, y)}{\beta}\right)
+\end{equation}
+
+对 \cref{eq:pref:optimal-policy} 取对数并重排，可以将 reward 用 policy 和 reference policy 表示：
+\begin{equation}
+\label{eq:pref:reward-reparameterization}
+r(x, y) = \beta \log \frac{\pi_r^*(y|x)}{\pi_{\text{ref}}(y|x)} + \beta \log Z(x)
+\end{equation}
+
+将 \cref{eq:pref:reward-reparameterization} 代入 Bradley-Terry 偏好模型，
+注意到 partition function $Z(x)$ 在 preferred 和 dispreferred response 中相消，
+得到 DPO 的最终 loss function：
+\begin{equation}
+\label{eq:pref:dpo-loss}
+\boxed{
+\mathcal{L}_{\text{DPO}}(\theta) = -\mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}} \left[
+  \log \sigma\!\left(
+    \beta \log \frac{\pi_\theta(y_w|x)}{\pi_{\text{ref}}(y_w|x)}
+    - \beta \log \frac{\pi_\theta(y_l|x)}{\pi_{\text{ref}}(y_l|x)}
+  \right)
+\right]
+}
+\end{equation}
+
+\paragraph{DPO 的梯度分析。}
+DPO loss 的梯度具有深刻的直觉含义。对 \cref{eq:pref:dpo-loss} 求导：
+\begin{equation}
+\label{eq:pref:dpo-gradient}
+\nabla_\theta \mathcal{L}_{\text{DPO}} = -\beta\, \mathbb{E}\!\left[
+  \underbrace{\sigma\!\left(\hat{r}_\theta(x, y_l) - \hat{r}_\theta(x, y_w)\right)}_{\text{per-example weight}}
+  \left(
+    \nabla_\theta \log \pi_\theta(y_w|x) - \nabla_\theta \log \pi_\theta(y_l|x)
+  \right)
+\right]
+\end{equation}
+其中 $\hat{r}_\theta(x, y) \triangleq \beta \log \frac{\pi_\theta(y|x)}{\pi_{\text{ref}}(y|x)}$
+是 \textbf{implicit reward}。
+
+梯度中的权重项 $\sigma(\hat{r}_\theta(x, y_l) - \hat{r}_\theta(x, y_w))$ 具有自适应特性：
+当 implicit reward 已经将 $y_w$ 排在 $y_l$ 之前（即 $\hat{r}_\theta(x, y_w) \gg \hat{r}_\theta(x, y_l)$）时，
+sigmoid 值接近 0，该样本对梯度的贡献减小——
+模型已经"学会了"这个偏好对，无需继续优化。
+反之，当模型仍然错误地偏好 $y_l$ 时，sigmoid 值接近 1，梯度权重最大。
+这种 \textbf{dynamic per-example importance weighting} 是 DPO 有效性的关键之一。
+
+\paragraph{实验验证。}
+在 Anthropic HH 数据集和 TL;DR 摘要任务上，
+DPO 以更低的计算开销达到了与 PPO-based RLHF 相当或更优的性能。
+更重要的是，DPO 的实现仅需标准的 supervised learning infrastructure——
+无需 value network、无需 online sampling、无需 PPO 的复杂 clipping 机制——
+这使得 preference optimization 的门槛从 RL 研究团队降低到了任何具备 SFT 经验的从业者。
+
+\paragraph{DPO 变体的谱系。}
+DPO 的简洁性和有效性催生了大量变体，形成了丰富的算法谱系。
+这些变体主要沿以下维度改进：
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{偏好模型假设}：
+    IPO \cite{azar2023ipo} 放松了 Bradley-Terry 假设，
+    使用 pairwise 偏好的一般性表示
+    $\Psi(r(x, y_w) - r(x, y_l)) \geq \Psi(0)$，
+    并推导出一个 MSE 形式的 loss，
+    避免了 DPO 在 deterministic preference 下的 overfitting 问题。
+    f-DPO \cite{wang2023fdpo} 将 DPO 推广到任意 $f$-divergence 约束。
+
+  \item \textbf{去除 reference model}：
+    ORPO \cite{hong2024orpo} 将 preference loss 直接整合到 SFT 目标中，
+    通过 odds ratio 惩罚 dispreferred response 的生成概率，
+    消除了对 $\pi_{\text{ref}}$ 的需求。
+    SimPO \cite{meng2024simpo} 使用 average log-probability 作为 implicit reward：
+    $\hat{r}_{\text{SimPO}}(x, y) = \frac{\beta}{|y|} \log \pi_\theta(y|x)$，
+    同样不需要 reference model。
+
+  \item \textbf{数据需求放松}：
+    KTO \cite{ethayarajh2024kto} 基于 Kahneman-Tversky 的前景理论，
+    仅需要 pointwise 的 ``thumbs up / thumbs down'' 标注
+    而非 pairwise comparison，大幅降低了数据收集成本。
+
+  \item \textbf{理论统一}：
+    GPO \cite{tang2024gpo} 将 DPO、IPO、SLiC-HF \cite{zhao2023slic} 等
+    统一在一个以 general loss function 参数化的框架中。
+    CPO \cite{xu2024cpo} 和 Smaug (DPO-Positive) \cite{pal2024smaug}
+    通过额外的 SFT loss 项缓解了 DPO 对 preferred response 概率降低的问题。
+\end{itemize}
+
+\evolution{RLHF: 4 models, RL training}{DPO: 2 models, supervised loss}{reward model 可被隐式参数化}
+
+% --- 2.3.3 ---
+\subsubsection{Branch 3: Online vs.\ Offline Preference Optimization}
+\label{sec:pref:online-offline}
+
+\begin{problembox}
+DPO 及其变体使用静态的、预先收集的偏好数据（offline）进行训练，
+但偏好数据的分布与当前 policy 的生成分布之间存在 distribution mismatch。
+随着 policy 更新，原始偏好数据变得越来越 off-policy，
+导致优化信号逐渐失效。
+\end{problembox}
+
+\paragraph{On-policy 的必要性。}
+这一问题的理论根源在于 RL 中经典的 on-policy vs.\ off-policy distinction。
+Tajwar et al.\ \cite{tajwar2024onpolicy} 严格证明了：
+即使是 \textbf{suboptimal} 的 on-policy 数据也优于高质量的 off-policy 数据。
+其核心论点是 distribution coverage——
+off-policy 数据可能无法覆盖 current policy 倾向于生成的 response 空间，
+而这些恰恰是 policy improvement 最需要信号的区域。
+
+Song et al.\ \cite{song2024coverage} 从更形式化的角度分析了这一问题，
+证明了 online 方法的 sample complexity 优于 offline 方法，
+前提是 online sampling 提供了对 current policy distribution 的充分 coverage。
+
+\paragraph{迭代式和在线式方法。}
+Xiong et al.\ \cite{xiong2023iterative} 提出了 \textbf{Iterative DPO}：
+在每一轮中使用 current policy 生成新的 response，
+通过 reward model 或 AI judge 重新标注偏好，
+然后在新数据上进行 DPO 训练。
+这种迭代方式近似了 on-policy training 的效果，
+但保留了 DPO 的简洁实现。
+
+Guo et al.\ \cite{guo2024oaif} 提出了 \textbf{OAIF}（Online AI Feedback），
+使用 LLM-as-a-Judge 替代人类标注者和独立的 reward model，
+实现了全 online 的 preference optimization pipeline——
+policy 在每一步生成 response pair，
+由另一个 LLM 即时判断偏好，然后进行梯度更新。
+
+\paragraph{Self-Play 方法。}
+Munos et al.\ \cite{munos2024nlhf} 从博弈论角度提出了
+\textbf{Nash Learning from Human Feedback (NLHF)}，
+将 preference optimization 建模为一个 two-player 常数和博弈，
+寻找 Nash 均衡策略。
+Wu et al.\ \cite{wu2024sppo} 的 \textbf{SPPO}（Self-Play Preference Optimization）
+延续了这一思路，使用 self-play 机制让 policy 与自身的历史版本竞争，
+逐步提升生成质量。
+
+% --- 2.3.4 ---
+\subsubsection{Branch 4: AI Feedback 与人类标注的替代}
+\label{sec:pref:ai-feedback}
+
+\begin{problembox}
+RLHF 的根本瓶颈不在算法而在数据：
+高质量的人类偏好标注成本高昂、速度慢、且难以覆盖所有任务类型。
+当模型能力超过标注者水平时，人类标注甚至可能引入错误的偏好信号。
+能否用 AI 系统替代（或辅助）人类标注者？
+\end{problembox}
+
+\paragraph{Constitutional AI (CAI).}
+\landmark{bai2022constitutional} 提出了一种系统化的方法，
+让 AI 系统基于一组明确的原则（constitution）进行自我改进。
+整个过程分为两个阶段：
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Critique-Revision}：
+    模型首先生成一个可能有害的回答，然后被要求根据 constitution 中的某条原则
+    批评自己的回答并生成修改后的版本。
+    多轮 critique-revision 迭代产生逐步改善的 response。
+  \item \textbf{RLAIF}（RL from AI Feedback）：
+    使用 AI 模型（而非人类）对 response pairs 进行偏好判断，
+    训练 reward model，然后进行 RL 优化。
+\end{enumerate}
+
+\noindent
+CAI 的核心贡献在于将 alignment 目标从隐含在人类标注中的模糊偏好
+转化为可以被明确审查和迭代的\textbf{原则集合}，
+这不仅提高了 alignment 过程的可解释性和可控性，
+也为 scalable oversight 提供了一条路径
+（\crossref{3}{sec:t3-safety}）。
+
+\paragraph{RLAIF vs.\ RLHF 的系统比较。}
+Lee et al.\ \cite{lee2023rlaif} 在摘要和 helpful dialogue 任务上系统比较了
+RLAIF 和 RLHF 的效果，
+发现 RLAIF 在大多数任务上达到了与 RLHF 相当甚至更好的性能。
+这一结果表明，当 AI annotator 足够强大时，
+人类标注的 marginal value 可能低于预期。
+
+\paragraph{Self-Rewarding Language Models.}
+Yuan et al.\ \cite{yuan2024selfrewarding} 将这一思路推向极端：
+让 language model 同时充当 policy 和 reward model——
+模型生成 response，然后用自身的 LLM-as-a-Judge 能力评估 response 质量，
+基于自评分进行迭代训练。
+实验表明，多轮 self-rewarding 训练可以同时提升模型的生成能力和判断能力，
+形成"能力自举"的正反馈循环。
+但这种方法的上限受限于模型自身的判断能力——
+当模型的判断存在系统性偏差时，self-rewarding 可能放大而非纠正这些偏差。
+
+% ============================================================
+\subsection{收敛与前沿：效率与效果的新平衡}
+\label{sec:pref:convergence}
+% ============================================================
+
+前述四条分支路径在近期开始呈现收敛趋势：
+研究者们寻找一种方法，
+既具备 RL-based 方法的 on-policy 特性和探索能力，
+又保持 DPO-like 方法的简洁性和稳定性。
+GRPO 和 RLOO 是这一收敛趋势的代表。
+
+% --- 2.4.1 ---
+\subsubsection{GRPO: Group Relative Policy Optimization}
+\label{sec:pref:grpo}
+
+\landmark{shao2024grpo} 在 DeepSeekMath 中提出了 GRPO，
+其核心思想极为简洁：
+\textbf{不需要独立的 reward model 或 value network，
+只需要在同一 prompt 的一组输出中进行相对比较。}
+
+\paragraph{算法细节。}
+对于每个 prompt $x$，从 current policy $\pi_{\theta_{\text{old}}}$ 采样 $G$ 个输出
+$\{y_1, y_2, \ldots, y_G\}$，
+每个输出获得一个 reward $r_i$（可以是 ORM、PRM 或基于规则的 verifiable reward）。
+关键步骤是 \textbf{group-level reward normalization}：
+\begin{equation}
+\label{eq:pref:grpo-advantage}
+\tilde{r}_i = \frac{r_i - \text{mean}(\{r_1, \ldots, r_G\})}{\text{std}(\{r_1, \ldots, r_G\})}
+\end{equation}
+
+然后使用类似 PPO 的 clipped objective 进行优化，
+但 advantage 由 group-normalized reward 替代：
+\begin{equation}
+\label{eq:pref:grpo-obj}
+\mathcal{L}_{\text{GRPO}}(\theta) = -\mathbb{E}_{x}\; \frac{1}{G} \sum_{i=1}^{G} \frac{1}{|y_i|} \sum_{t=1}^{|y_i|}
+\left[
+  \min\!\left(
+    \rho_{i,t}\, \tilde{r}_i,\;
+    \text{clip}(\rho_{i,t}, 1{-}\epsilon, 1{+}\epsilon)\, \tilde{r}_i
+  \right)
+  - \beta\, \text{KL}_t
+\right]
+\end{equation}
+其中 $\rho_{i,t} = \frac{\pi_\theta(y_{i,t} | x, y_{i,<t})}{\pi_{\theta_{\text{old}}}(y_{i,t} | x, y_{i,<t})}$
+是 token-level importance ratio，
+$\text{KL}_t$ 是 token-level KL divergence penalty：
+\begin{equation}
+\text{KL}_t = \frac{\pi_{\text{ref}}(y_{i,t} | x, y_{i,<t})}{\pi_\theta(y_{i,t} | x, y_{i,<t})} - \log \frac{\pi_{\text{ref}}(y_{i,t} | x, y_{i,<t})}{\pi_\theta(y_{i,t} | x, y_{i,<t})} - 1
+\end{equation}
+
+\paragraph{GRPO 的统一视角。}
+Shao et al.\ 提出了一个极具启发性的 \textbf{unified paradigm}，
+将 SFT、RFT、DPO、PPO 和 GRPO 都视为同一目标函数的特殊情形。
+具体而言：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{SFT}：$G=1$，reward 恒为 1（无选择）。
+  \item \textbf{RFT}（Rejection Sampling Fine-Tuning）：
+    $G>1$，只保留 reward 最高的样本，等价于 BoN + SFT。
+  \item \textbf{DPO}：$G=2$，使用 implicit reward 的比较信号。
+  \item \textbf{PPO}：$G=1$，advantage 由独立的 value network 估计。
+  \item \textbf{GRPO}：$G>1$，advantage 由 group-relative normalization 替代 value network。
+\end{itemize}
+
+\noindent
+这一统一视角揭示了一个深刻的联系：
+\textbf{所有 preference optimization 方法的本质差异仅在于
+如何估计 advantage function 和如何采样训练数据。}
+
+\paragraph{实验结果。}
+在 DeepSeekMath 中，GRPO 与 outcome reward + process reward 结合，
+在 GSM8K 上达到 \textbf{88.2\%}，在 MATH 上达到 \textbf{51.7\%}，
+显著优于 SFT 和 RFT baseline。
+GRPO 后来成为 DeepSeek-R1 \cite{deepseek2025r1} 的核心训练算法之一
+（\crossref{4}{sec:thread4}），
+在大规模 reasoning 任务上展示了强大的 scaling 能力。
+
+\begin{solutionbox}
+\textbf{GRPO 的实践价值}：
+消除了 value network 带来的额外内存开销和训练不稳定性，
+使得 RL-based preference optimization 的资源需求接近 DPO 水平，
+同时保留了 on-policy 训练和 exploration 的能力。
+\end{solutionbox}
+
+% --- 2.4.2 ---
+\subsubsection{RLOO 与其他 PPO 替代方案}
+\label{sec:pref:rloo}
+
+\paragraph{RLOO: REINFORCE Leave-One-Out.}
+Ahmadian et al.\ \cite{ahmadian2024rloo} 重新审视了经典的 REINFORCE 算法，
+提出了一种极简但有效的 baseline 估计策略：
+对于每个 prompt 采样 $K$ 个 response $\{y_1, \ldots, y_K\}$，
+第 $i$ 个 response 的 baseline 为其余 $K-1$ 个 response 的平均 reward：
+\begin{equation}
+\label{eq:pref:rloo}
+b_i = \frac{1}{K-1} \sum_{j \neq i} r(x, y_j)
+\end{equation}
+
+这个 leave-one-out baseline 提供了一个低方差的 advantage 估计，
+无需训练额外的 value network。
+实验表明，RLOO 在 RLHF 任务上的性能与 PPO 相当，
+但实现复杂度和内存开销显著更低。
+
+\paragraph{其他 PPO 替代方案。}
+Liu et al.\ \cite{liu2023rso} 的 RSO（Rejection Sampling Optimization）
+通过 rejection sampling 从 policy 中采样高质量 response，
+然后使用 DPO-like loss 进行训练，
+在精神上介于 BoN 和 DPO 之间。
+Dong et al.\ \cite{dong2023raft} 的 RAFT（Reward Ranked Fine-Tuning）
+更直接地将 rejection sampling 与 SFT 结合：
+采样大量 response，保留 reward 最高的 top-$k\%$，
+对其进行标准 SFT 训练。
+
+\paragraph{RTO: DPO Meets PPO.}
+Zhong et al.\ \cite{zhong2024rto} 提出了一种将 DPO 和 PPO 的优势结合的方法：
+使用 DPO 训练得到的 implicit reward 替代独立的 reward model，
+然后进行 PPO-style 的 on-policy optimization，
+试图在 DPO 的简洁性和 PPO 的 on-policy 特性之间取得平衡。
+
+% --- 2.4.5 ---
+\subsubsection{RLVR: Reinforcement Learning with Verifiable Rewards}
+\label{sec:pref:rlvr}
+
+2025 年，preference optimization 领域出现了一个重要的范式分支：
+\textbf{RLVR}（Reinforcement Learning with Verifiable Rewards），
+即完全绕过 learned reward model，
+直接使用基于规则的自动验证器作为 reward 信号进行 RL 训练。
+虽然 RLVR 的思想在 R1-Zero \cite{deepseek2025r1} 中已初见端倪
+（\crossref{4}{sec:t4-r1}），
+DAPO \cite{yu2025dapo} 将其系统化为一套可复现的开源方法论。
+
+\paragraph{范式转变的本质。}
+传统 RLHF 的核心假设是：
+人类偏好需要通过 reward model 来``翻译''成可优化的信号。
+RLVR 挑战了这一假设 ---
+\textbf{对于拥有自动化验证器的任务（数学：答案正确性；编程：测试通过率），
+rule-based reward 比 learned reward model 更可靠、更便宜、且不存在 reward hacking 问题}。
+这一洞察将 Thread~2 的方法论与 Thread~4 的 reasoning 任务深度绑定。
+
+\paragraph{DAPO 的系统性改进。}
+\landmark{yu2025dapo} 对 GRPO 进行了四项关键改进：
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Clip-higher}：对正 advantage 样本使用更大的 clip 上界
+    （$1 + \varepsilon_{\text{high}}$ 而非标准 $1 + \varepsilon$），
+    鼓励 policy 更积极地探索高 reward 的解题路径，
+    解决了标准 clipping 对探索的过度抑制；
+  \item \textbf{Dynamic sampling}：
+    动态过滤掉组内 reward 全部相同的样本（group 内无信息量的样本），
+    确保每个训练 batch 都包含有效的 contrastive signal；
+  \item \textbf{Token-level loss}：
+    将 sequence-level policy gradient loss 分解为 token-level loss，
+    提供更精细的梯度信号，缓解长序列中的 credit assignment 问题；
+  \item \textbf{去除 KL 约束}：
+    完全移除对 reference model 的 KL 散度惩罚，
+    允许 policy 自由偏离初始分布。
+    在 reasoning 任务上，这一``去约束''策略带来了显著增益，
+    因为 base model 的初始推理分布通常远离最优。
+\end{enumerate}
+在 7B 模型上，DAPO 将 AIME 的表现从 GRPO 的 $\sim$30\% 提升至 $\sim$50\%。
+
+\paragraph{RLVR 的后续发展。}
+DAPO 之后，RLVR 范式迅速衍生出多个变体：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{GSPO}（Group Sequence Policy Optimization）\cite{zheng2025gspo}：
+    在 DAPO 的基础上进一步优化了 group 内序列级别的策略更新机制，
+    提升了长序列推理任务上的训练稳定性；
+  \item \textbf{REINFORCE++} \cite{hu2025reinforcepp}：
+    提出了一种简洁高效的 REINFORCE 变体，
+    通过更优的 baseline 估计和梯度归一化策略，
+    在保持极简实现的同时达到了与 GRPO 相当的性能。
+\end{itemize}
+
+\paragraph{理论视角：Rewards as Labels。}
+Zhai et al.\ \cite{zhai2026real} 从分类学习的角度重新审视 RLVR，
+指出当 reward 是 binary 且 verifiable 时，
+RLVR 的训练过程可以被理解为一种特殊的\textbf{带噪声标签的分类问题}。
+这一理论视角为 RLVR 的泛化性分析提供了新的工具。
+
+\begin{openproblembox}
+\textbf{RLVR 的适用边界}：
+RLVR 在数学和编程等可验证任务上取得了巨大成功，
+但这些任务本质上拥有``完美的 reward function''。
+对于开放式任务（对话、写作、推理型问答），
+RLVR 的思想能否推广？
+一种可能的方向是将 LLM-as-judge 作为``近似验证器''，
+但这又回到了 learned reward 的老问题。
+RLVR 的成功是否暗示着 post-training 方法论正在分裂为两个独立的范式 ---
+可验证任务用 RLVR，开放任务用 RLHF？
+\end{openproblembox}
+
+% --- 2.4.6 ---
+\subsubsection{2026: 理论深化与方法论突破}
+\label{sec:pref:2026}
+
+2026 年初，preference optimization 领域在三个维度上取得了重要进展：
+\textbf{DPO 家族的修复与理论统一}、
+\textbf{Online vs.\ Offline 的理论定论}、
+以及\textbf{Reward Modeling 的范式革新}。
+
+\paragraph{DPO 的理论统一与关键修复。}
+Raheja \& Pochhi \cite{raheja2026unification} 提供了 preference learning 方法的
+\textbf{理论大统一}：
+看似多样的 DPO、IPO、KTO、SimPO 等变体，
+本质上可沿三个正交轴分解——
+(I) 偏好模型假设、(II) 正则化机制、(III) 数据分布（online vs.\ offline）。
+这一分类框架为实践者提供了系统化的方法选择指南。
+
+在 DPO 的具体改进方面，
+HyPO \cite{hypo2026} 识别了 DPO 的一个关键失败模式——
+\textbf{premature satisfaction}：
+当 reference model 偏好 rejected response 时，
+DPO 过早削弱梯度信号。
+HyPO 通过\textbf{条件性 reference regularization}（仅一行代码修改）
+在 AlpacaEval 2.0 上取得了 41.2\% 的平均相对提升。
+PEPO \cite{barla2026pepo} 则从理论角度
+首次证明了无需知道数据分布即可
+\textbf{可证明地避免 DPO 的 over-optimization}：
+通过在不相交数据子集上训练的 policy ensemble，
+将 sample complexity 从依赖 all-policy concentrability
+降至仅依赖 single-policy concentrability。
+
+\paragraph{On-policy 的理论定论。}
+\landmark{kim2026coverage} Kim et al.\ 给出了 online 优于 offline preference learning 的
+\textbf{首个严格理论证明}。
+其核心结论是 \textbf{coverage improvement principle}：
+在足够的 batch size 下，
+每次 on-policy 更新都将 policy 移动到 coverage 严格更优的区域，
+从而实现指数级收敛。
+更重要的是，该工作建立了 online 和 offline preference learning 之间的
+\textbf{sharp sample complexity separation}——
+这不仅解释了为什么 Iterative DPO 和 OAIF
+在实践中一致优于 vanilla DPO，
+更在理论上定论了 on-policy 训练的\emph{不可替代性}。
+
+\paragraph{PPO 替代方案的进化。}
+OPO \cite{wang2026opo} 揭示了 PPO 和 DPO 共同存在的一个结构性问题：
+\textbf{两者都混淆了 sampling geometry 和 optimization geometry}。
+OPO 通过在 Hilbert 函数空间 $L^2(\pi_k)$ 中进行优化，
+将这两个几何结构解耦，
+解决了 KL-regularized objectives 中的数值不稳定和梯度饱和问题。
+R2VPO \cite{luo2026r2vpo} 则发现
+PPO/GRPO 的 hard clipping 会\textbf{截断高回报但高散度的``eureka moments''}——
+正是那些最有学习价值的稀有样本被梯度截断了。
+R2VPO 用 policy ratio 的\emph{方差约束}替代硬截断，
+以 50\% 更少的 rollout 实现了 17\% 的相对增益。
+He et al.\ \cite{he2026unifiedrlhf}
+进一步揭示了 RLHF 中 KL 正则化（防止 reward hacking）
+和 ratio clipping（训练稳定性）之间的隐式权衡，
+并提出统一正则化方法——
+其最终形式退化为一个\textbf{加权 SFT loss}，
+却一致优于 RLHF 和 online preference learning。
+这一发现重新点燃了``RL 是否真的必要？''的讨论。
+
+LLMdoctor \cite{llmdoctor2026} 则将 preference optimization
+从训练时扩展到\textbf{推理时对齐}：
+一个小型``doctor''模型通过 token-level flow-guided preference optimization
+引导冻结的大型``patient''模型，
+在不重新训练的情况下实现多维度偏好对齐，
+其效果超越了完整的 DPO fine-tuning。
+
+\paragraph{Reward Modeling 的范式革新。}
+2026 年的两项工作可能从根本上改变 reward modeling 的数据需求。
+\landmark{fan2026scalingrm} Fan et al.\ 证明
+reward model 可以完全从\textbf{网络语料的文档前缀/后缀}中训练，
+\textbf{零人类标注}。
+仅用 11M 数学 web 数据 token，
+在 RewardBench v2 上最高提升 7.7 分，
+且增益可跨模型家族和规模迁移。
+如果 reward model 无需任何偏好标注即可训练，
+RLHF 的数据瓶颈将被根本性地打破。
+
+\landmark{young2026rlaif} Young 提出了\textbf{潜在价值假说}（Latent Value Hypothesis）
+来解释一个长期困惑：RLAIF 为什么有效？
+根据数据处理不等式，AI 生成的偏好信号不应优于人类标注，
+但 RLAIF 在实践中却表现出色。
+该假说认为：预训练过程将人类价值观编码为\textbf{表示空间中的方向}，
+constitutional prompt 将这些潜在价值\emph{引出}为偏好判断。
+这一理论统一了多个分散的经验发现：
+refusal direction、low-rank safety subspace、RLAIF scaling。
+
+Mix-GRM \cite{mixgrm2026} 推进了 generative reward model 的方法论：
+将推理过程分解为 \textbf{Breadth-CoT}（多维原则覆盖）
+和 \textbf{Depth-CoT}（实质性判断深度），
+通过 SFT + RLVR 联合优化两个维度，
+在五个基准上超越领先开源 RM 达 8.2\%。
+ActiveUltraFeedback \cite{melikidze2026activeuf}
+则在偏好数据收集端引入\textbf{基于不确定性的主动学习}，
+仅用 1/6 的标注数据即达到或超过静态基线。
+
+\evolution{Preference data 需要人类标注（RLHF）或 AI 标注（RLAIF）}{Reward model 可从 web data 无监督训练（Fan et al.）}{标注成本是 RLHF 的核心瓶颈}
+
+% ============================================================
+\subsection{未解决问题}
+\label{sec:pref:open}
+% ============================================================
+
+尽管 preference optimization 领域在过去两年取得了飞速进展，
+以下关键问题仍未得到令人满意的解答。
+
+% --- 2.5.1 ---
+\subsubsection{DPO vs.\ RLHF 的本质差异}
+\label{sec:pref:dpo-vs-rlhf}
+
+DPO 与 RLHF 在理论上应当收敛到相同的最优策略
+（因为 DPO loss 是 RLHF RL objective 的变换形式），
+但实践中两者的表现存在系统性差异。
+
+Xu et al.\ \cite{xu2024dposuperior} 系统比较了 DPO 和 PPO，
+发现 PPO 在大规模模型和复杂任务上通常优于 DPO，
+尤其是在需要 creative generation 和 open-ended tasks 的场景中。
+Ivison et al.\ \cite{ivison2024unpacking} 则从更细粒度的角度
+分析了影响两者相对表现的关键因素，
+包括 data quality、model scale、和 training dynamics。
+
+Rafailov et al.\ \cite{rafailov2024rtoq} 从 Q-function 的角度重新解读 DPO，
+指出 DPO 的 implicit reward $\hat{r}_\theta(x, y)$ 实际上
+可以被理解为 token-level Q-function 在特定 token 位置的取值，
+但 DPO 将整个 sequence 的偏好信号均匀分配到所有 token，
+而 RLHF 通过 PPO 的 temporal credit assignment 能够更精准地分配 reward，
+这可能是两者性能差异的理论根源。
+
+\begin{openproblembox}
+\textbf{核心未解问题}：DPO 和 RLHF 之间的性能差距是否可以通过更好的
+offline preference optimization 算法来弥合？
+还是 on-policy 训练和 explicit reward modeling 具有不可替代的优势？
+最近的实证研究 \cite{performance2025gap} 表明，
+这一差距可能与 credit assignment 粒度和 distribution shift 程度共同决定。
+\end{openproblembox}
+
+% --- 2.5.2 ---
+\subsubsection{Likelihood Displacement}
+\label{sec:pref:displacement}
+
+Razin et al.\ \cite{razin2024displacement} 发现了 DPO 训练中一个值得关注的现象：
+\textbf{likelihood displacement}——在 DPO 训练过程中，
+不仅 dispreferred response 的概率下降，
+\textbf{preferred response 的概率也可能下降}，
+只是下降幅度更小。
+
+这与直觉预期相反——
+我们期望 DPO 增加 preferred response 的概率，
+但实际上 DPO 的主要学习机制是
+降低 dispreferred response 的概率（制造"likelihood gap"），
+而非提升 preferred response 的绝对概率。
+当 preferred response 的概率也显著下降时（displacement 过大），
+模型可能丧失有用的生成能力。
+
+\begin{openproblembox}
+\textbf{核心未解问题}：如何设计 preference optimization 算法，
+使其在拉开 preferred 和 dispreferred response 之间的 likelihood gap 的同时，
+保持 preferred response 的绝对概率不下降？
+CPO \cite{xu2024cpo}、Smaug \cite{pal2024smaug} 等方法
+通过添加 SFT loss 项部分缓解了这一问题，
+但更 principled 的解决方案仍在探索中。
+\end{openproblembox}
+
+% --- 2.5.3 ---
+\subsubsection{Reward Model 的泛化与可靠性}
+\label{sec:pref:rm-generalization}
+
+Reward model 的泛化能力——即在训练分布之外的 prompt-response 对上
+是否仍能提供可靠的偏好信号——是一个根本性的开放问题。
+
+Zheng et al.\ \cite{zheng2023secrets1} 和 Wang et al.\ \cite{wang2024secrets2}
+系统研究了 reward model 训练中的关键因素，
+包括模型架构、数据质量、training objective 等，
+发现 reward model 的性能对这些因素高度敏感，
+且存在显著的 distribution shift 问题——
+在一组 prompt 类型上训练的 RM 在新类型上的表现可能严重退化。
+
+更深层的问题是：当 policy 模型的能力超过 reward model 时，
+reward model 是否仍然是有效的训练信号？
+这与 scalable oversight 的问题密切相关
+（\crossref{3}{sec:t3-safety}）——
+如何构建一个能够可靠评估超过自身能力水平的模型输出的评估系统。
+
+\begin{openproblembox}
+\textbf{核心未解问题}：
+Reward model 泛化失败的模式是否可预测？
+PRM 的 process-level 监督是否从根本上缓解了 ORM 的泛化问题，
+还是将问题转移到了 step-level 的判断可靠性上？
+如何构建一个即使面对 superhuman policy 也能保持有效的 reward 信号？
+\end{openproblembox}
+
+\vspace{1em}
+\noindent
+\textbf{章节总结。}
+Preference optimization 领域的演化路径可以概括为：
+从 Christiano et al.\ 的 comparison-based reward learning 原型出发，
+经由 InstructGPT 的工业级三阶段 pipeline 确立标准范式，
+再通过 DPO 和 GRPO 等工作不断降低方法的复杂度和资源需求，
+同时保持或提升 alignment 效果。
+这条演化路径的核心张力在于
+\textbf{alignment 信号的丰富度与训练流程的简洁性之间的权衡}——
+RLHF 提供了最丰富的信号（on-policy + explicit reward + temporal credit assignment），
+但代价是最高的工程复杂度；
+DPO 将流程简化到极致，但牺牲了 on-policy 特性和 credit assignment 精度；
+GRPO 和 RLOO 则试图在这两个极端之间找到新的 Pareto 最优。
+2025 年 RLVR 范式的兴起进一步改变了这一格局 ---
+对于可验证任务，DAPO 等方法证明了完全绕过 learned reward model
+是不仅可行而且更优的选择，
+使得 preference optimization 的方法论开始出现
+``可验证任务用 RLVR、开放任务用 RLHF''的范式分化趋势。

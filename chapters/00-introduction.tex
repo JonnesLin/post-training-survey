@@ -1,0 +1,289 @@
+% === Chapter 0: Introduction ===
+\section*{Introduction}
+\label{sec:intro}
+\addcontentsline{toc}{section}{Introduction}
+
+大语言模型（Large Language Model, LLM）和视觉语言模型（Vision-Language Model, VLM）的能力
+并非在 pre-training 阶段就已经完全释放。
+Pre-training 赋予模型对语言的统计理解和广泛的世界知识，
+但一个仅经过 pre-training 的模型本质上只是一个高质量的 next-token predictor ---
+它不知道如何遵循人类指令，不能可靠地区分有害输出与安全回答，
+也无法在复杂推理任务中展现出结构化的思维过程。
+\textbf{Post-training} 正是弥合这一鸿沟的关键阶段：
+它将一个 raw language model 转化为一个真正有用的 AI assistant。
+
+\subsection{Post-Training 的定义与重要性}
+\label{sec:intro:definition}
+
+本文将 \textbf{post-training} 定义为 pre-training 完成之后、模型部署或 inference 之前，
+为提升模型特定能力而进行的所有训练阶段的总称。
+这一定义涵盖了以下核心技术范畴：
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Supervised Fine-Tuning (SFT)}：
+    使用人工标注的 (instruction, response) 数据对模型进行有监督微调，
+    使其学会遵循指令并产生格式规范的输出
+    \cite{wei2022flan,ouyang2022instructgpt,sanh2022multitask}。
+
+  \item \textbf{Reinforcement Learning from Human Feedback (RLHF)}：
+    训练 reward model 捕捉人类偏好，再通过 PPO 等强化学习算法优化模型策略，
+    使输出更加符合人类预期
+    \cite{christiano2017rlhf,ouyang2022instructgpt,bai2022constitutional}。
+
+  \item \textbf{Direct Preference Optimization (DPO) 及其变体}：
+    绕过显式 reward model，直接从偏好数据对中优化策略，
+    大幅简化了 alignment 的训练流程
+    \cite{rafailov2023dpo,azar2023ipo,ethayarajh2024kto}。
+
+  \item \textbf{其他 post-training 技术}：
+    包括 Constitutional AI \cite{bai2022constitutional}、
+    process reward model \cite{lightman2023prm}、
+    Group Relative Policy Optimization (GRPO) \cite{shao2024grpo}，
+    以及面向特定能力（reasoning, safety, tool use, multimodal）的专项训练方法。
+\end{itemize}
+
+\noindent
+Post-training 与其上下游阶段的边界需要明确区分：
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{与 pre-training 的区别}：
+    Pre-training 在大规模无标注语料上进行，目标是通用语言建模（通常是 next-token prediction 或 masked language modeling）。
+    Post-training 则使用相对小规模但高质量的标注数据或偏好信号，目标是赋予模型特定的行为模式。
+    两者在数据规模、训练目标和计算开销上存在数量级差异。
+
+  \item \textbf{与 inference-time 技术的区别}：
+    Chain-of-thought prompting \cite{wei2022cot}、
+    in-context learning \cite{brown2020gpt3}、
+    retrieval-augmented generation (RAG) \cite{lewis2020rag}
+    等技术在 inference 时通过 prompt 工程或外部知识检索提升模型表现，
+    但不修改模型参数。Post-training 则通过梯度更新永久性地改变模型权重。
+    当然，两者并非完全正交 ---
+    例如 OpenAI o1 \cite{openai2024o1} 将 post-training 阶段习得的推理能力
+    与 inference-time 的扩展 compute 策略深度融合。
+\end{itemize}
+
+\noindent
+Post-training 之所以重要，可以从三个维度理解。
+\textbf{第一}，它是模型从"能力"到"可用性"的桥梁 ---
+InstructGPT \cite{ouyang2022instructgpt} 以仅 1.3B 参数的 SFT+RLHF 模型在人类评估中胜过
+175B 的原始 GPT-3，直接证明了 post-training 可以在不增加模型规模的前提下实现质的飞跃。
+\textbf{第二}，它是 alignment 的核心实现手段 ---
+从安全对齐到价值观校准，从减少幻觉到提升推理可靠性，
+post-training 是将抽象的 alignment 目标转化为可度量训练信号的关键环节。
+\textbf{第三}，它是模型差异化的主战场 ---
+当 pre-training 架构和数据趋于同质化（大多为 decoder-only Transformer + web-scale corpus），
+post-training 策略的差异日益成为决定最终产品质量的关键因素。
+
+\subsection{本文的组织方式}
+\label{sec:intro:organization}
+
+传统 survey 通常按方法分类（如 SFT 一章、RLHF 一章、DPO 一章），
+这种组织方式清晰但静态，无法反映 post-training 领域最核心的特征：
+\textbf{不同研究方向之间存在密集的思想流动和技术迁移}。
+
+例如，reward modeling 的思想从 preference optimization（Thread~2）
+流向 reasoning verification（Thread~4）中的 process reward model，
+再通过 GRPO 回流到 preference optimization；
+SFT 的 instruction tuning pipeline（Thread~1）
+被 multimodal post-training（Thread~5）和 tool use（Thread~6）直接借鉴和扩展；
+efficiency 技术如 LoRA（Thread~7）使得前述所有线程的方法能够以更低成本落地。
+
+为了捕捉这种动态结构，本文采用 \textbf{Hybrid Problem-Evolution Graph} 作为组织框架。
+其核心思想如下：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{七条问题驱动的演化线程}：
+    本文将 post-training 领域划分为七条相对独立的问题线程（thread），
+    每条线程围绕一个核心问题展开。
+    线程内部按时间顺序追踪
+    ``Problem Origin $\rightarrow$ Foundation $\rightarrow$ Limitations \& Branching $\rightarrow$ Convergence $\rightarrow$ Open Problems''
+    的演化链条。
+
+  \item \textbf{跨线程交叉引用}：
+    当某条线程中的技术或思想被另一条线程借鉴时，
+    本文使用 \crossref{1}{sec:sft} 样式的交叉引用进行标注，
+    使读者可以追踪思想的来源和去向。
+
+  \item \textbf{全景视图}：
+    \cref{fig:overview} 以 TikZ 图的形式呈现了七条线程的全景视图，
+    其中水平泳道对应线程，x 轴对应时间线，
+    节点表示 landmark 工作，虚线箭头表示跨线程的思想流动。
+\end{enumerate}
+
+\noindent
+这种组织方式的优势在于：
+（1）在线程内部保持了清晰的时间线和因果关系；
+（2）通过跨线程引用揭示了被传统分类方式割裂的思想联系；
+（3）全景图为读者提供了在任意位置开始阅读的入口。
+
+\subsection{七条演化线程概述}
+\label{sec:intro:threads}
+
+\paragraph{Thread 1: Instruction Following \& SFT.}
+核心问题：\textit{如何让 pre-trained language model 学会理解并遵循人类指令？}
+FLAN \cite{wei2022flan} 和 T0 \cite{sanh2022multitask} 首先证明了
+multi-task instruction tuning 可以显著提升模型的 zero-shot 泛化能力。
+InstructGPT \cite{ouyang2022instructgpt} 将 SFT 作为 RLHF pipeline 的第一阶段，
+确立了"SFT $\rightarrow$ reward model $\rightarrow$ PPO"的经典三阶段训练范式。
+Self-Instruct \cite{wang2023selfinstruct} 开创了利用模型自身生成 instruction 数据的方法，
+极大降低了标注成本并催生了 Alpaca \cite{taori2023alpaca} 等开源 instruction-tuned 模型。
+LIMA \cite{zhou2023lima} 则以仅 1,000 条精心筛选的样本达到了极具竞争力的性能，
+提出了"Superficial Alignment Hypothesis" --- 即 alignment 所需的知识已在 pre-training 中习得，
+SFT 的作用仅在于激活正确的输出格式和风格。
+\crossref{1}{sec:sft}
+
+\paragraph{Thread 2: Reward Modeling \& Preference Optimization.}
+核心问题：\textit{如何将模糊的人类偏好转化为可优化的训练信号？}
+RLHF 的基础框架可追溯至
+Christiano et al.\ \cite{christiano2017rlhf} 在 Atari 和 MuJoCo 任务上的工作，
+随后被 Stiennon et al.\ \cite{stiennon2020summarize} 应用于文本摘要，
+并在 InstructGPT \cite{ouyang2022instructgpt} 中全面应用于对话模型的训练。
+然而 RLHF 的训练流程复杂且不稳定，涉及四个独立模型的协同训练。
+DPO \cite{rafailov2023dpo} 通过数学推导证明 reward model 可以被隐式参数化，
+从而将 RLHF 转化为一个简单的分类损失，大幅降低了实现门槛。
+此后 IPO \cite{azar2023ipo}、KTO \cite{ethayarajh2024kto}、
+ORPO \cite{hong2024orpo} 等变体从不同角度改进了 DPO 的局限性。
+GRPO \cite{shao2024grpo} 则将 group-relative reward 引入 policy optimization，
+在 reasoning 任务上取得了突破性进展。
+2025 年，RLVR（Reinforcement Learning with Verifiable Rewards）范式的兴起
+标志着新的分水岭：DAPO \cite{yu2025dapo} 等方法完全抛弃 reward model，
+直接使用规则验证器作为 reward 信号，将 GRPO 在 AIME 上的表现从 30\% 提升至 50\%。
+\crossref{2}{sec:pref}
+
+\paragraph{Thread 3: Safety \& Alignment.}
+核心问题：\textit{如何确保模型在遵循指令的同时拒绝有害请求，且不过度保守？}
+Constitutional AI (CAI) \cite{bai2022constitutional} 提出让模型根据一组预定义原则（constitution）
+进行自我批评和修改，减少了 safety alignment 对人工标注有害数据的依赖。
+Safe RLHF \cite{dai2024saferlhf} 将 helpfulness 和 harmlessness 解耦为两个独立目标，
+通过带约束的优化框架在 Pareto 前沿上寻求最优平衡。
+与此同时，jailbreaking 攻击的发展 ---
+从简单的 prompt injection 到 GCG \cite{zou2023gcg} 等基于梯度的自动攻击 ---
+形成了一场持续的攻防军备竞赛，推动 safety 研究不断迭代。
+2025--2026 年，推理模型的出现带来了新的安全维度：
+研究表明 reasoning model 可被用作自主 jailbreak agent，
+在零人工干预下达到 97\% 的攻击成功率 \cite{hagendorff2026jailbreakagents}，
+推理链（chain-of-thought）的安全性成为新的核心挑战。
+\crossref{3}{sec:t3-safety}
+
+\paragraph{Thread 4: Reasoning \& Verification.}
+核心问题：\textit{如何让模型进行可靠的多步推理，并对中间步骤进行验证？}
+Chain-of-Thought (CoT) prompting \cite{wei2022cot} 证明了
+在 prompt 中加入推理过程可以显著提升模型在数学和逻辑任务上的表现，
+但这种能力的上限受限于 inference-time 的 prompt 设计。
+Process Reward Model (PRM) \cite{lightman2023prm} 将验证粒度从最终答案细化到每一步推理，
+为 reward-guided search 提供了更精细的信号。
+OpenAI o1 \cite{openai2024o1} 将 reasoning 能力深度融入 post-training，
+通过大规模 reinforcement learning 训练模型在 inference 时自主展开长链推理，
+在数学竞赛和编程任务上达到了专家级水平。
+DeepSeek-R1 \cite{deepseek2025r1} 进一步探索了
+纯 RL（无 SFT cold start）训练推理能力的可能性，
+揭示了 reasoning 能力可以从 RL 中自发涌现的惊人现象。
+2025--2026 年，thinking models 成为默认范式：
+OpenAI o3 \cite{openai2025o3} 在 AIME 2025 上达到 88.9\%，
+DeepSeek-V3.2 \cite{deepseek2025v32} 在 IMO 级别数学竞赛中达到金牌水平，
+Qwen3 \cite{yang2025qwen3} 实现了 thinking/non-thinking 模式的无缝融合。
+\crossref{4}{sec:thread4}
+
+\paragraph{Thread 5: Multimodal Post-training.}
+核心问题：\textit{如何将 text-only 的 post-training 技术扩展到视觉-语言联合建模？}
+LLaVA \cite{liu2023llava} 将 visual instruction tuning 引入 VLM 训练，
+通过两阶段训练（visual-text alignment + instruction tuning）
+构建了高效的多模态 instruction-following 模型。
+随后，RLHF 技术被引入 VLM 以减少 multimodal hallucination ---
+即模型生成与图像内容不一致的描述
+\cite{sun2023rlhfv,yu2024rlhfv}。
+Hallucination reduction 成为 multimodal post-training 的核心挑战之一，
+催生了 POPE \cite{li2023pope}、
+CHAIR 等专项评估基准和针对性训练方法。
+2025 年，RL for VLM reasoning 成为新的前沿方向：
+R1-VL \cite{zhang2025r1vl}、MM-Eureka \cite{meng2025mmeureka} 等工作
+将 RLVR 范式从 text-only 推理扩展到多模态推理，
+标志着 VLM post-training 从 SFT+DPO 向 SFT+RL 的范式转型。
+\crossref{5}{sec:t5}
+
+\paragraph{Thread 6: Tool Use \& Agentic Capabilities.}
+核心问题：\textit{如何通过 post-training 让模型学会调用外部工具并完成复杂任务？}
+Toolformer \cite{schick2023toolformer} 证明了模型可以通过 self-supervised learning
+学会在生成过程中插入 API 调用。
+OpenAI 在 GPT-3.5/4 中引入的 function calling 机制
+将 tool use 标准化为结构化的 JSON schema 接口，
+使其成为生产级应用的基础设施。
+Agent tuning \cite{zeng2023agenttuning} 进一步将训练目标从单次工具调用
+扩展到多步骤任务规划和执行，为构建 autonomous agent 奠定了基础。
+这条线程与 Thread~1（instruction following 提供了基础能力）
+和 Thread~4（reasoning 提供了规划能力）存在深度交叉。
+2024--2025 年，agent 能力从 API 调用进化为直接操作计算机 GUI：
+Claude Computer Use \cite{anthropic2024computeruse}、OpenAI Operator \cite{openai2025operator}
+展示了 AI agent 在真实桌面环境中完成复杂任务的能力，
+MCP \cite{anthropic2024mcp} 等标准化协议正在将 agent 从实验原型推向工业部署。
+\crossref{6}{sec:thread6}
+
+\paragraph{Thread 7: Efficiency \& Data Engineering.}
+核心问题：\textit{如何以更低的计算成本和更少的数据实现同等或更优的 post-training 效果？}
+LoRA \cite{hu2022lora} 通过低秩分解将 fine-tuning 的可训练参数量降低至原始模型的 0.1\%--1\%，
+使得在消费级 GPU 上进行 post-training 成为可能。
+QLoRA \cite{dettmers2023qlora} 进一步结合量化技术，
+在 48GB 显存内实现了 65B 模型的 fine-tuning。
+在数据工程维度，
+data selection 方法（如 DEITA \cite{liu2024deita}、
+Instruction Mining \cite{cao2024instructionmining}）致力于从大规模 instruction 数据中筛选最有价值的子集；
+synthetic data generation 则利用强模型（如 GPT-4）生成训练数据，
+催生了 Alpaca \cite{taori2023alpaca}、
+WizardLM \cite{xu2024wizardlm}、
+Evol-Instruct 等方法论。
+\crossref{7}{sec:efficiency}
+
+\subsection{跨线程交叉引用}
+\label{sec:intro:crossref}
+
+七条演化线程并非独立发展，它们之间存在密集的思想流动和技术迁移。
+\cref{fig:overview} 以全景视图的方式展示了这些跨线程联系。
+这里我们概述最重要的几条 idea flow：
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{T1 $\rightarrow$ T2}（SFT 为 RLHF 提供 warm start）：
+    InstructGPT 确立的 ``SFT $\rightarrow$ RM $\rightarrow$ PPO'' pipeline
+    将 instruction tuning 作为 preference optimization 的前置阶段，
+    这一范式被几乎所有后续工作继承。
+
+  \item \textbf{T1 $\rightarrow$ T3}（Instruction following 暴露 safety 风险）：
+    T1 中 SFT 赋予模型的指令遵循能力同时打开了安全漏洞——
+    一个忠实遵循指令的模型也会忠实执行恶意指令。
+    这一内在张力正是 T3 的问题起源，
+    驱动了 Constitutional AI 等安全对齐方法的发展。
+
+  \item \textbf{T2 $\rightarrow$ T3}（Preference optimization 塑造 safety）：
+    RLHF 和 DPO 提供了将人类安全偏好转化为训练信号的通用框架，
+    Constitutional AI 和 Safe RLHF 在此基础上发展出面向 safety 的专门化方法。
+
+  \item \textbf{T2 $\leftrightarrow$ T4}（Reward modeling 与 reasoning 的双向流动）：
+    Reward model 的思想从 T2 流入 T4，催生了 process reward model；
+    反过来，T4 中发展的 verifiable reward（基于 ground truth 答案的自动验证）
+    启发了 T2 中 GRPO 等方法，实现了无需人工标注的 preference optimization。
+
+  \item \textbf{T1 $\rightarrow$ T5, T6}（Instruction tuning 的跨模态迁移）：
+    T1 中发展成熟的 instruction tuning pipeline 被 T5（LLaVA 的 visual instruction tuning）
+    和 T6（Toolformer 的 tool use instruction tuning）直接借鉴，
+    证明了这一范式的高度可迁移性。
+
+  \item \textbf{T7 $\rightarrow$ T1--T6}（Efficiency 技术的普惠效应）：
+    LoRA、QLoRA 等参数高效训练方法使得前述六条线程中的 post-training 技术
+    能够在学术界和开源社区广泛复现和迭代，显著加速了整个领域的发展。
+
+  \item \textbf{T4 $\rightarrow$ T6}（Reasoning 赋能 agent planning）：
+    T4 中发展的长链推理能力为 T6 中的 multi-step agent planning 提供了核心支撑，
+    o1 和 DeepSeek-R1 的 reasoning 能力直接提升了 agent 在复杂任务中的表现。
+
+  \item \textbf{T2 $\rightarrow$ T4 $\rightarrow$ T5}（RLVR 的跨线程迁移）：
+    2025 年，RLVR 范式在 T2 中被系统化（DAPO \cite{yu2025dapo}），
+    在 T4 中被大规模应用于 reasoning 训练，
+    随后迅速迁移到 T5（R1-VL \cite{zhang2025r1vl}、MM-Eureka \cite{meng2025mmeureka}），
+    形成了清晰的 T2 $\rightarrow$ T4 $\rightarrow$ T5 技术迁移路径。
+\end{itemize}
+
+\input{figures/overview}
+
+\noindent
+在接下来的章节中，我们将沿着每条线程深入分析 landmark 论文的技术细节，
+同时通过跨线程引用保持全局视角。读者可以按照线程顺序（T1--T7）线性阅读，
+也可以从任意感兴趣的线程入手，通过交叉引用跳转到相关线程。

@@ -1,0 +1,1321 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[UTF8]{ctex}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{tcolorbox}
+\usepackage{multirow}
+\usepackage{makecell}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+
+% === Proposal Colors ===
+\definecolor{prop5}{HTML}{E67E22}   % Orange
+\definecolor{prop6}{HTML}{1ABC9C}   % Teal
+\definecolor{prop7}{HTML}{E74C3C}   % Red
+\definecolor{prop8}{HTML}{3498DB}   % Blue
+\definecolor{prop9}{HTML}{8E44AD}   % Deep Purple
+\definecolor{accent}{HTML}{2C3E50}  % Dark
+
+% === Proposal Box ===
+\newtcolorbox{proposalbox}[2][]{%
+  colback=#2!5,colframe=#2!70,boxrule=0.5pt,
+  fonttitle=\bfseries,title={#1},
+  left=6pt,right=6pt,top=4pt,bottom=4pt
+}
+
+% === Insight Box ===
+\newtcolorbox{insightbox}[1][]{%
+  colback=yellow!5,colframe=yellow!60!black,boxrule=0.4pt,
+  fonttitle=\bfseries,title={Core Insight},#1
+}
+
+% === Risk Box ===
+\newtcolorbox{riskbox}[1][]{%
+  colback=red!3,colframe=red!40,boxrule=0.3pt,
+  fonttitle=\bfseries,title={Open Risks},#1
+}
+
+% === Experiment Box ===
+\newtcolorbox{expbox}[1][]{%
+  colback=blue!3,colframe=blue!40,boxrule=0.3pt,
+  fonttitle=\bfseries,title={Key Experiments},#1
+}
+
+% === Why Box (for first-principles chains) ===
+\newtcolorbox{whybox}[1][]{%
+  colback=gray!5,colframe=gray!60,boxrule=0.4pt,
+  fonttitle=\bfseries,title={First-Principles Chain},#1
+}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black!70,
+  citecolor=blue!60!black,
+  urlcolor=blue!70!black,
+}
+
+\title{\textbf{VLM Post-Training 研究方向提案}\\
+\large{从第一性原理重构 Vision-Language 对齐范式}\\[6pt]
+\normalsize{Internal Research Directions --- Multimodal Extension}}
+
+\author{Jinhong Lin}
+\date{March 2026}
+
+\begin{document}
+
+\maketitle
+
+% ============================================================
+\section*{概览}
+% ============================================================
+
+本文档提出五个独立的 VLM post-training 研究方向，
+作为前文四个 text-centric 方向（统一 Reward 框架、Meta-Capability、
+对比式自我诊断、多视角稳健性验证）的\textbf{多模态伴侣}。
+
+每个方向均源自对 VLM 特有困境的第一性原理分析——
+反复追问 ``why''，直到触及最深层的结构性限制。
+
+\begin{insightbox}
+Text-only post-training 的核心瓶颈是``模型不知道自己不知道什么''。
+VLM post-training 的核心瓶颈更深一层：
+\textbf{模型不知道自己没看到什么}。
+
+在文本世界中，模型的全部输入在 context 中——它至少\textit{有机会}处理所有信息。
+在多模态世界中，视觉信息经过编码器的有损压缩后，
+原始图像中的大量细节已经在模型``看到''之前就消失了。
+Post-training 在 LLM 端做的一切优化，
+都受限于 visual encoding 阶段已经发生的信息损失。
+\end{insightbox}
+
+\noindent
+五个方向的布局如下：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{方向五}（Active Re-Perception）攻击最深层限制——
+    让模型在推理过程中\textit{主动}重新查看图像，
+    将视觉从``被动输入''提升为``可查询记忆''。
+  \item \textbf{方向六}（Modality-Decomposed Uncertainty）
+    将 text-only 的 meta-cognition 框架扩展到多模态，
+    揭示 VLM 特有的\textit{双重不确定性}结构。
+  \item \textbf{方向七}（Cross-Modal Self-Verification）
+    利用多模态的天然结构优势——
+    图像本身就是 free reward signal，
+    打破 reward bottleneck。
+  \item \textbf{方向八}（Connector as Alignment Bottleneck）
+    挑战主流范式——
+    post-training 应该训练 connector 而非仅训练 LLM。
+  \item \textbf{方向九}（2D Difficulty Decomposition）
+    将 DPE 的 $p(1-p)$ 原则推广到二维——
+    感知难度和推理难度是正交的，
+    需要独立的课程设计。
+\end{itemize}
+
+\noindent
+与前四个方向的关系：
+\begin{itemize}[leftmargin=2em]
+  \item 方向六直接扩展方向一（Self-Consistency）和方向二（Meta-Capability）到多模态。
+  \item 方向七是方向四（Robustness Verification）的多模态特化——
+    利用图像作为比 text reframing 更强的验证信号。
+  \item 方向九是方向三（Contrastive Self-Diagnosis）的多模态推广——
+    在二维空间中寻找 frontier。
+  \item 方向五和方向八是\textbf{纯 VLM 原生}的问题，
+    在 text-only 设定中无对应物。
+\end{itemize}
+
+
+\newpage
+% ============================================================
+\section{方向五：主动视觉回看——推理即感知}
+\label{sec:prop5}
+% ============================================================
+
+\begin{proposalbox}[Active Visual Re-Perception: Turning Vision from Passive Input to Queryable Memory]{prop5}
+\textbf{一句话摘要：}
+当前 VLM 处理图像一次，然后在纯文本空间中推理——
+就像一个人看了一眼照片，然后闭上眼睛回答所有问题。
+真正的视觉推理需要\textbf{在推理过程中反复回看图像}。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} do VLMs hallucinate about visual details?\\
+$\rightarrow$ 因为模型在推理过程中无法``回看''图像验证自己的描述。\\[3pt]
+\textbf{Why} can't the model look back at the image?\\
+$\rightarrow$ 因为图像在输入阶段被编码为固定的 visual tokens，
+之后只能通过 attention 机制间接访问——
+随着推理链变长，这些 visual tokens 在 attention 中的影响逐渐衰减。\\[3pt]
+\textbf{Why} does visual attention decay matter?\\
+$\rightarrow$ 因为长链推理（10+ 步骤）中，
+最后几步的推理几乎完全依赖前面步骤的\textit{文本}总结，
+而非原始视觉信息。
+如果前面某步的文本总结遗漏了关键视觉细节，
+后续步骤永远无法恢复这一信息。\\[3pt]
+\textbf{Root cause:}
+视觉信息在当前架构中是\textbf{一次性消费品}，
+而非可反复查询的\textbf{持久记忆}。
+\end{whybox}
+
+\subsection{核心论点}
+
+\begin{insightbox}
+人类解视觉问题时，``看''不是发生在开头的一次性事件——
+而是\textbf{贯穿整个推理过程的主动行为}。
+数学家看几何题时反复查看图形，
+医生读 CT 片时会在不同窗位间切换。
+``看回去''不是辅助动作——它是推理的\textit{组成部分}。
+\end{insightbox}
+
+\noindent
+MVoT（``在图像中思考''）迈出了重要一步——
+让模型在推理过程中\textit{生成}可视化。
+但它解决的是另一个问题：
+生成新的视觉表征来辅助推理（类似在草稿纸上画图）。
+本方向解决的是更基础的问题：
+\textbf{重新审视已有的视觉输入}。
+
+差异类比：
+MVoT $\approx$ 学生在草稿纸上画辅助线；
+本方向 $\approx$ 学生抬头重新看了一眼黑板上的题目图。
+两者互补，但``看回去''是更基本的能力。
+
+\subsection{方法：Active Re-Perception Training}
+
+\paragraph{Mechanism Design.}
+在 VLM 的 chain-of-thought 中引入一种新的\textbf{推理动作}：
+\texttt{<look\_at region="...">}。
+当模型在推理过程中发出这一 token 序列时，
+系统对原始图像的指定区域进行\textbf{重新编码}，
+产生新的 visual tokens 注入到当前 context 中。
+
+\begin{tcolorbox}[colback=gray!5,colframe=gray!50,boxrule=0.3pt,left=4pt,right=4pt]
+\small
+\texttt{Question: 图中三角形的面积是多少？}\\[3pt]
+\texttt{Step 1: 让我先整体观察这个图形...}\\
+\texttt{我看到一个三角形，顶点似乎在 A, B, C 处。}\\[3pt]
+\texttt{Step 2: 我需要确认底边的长度。}\\
+\texttt{<look\_at region="bottom-edge">}\\
+\texttt{[新的高分辨率 visual tokens 被注入]}\\
+\texttt{底边标注为 8cm，端点确实是 B 和 C。}\\[3pt]
+\texttt{Step 3: 现在我需要高的精确值。}\\
+\texttt{<look\_at region="height-annotation">}\\
+\texttt{[新的 visual tokens]}\\
+\texttt{高标注为 5cm，从 A 到底边的垂足。}\\[3pt]
+\texttt{Step 4: 面积 = $\frac{1}{2} \times 8 \times 5 = 20$ cm$^2$}
+\end{tcolorbox}
+
+\paragraph{Region Specification.}
+\texttt{region} 可以是：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Spatial coordinates}：
+    normalized bounding box \texttt{[x1,y1,x2,y2]}，
+    利用 Qwen2.5-VL 已具备的 grounding 能力。
+  \item \textbf{Semantic reference}：
+    \texttt{"the label on the x-axis"}，
+    由模型的 grounding 能力解析为坐标。
+  \item \textbf{Zoom level}：
+    \texttt{zoom=2x}，
+    对指定区域以更高分辨率重新编码。
+\end{itemize}
+
+\paragraph{Training: 三阶段。}
+
+\textbf{Stage 1: 构造``需要回看''的数据。}
+
+核心原则：只在模型\textit{实际因为没有回看而犯错}的地方
+构造回看训练数据。
+\begin{enumerate}[leftmargin=2em]
+  \item 收集视觉推理问题（几何、图表分析、医学影像、地图阅读等）。
+  \item 让 VLM 不带回看机制回答，收集\textbf{错误轨迹}。
+  \item 分析错误：哪些错误源于\textit{视觉信息遗漏}
+    （如读错数字、忽略标注、混淆相近区域）？
+  \item 对这些错误，标注``如果在 Step N 回看了 Region R，
+    模型可以看到 [具体信息] 并纠正错误''。
+  \item 构造``回看后纠正''的 gold trajectory。
+\end{enumerate}
+
+\textbf{Stage 2: SFT on Re-Perception Trajectories.}
+
+训练模型生成包含 \texttt{<look\_at>} 动作的推理链。
+关键：同时训练模型\textbf{何时不回看}——
+简单问题不需要回看，强制回看反而增加无用 token。
+在 gold data 中混入``不需要回看的简单问题''的 trajectories。
+
+\textbf{Stage 3: RL on Re-Perception Efficiency.}
+
+SFT 后，模型可能过度使用或不足使用回看。
+RL reward 设计：
+\begin{itemize}[leftmargin=2em]
+  \item 正确 $+$ 适度回看 $\rightarrow$ 最高 reward
+  \item 正确 $+$ 无回看（不需要时）$\rightarrow$ 高 reward
+  \item 正确 $+$ 过多回看 $\rightarrow$ 中等 reward（正确但浪费）
+  \item 错误 $+$ 本可通过回看避免 $\rightarrow$ 强负 reward
+  \item 回看后仍然错误 $\rightarrow$ 轻度负 reward（至少尝试了）
+\end{itemize}
+
+\noindent
+这一 reward 结构联合优化了\textbf{正确性}和\textbf{效率}——
+模型学会在需要时回看，不需要时直接推理。
+
+\subsection{为什么不是 Tool Use？}
+
+表面上，\texttt{<look\_at>} 与 agentic tool use 相似。
+但存在本质区别：
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{维度} & \textbf{Agentic Tool Use} & \textbf{Active Re-Perception} \\
+\midrule
+延迟 & 高（API 调用） & 低（模型内部操作） \\
+信息源 & 外部（搜索引擎、代码解释器） & 内部（已有的输入图像） \\
+训练目标 & 学会何时调用外部工具 & 学会何时重新审视已有信息 \\
+认知类比 & 查阅参考资料 & 重新看了一眼原始材料 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+Active re-perception 是比 tool use 更基本的能力——
+它不依赖外部系统，而是模型对自身输入的\textbf{主动管理}。
+这更接近人类认知中的 \textbf{selective attention}。
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Hallucination reduction}：
+    在 POPE、HallusionBench 上对比
+    标准 VLM vs.\ 带 re-perception 的 VLM。
+    假设：re-perception 显著减少 \textit{visual detail} 类幻觉
+    （读错数字、忽略标注），
+    对 \textit{reasoning} 类幻觉影响较小——
+    证明方法精准攻击了视觉感知类错误。
+
+  \item \textbf{Long-chain reasoning}：
+    在 MathVista、AI2D 等需要多步视觉推理的 benchmark 上测试。
+    假设：推理链越长，re-perception 的收益越大——
+    因为 visual attention decay 是累积性的。
+
+  \item \textbf{Efficiency analysis}：
+    追踪模型平均每道题使用多少次 re-perception。
+    对比 RL 前后：RL 应使回看次数下降（学会了何时不需要），
+    但在困难问题上回看次数上升（学会了何时需要）。
+
+  \item \textbf{Ablation: re-perception vs.\ higher resolution}：
+    直接使用更高分辨率的初始 visual encoding 作为 baseline。
+    假设：re-perception 在\textit{总 compute 相同}的情况下更优——
+    因为它将 compute 分配到模型\textit{实际需要}的区域，
+    而高分辨率将 compute 均匀分配到所有区域。
+\end{enumerate}
+\end{expbox}
+
+\begin{riskbox}
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{实现复杂度}。
+    \texttt{<look\_at>} 需要在推理过程中动态注入新 token，
+    这与标准 autoregressive generation 不完全兼容。
+    需要修改 inference pipeline 或设计巧妙的 token 拼接方案。
+  \item \textbf{Region specification 准确性}。
+    模型可能在不知道该看哪里时无法准确指定 region。
+    ``我不知道我不知道什么''的问题在空间域中更加尖锐。
+  \item \textbf{训练数据的标注成本}。
+    构造``需要回看''的 gold trajectory 需要精确标注
+    ``错误发生在哪一步''和``回看哪个区域可以修复''。
+    可通过强模型（GPT-4o）自动标注来缓解。
+\end{itemize}
+\end{riskbox}
+
+
+\newpage
+% ============================================================
+\section{方向六：模态解耦的不确定性——我没看到 vs.\ 我没想到}
+\label{sec:prop6}
+% ============================================================
+
+\begin{proposalbox}[Modality-Decomposed Uncertainty: Separating ``I Didn't See'' from ``I Didn't Think'']{prop6}
+\textbf{一句话摘要：}
+VLM 的错误有两个独立来源——感知错误和推理错误。
+当前方法将两者混为一谈。
+将 meta-cognition 解耦为\textbf{感知置信度}和\textbf{推理置信度}，
+可以实现精准的错误归因和靶向训练。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} is VLM calibration worse than text-only LLM calibration?\\
+$\rightarrow$ 因为 VLM 有\textbf{两个}独立的不确定性来源：
+视觉感知和语言推理。\\[3pt]
+\textbf{Why} does having two sources matter?\\
+$\rightarrow$ 因为模型的总体置信度是两者的混合——
+一个``中等置信度''可能意味着
+``看得很清楚但推理不确定''或``看不清楚但推理很确定''。
+这两种情况需要完全不同的应对策略。\\[3pt]
+\textbf{Why} don't current methods distinguish them?\\
+$\rightarrow$ 因为 DPO/RLHF 的 reward 信号是\textbf{outcome-level} 的——
+``答案对了还是错了''。它不区分\textit{为什么}错了。\\[3pt]
+\textbf{Root cause:}
+VLM 的错误有\textbf{模态结构}（modality structure），
+但训练信号是\textbf{无结构的}（unstructured）。
+\end{whybox}
+
+\subsection{核心论点}
+
+\begin{insightbox}
+考虑两个 VLM 错误案例：
+\begin{enumerate}[leftmargin=2em]
+  \item 模型看到图中写着``7''但读成了``1''，
+    然后基于``1''做了完美的推理 $\rightarrow$ \textbf{感知错误}。
+  \item 模型正确读出图中的``7''，
+    但在后续数学推理中犯了逻辑错误 $\rightarrow$ \textbf{推理错误}。
+\end{enumerate}
+这两种错误的训练信号应该\textit{完全不同}：
+案例 1 需要强化视觉感知（更细粒度的编码、更仔细的阅读），
+案例 2 需要强化逻辑推理（更多验证步骤、更谨慎的推理链）。
+但在当前 DPO/RLHF 范式下，两者获得\textit{相同}的负 reward——
+``答案错了''。
+\end{insightbox}
+
+\subsection{方法：双维度 Meta-Cognition 训练}
+
+\paragraph{Step 1: 构建错误归因数据集。}
+对 VLM 的错误轨迹进行\textbf{模态归因}：
+
+\begin{enumerate}[leftmargin=2em]
+  \item 收集 VLM 在视觉推理任务上的错误回答。
+  \item 对每个错误，构造\textbf{诊断探测}：
+    \begin{itemize}
+      \item \textbf{感知探测}：
+        将图像中的关键信息\textit{用文本描述}替换图像输入，
+        让模型重新回答。
+        若模型在纯文本输入下回答正确 $\rightarrow$ 原始错误是\textbf{感知错误}。
+      \item \textbf{推理探测}：
+        将模型的视觉感知结果（OCR 提取、物体描述等）
+        直接作为 ground truth 告诉模型，
+        让模型基于这些 ground truth 重新推理。
+        若模型仍然错误 $\rightarrow$ 原始错误包含\textbf{推理错误}。
+    \end{itemize}
+  \item 分类每个错误为：
+    \begin{itemize}
+      \item \textbf{P-error}（Pure Perception）：
+        感知探测通过 + 推理探测通过 $\rightarrow$ 纯感知问题
+      \item \textbf{R-error}（Pure Reasoning）：
+        感知探测失败 + 推理探测失败 $\rightarrow$ 纯推理问题
+      \item \textbf{PR-error}（Compound）：
+        两个探测结果不一致 $\rightarrow$ 感知和推理的复合错误
+    \end{itemize}
+\end{enumerate}
+
+\paragraph{Step 2: 构建 2$\times$2 置信度训练数据。}
+
+类似方向二的 meta-capability training，
+但要求模型输出\textbf{两维}的 self-assessment：
+
+\begin{tcolorbox}[colback=gray!5,colframe=gray!50,boxrule=0.3pt,left=4pt,right=4pt]
+\small
+\texttt{Question: [附带图像的问题]}\\[3pt]
+\texttt{Visual perception check:}\\
+\texttt{- 我从图中读取到了: [模型的感知结果]}\\
+\texttt{- 感知置信度: [high / medium / low]}\\
+\texttt{- 不确定的感知元素: [如果有，列出]}\\[3pt]
+\texttt{Reasoning check:}\\
+\texttt{- 基于上述感知，我的推理是: [推理链]}\\
+\texttt{- 推理置信度: [high / medium / low]}\\
+\texttt{- 推理中最不确定的步骤: [如果有，指出]}\\[3pt]
+\texttt{Overall answer: [最终答案]}\\
+\texttt{Overall confidence: [基于两个维度的综合判断]}
+\end{tcolorbox}
+
+\paragraph{Step 3: RL on Decomposed Calibration.}
+
+设计一个\textbf{结构化 reward function}：
+
+\begin{align}
+R = \underbrace{R_{\text{correct}}}_{\text{答案正确性}}
+  + \lambda_P \cdot \underbrace{R_{\text{P-cal}}}_{\text{感知校准}}
+  + \lambda_R \cdot \underbrace{R_{\text{R-cal}}}_{\text{推理校准}}
+  + \lambda_I \cdot \underbrace{R_{\text{interact}}}_{\text{交互项}}
+\end{align}
+
+\noindent
+其中：
+\begin{itemize}[leftmargin=2em]
+  \item $R_{\text{P-cal}}$：
+    模型声称``感知置信度高''但实际是 P-error $\rightarrow$ 强负 reward。
+  \item $R_{\text{R-cal}}$：
+    模型声称``推理置信度高''但实际是 R-error $\rightarrow$ 强负 reward。
+  \item $R_{\text{interact}}$：
+    模型正确归因错误类型
+    （``我的感知可能有误''当它确实是 P-error）$\rightarrow$ 正 reward。
+    这是最有价值的信号——教模型\textit{知道错误的来源}。
+\end{itemize}
+
+\subsection{为什么解耦比合并更好}
+
+\textbf{直觉论证：}
+一个 pilot 的仪表板将\textit{高度}和\textit{速度}分开显示，
+而非合并为一个``飞行状态''指标。
+因为``飞得太低但速度正常''和``高度正常但速度太快''
+需要完全不同的操作。
+合并信号会导致``指标正常但即将坠机''。
+
+\textbf{信息论论证：}
+合并后的 uncertainty 是标量，
+解耦后的 uncertainty 是二维向量——
+后者对错误归因的信息量严格更大。
+且在训练时，靶向 P-error 和 R-error 的数据可以独立更新
+各自的 meta-cognitive circuit，
+避免``训练推理 meta-cognition 时意外破坏感知 meta-cognition''的干扰。
+
+\subsection{与方向一/二的关系}
+
+方向一（Self-Consistency）的四桶框架
+在 VLM 中自然扩展为\textbf{八桶}
+（2 consistency $\times$ 2 correctness $\times$ 2 modality-attribution）。
+但八桶可能过于细粒度，
+实际上关键的区分只有三类：P-error、R-error、PR-error。
+
+方向二（Meta-Capability）的杠杆层级在 VLM 中增加一个新的最高杠杆：
+\textbf{Perception Calibration}——
+知道\textit{自己是否正确感知了图像}，
+是所有后续推理的前提。
+这比 text-only 的 calibration 更基本，
+因为文本输入的``感知''是确定的（token 就在那里），
+而视觉输入的``感知''是不确定的（编码可能丢失信息）。
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Error attribution accuracy}：
+    在 MathVista、ChartQA 上收集 VLM 错误，
+    用诊断探测进行自动归因。
+    报告 P-error vs.\ R-error 的比例分布。
+    假设：P-error 在 fine-grained tasks（图表、文档）中占主导，
+    R-error 在逻辑推理任务中占主导。
+    这一分布本身就是重要的 empirical contribution。
+
+  \item \textbf{Decomposed vs.\ unified calibration}：
+    对比本方向的 2D calibration 训练
+    vs.\ 方向二直接应用到 VLM（1D calibration）。
+    假设：2D 版本在 ECE/Brier score 上更优，
+    尤其在 mixed-type tasks（同时需要精确感知和多步推理）上
+    差距最大。
+
+  \item \textbf{Targeted training experiment}：
+    识别出 P-error 和 R-error 后，
+    分别构造靶向数据训练。
+    对比：全量混合训练 vs.\ 按错误类型分流训练。
+    假设：分流训练在\textit{总训练量更少}的情况下
+    达到更高的性能。
+
+  \item \textbf{Human preference correlation}：
+    模型输出 2D confidence 后，
+    用户更信任哪种模型——
+    能说``我不太确定图中的数字''的模型，
+    还是只能说``我不太确定''的模型？
+    假设：细粒度的不确定性表达显著提升用户信任和使用效率。
+\end{enumerate}
+\end{expbox}
+
+\begin{riskbox}
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{诊断探测的准确性}。
+    ``用文本替换图像''可能改变任务性质——
+    有些问题在纯文本输入下本身变得更简单。
+    需要仔细设计控制实验。
+  \item \textbf{P-error 和 R-error 的纠缠}。
+    实际中，很多错误是 compound 的——
+    模型\textit{部分}感知正确但遗漏了关键细节，
+    然后基于不完整的感知做了\textit{合理}但错误的推理。
+    二分法可能过度简化。
+  \item \textbf{Two-dimensional calibration 的评估指标}。
+    ECE 和 Brier score 是一维的。
+    需要设计新的 2D calibration metrics，
+    这本身是一个非平凡的技术贡献。
+\end{itemize}
+\end{riskbox}
+
+
+\newpage
+% ============================================================
+\section{方向七：跨模态自验证——图像即 Free Reward}
+\label{sec:prop7}
+% ============================================================
+
+\begin{proposalbox}[Cross-Modal Self-Verification: The Image as Free Reward Signal]{prop7}
+\textbf{一句话摘要：}
+在多模态场景中，你拥有 text-only 所没有的天然验证信号——
+图像本身。
+通过检查模型的文本输出与原始图像之间的\textbf{跨模态一致性}，
+可以构造不依赖任何人类标注的 reward signal，
+打破 VLM alignment 的 reward bottleneck。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} is VLM alignment bottlenecked by reward quality?\\
+$\rightarrow$ 因为评估``文本描述是否忠实于图像''需要多模态理解——
+而 reward model 本身就是一个 VLM，继承了 VLM 的所有缺陷。\\[3pt]
+\textbf{Why} can't we build a perfect multimodal reward model?\\
+$\rightarrow$ 因为它需要大量人类标注的``好/坏''偏好对，
+而多模态偏好标注的成本是 text-only 的 5--10 倍
+（标注者需要仔细对比文本与图像）。\\[3pt]
+\textbf{Why} do we need an external reward model at all?\\
+$\rightarrow$ 问题的反面：\textbf{图像本身就是 ground truth}。
+当模型声称``图中有一只红色的猫''，
+图像\textit{就在那里}——
+我们不需要人类来判断这句话对不对，
+我们需要的是一种\textit{自动检查}文本-图像一致性的机制。\\[3pt]
+\textbf{Root cause:}
+多模态场景中存在 text-only 不具备的天然验证信号——
+\textbf{原始图像}。
+当前方法完全没有利用这一信号。
+\end{whybox}
+
+\subsection{核心论点}
+
+\begin{insightbox}
+在 text-only 设定中，验证模型输出需要外部裁判——
+因为没有独立的``真相源''。
+在多模态设定中，图像\textit{就是}真相源。
+模型的文本输出要么忠实于图像，要么不忠实——
+这是客观可检查的。
+
+关键洞察：我们不需要\textbf{一个新的 reward model}来检查一致性。
+我们可以让\textbf{同一个 VLM}通过结构化的交叉验证来自我检查。
+这不是 self-consistency（对同一问题采样多次），
+而是 \textbf{cross-modal consistency}——
+利用多模态的\textit{结构}来创造新的验证路径。
+\end{insightbox}
+
+\subsection{方法：三层跨模态验证}
+
+\paragraph{Layer 1: Description $\leftrightarrow$ Image 一致性。}
+
+最直接的验证：模型描述了图像，
+然后基于\textit{仅描述}回答关于图像的问题，
+再基于\textit{原始图像}回答同一问题。
+两组答案是否一致？
+
+\begin{tcolorbox}[colback=gray!5,colframe=gray!50,boxrule=0.3pt,left=4pt,right=4pt]
+\small
+\textbf{Step 1:} 模型描述图像 $\rightarrow$ 得到 Description $D$\\[2pt]
+\textbf{Step 2:} 从 $D$ 中提取 $N$ 个可验证的事实声明
+（``图中有 3 个人''、``背景是蓝色的''、``最左边的人穿红衣服''）\\[2pt]
+\textbf{Step 3:} 对每个声明，基于\textit{原始图像}
+向模型提问：``图中有几个人？''``背景是什么颜色？''\\[2pt]
+\textbf{Step 4:} 检查 Step 3 的回答与 Step 2 的声明是否一致。
+不一致 $\rightarrow$ Description 中存在幻觉。
+\end{tcolorbox}
+
+\paragraph{Layer 2: Counterfactual 一致性。}
+
+更强的验证：构造反事实问题。
+
+\begin{tcolorbox}[colback=gray!5,colframe=gray!50,boxrule=0.3pt,left=4pt,right=4pt]
+\small
+如果模型声称``图中有一只猫在沙发上''：\\[2pt]
+\textbf{Counterfactual Q1:}
+``如果图中没有猫，沙发上是什么？''\\
+$\rightarrow$ 模型应该说``但图中确实有猫''或给出与原始一致的描述。\\[2pt]
+\textbf{Counterfactual Q2:}
+``图中的猫是在桌子上还是地板上？''\\
+$\rightarrow$ 如果模型声称的``沙发上''是正确的，
+它应该拒绝这两个选项。
+如果它接受了某个选项 $\rightarrow$ 原始声明可能不可靠。
+\end{tcolorbox}
+
+\paragraph{Layer 3: Cross-Task 一致性。}
+
+最深层的验证：同一图像的不同任务应产生一致的视觉理解。
+
+\begin{tcolorbox}[colback=gray!5,colframe=gray!50,boxrule=0.3pt,left=4pt,right=4pt]
+\small
+\textbf{Task A:} ``描述这张图片''
+$\rightarrow$ ``一个穿蓝色衬衫的男人在公园里跑步''\\[2pt]
+\textbf{Task B:} ``图中人物在做什么运动？'' $\rightarrow$ ``瑜伽''\\[2pt]
+$\rightarrow$ 不一致！Task A 说跑步，Task B 说瑜伽。\\
+$\rightarrow$ 至少一个回答包含幻觉。\\
+$\rightarrow$ 可以进一步通过更多任务来三角定位哪个是错的。
+\end{tcolorbox}
+
+\paragraph{Reward Signal Construction.}
+
+将三层验证的结果聚合为 reward signal：
+
+\begin{align}
+R_{\text{cross-modal}} = \alpha \cdot \text{L1-score} + \beta \cdot \text{L2-score} + \gamma \cdot \text{L3-score}
+\end{align}
+
+\noindent
+其中每个 score $\in [-1, 1]$，
+一致 $\rightarrow$ 正，不一致 $\rightarrow$ 负。
+这个 reward 可以直接用于 DPO（选择跨模态一致性更高的 response）
+或 RL（作为在线 reward）。
+
+\subsection{为什么优于现有方法}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{3.5cm}p{3cm}p{3cm}p{3cm}}
+\toprule
+\textbf{方法} & \textbf{Reward 来源} & \textbf{成本} & \textbf{质量天花板} \\
+\midrule
+LLaVA-RLHF
+  & 人类偏好
+  & 极高
+  & 人类标注者的视觉理解 \\
+RLHF-V
+  & 细粒度人类反馈
+  & 非常高
+  & 单步标注质量 \\
+RLAIF-V
+  & AI 反馈
+  & 中等
+  & Teacher VLM 的能力 \\
+\textbf{本方向}
+  & 图像自身
+  & \textbf{零人工成本}
+  & 模型跨模态验证能力 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+唯一的``成本''是推理阶段的额外 compute（生成验证问题和答案）。
+但这比人类标注便宜几个数量级。
+
+\subsection{与方向四的关系}
+
+方向四（Robustness Verification）在 text-only 中通过 semantic reframing
+来 stress-test 推理。
+本方向在多模态中有一个更强的验证信号：
+\textbf{图像提供了 reframing 无法提供的客观 ground truth}。
+
+Text reframing 只能检查``一致性''，无法检查``正确性''——
+模型可能在所有 framing 下一致地错。
+但 cross-modal verification 可以检查``忠实性''——
+因为图像\textit{就在那里}，
+任何与图像矛盾的描述都是客观可检测的幻觉。
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Cross-modal reward vs.\ human reward}：
+    在 LLaVA-Bench、MMHalBench 上对比
+    本方向的 cross-modal reward 训练
+    vs.\ 人类偏好 DPO（LLaVA-RLHF style）。
+    假设：两者在 hallucination reduction 上效果相当，
+    但本方向\textbf{零人工标注成本}。
+
+  \item \textbf{Scalability test}：
+    固定训练 compute，变化 reward 来源：
+    1K 人类偏好对 vs.\ 100K 自动生成的 cross-modal 验证信号。
+    假设：数量可以弥补质量——
+    大量弱信号的累积效果匹配少量强信号。
+
+  \item \textbf{Layer ablation}：
+    L1-only vs.\ L1+L2 vs.\ L1+L2+L3。
+    假设：每增加一层提供边际收益，
+    但 L1 已捕获大部分幻觉信号。
+    L2（counterfactual）对\textit{subtle} 幻觉
+    （模型描述大致正确但细节有误）最有价值。
+
+  \item \textbf{与可验证 reward 的校准}：
+    在 ChartQA、DocVQA 等有 ground truth 的任务上，
+    测量 cross-modal reward 与 ground-truth reward 的相关性。
+    假设：高度正相关（$\rho > 0.7$）——
+    证明 cross-modal 信号是可靠的 proxy。
+\end{enumerate}
+\end{expbox}
+
+\begin{riskbox}
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{自我验证的 bootstrap 问题}。
+    用一个有幻觉的 VLM 来验证自己的幻觉——
+    如果模型系统性地``看不到''某个物体，
+    验证阶段也会``看不到''，导致假阳性。
+    缓解策略：使用不同的 prompt 或 temperature 进行验证，
+    增加随机性以打破系统性偏差。
+  \item \textbf{验证问题的生成质量}。
+    从描述中提取可验证声明并构造反事实问题
+    本身就需要较强的语言能力。
+    可通过模板化来简化。
+  \item \textbf{计算开销}。
+    三层验证意味着每个训练样本需要
+    多轮额外推理（生成验证问题、回答验证问题、比较结果）。
+    需要在 reward 质量和 compute 之间权衡。
+\end{itemize}
+\end{riskbox}
+
+
+\newpage
+% ============================================================
+\section{方向八：Connector 是 Alignment 的真正瓶颈}
+\label{sec:prop8}
+% ============================================================
+
+\begin{proposalbox}[The Connector as the Alignment Bottleneck: Post-Training the Wrong Component]{prop8}
+\textbf{一句话摘要：}
+当前 VLM post-training 的主流范式是``冻结视觉编码器和 connector，
+只训练 LLM''。
+但如果视觉信息在 connector 层就已经被有损压缩，
+LLM 端的 alignment 永远无法恢复丢失的信息——
+\textbf{你无法对齐你看不到的东西}。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} does VLM hallucination persist even after strong DPO/RLHF?\\
+$\rightarrow$ 因为模型``看到''的视觉信息就是不完整的。
+DPO 可以教模型``不要编造''，
+但无法教模型``看到你没看到的东西''。\\[3pt]
+\textbf{Why} doesn't the model see complete visual information?\\
+$\rightarrow$ 因为 visual connector（MLP projection 或 Q-former）
+将 vision encoder 输出的高维特征压缩到 LLM 的 embedding space 中，
+这是一个\textit{有损}映射。\\[3pt]
+\textbf{Why} is the connector lossy?\\
+$\rightarrow$ 因为 connector 在 pre-training 阶段被训练——
+那时的训练信号是 image-caption matching，
+而非 fine-grained visual reasoning。
+Connector 学会了保留对 caption 有用的信息
+（粗粒度语义），
+而丢弃了对 reasoning 有用但对 caption 无关的信息
+（空间关系、精确数值、微妙细节）。\\[3pt]
+\textbf{Root cause:}
+Connector 的\textbf{信息保留策略}在 pre-training 阶段已经固化，
+而 post-training 在它的下游操作——
+\textbf{优化了错误的组件}。
+\end{whybox}
+
+\subsection{核心论点}
+
+\begin{insightbox}
+VLM 的 post-training pipeline 可以类比为一条\textbf{信息管道}：
+
+$$\text{Image} \xrightarrow{\text{Vision Encoder}} \text{Features}
+\xrightarrow{\text{Connector}} \text{LLM tokens}
+\xrightarrow{\text{LLM}} \text{Response}$$
+
+当前 post-training（SFT/DPO/RL）只优化管道的\textit{最后一段}（LLM）。
+但信息在\textit{中间段}（Connector）就已经被压缩。
+这就像你试图通过优化扬声器来改善音质——
+但问题出在录音阶段的麦克风。
+\end{insightbox}
+
+\noindent
+\textbf{经验证据：}
+\begin{itemize}[leftmargin=2em]
+  \item Cambrian-1 发现 visual representation 是 VLM 性能的关键瓶颈——
+    不同 encoder 的选择比 post-training 方法的选择影响更大。
+  \item InternVL2.5 发现对 vision encoder 的投资可以替代对数据的投资。
+  \item 但这些工作的结论都是``换一个更好的 encoder''——
+    \textbf{没有}任何工作研究过``让 alignment 信号回传到 connector''。
+\end{itemize}
+
+\subsection{方法：Alignment-Aware Connector Training}
+
+\paragraph{核心思路。}
+让 DPO/RL 的 alignment 梯度\textbf{穿过 LLM 回传到 connector}，
+使 connector 学会``alignment 需要什么信息''。
+
+\paragraph{Phase 1: 诊断——connector 丢了什么？}
+
+\begin{enumerate}[leftmargin=2em]
+  \item 收集 VLM 在细粒度视觉任务上的系统性错误。
+  \item 用 probing 技术检查：
+    这些错误是否源于 connector 输出中\textit{缺失}的信息？
+    \begin{itemize}
+      \item 训练一个 linear probe，
+        尝试从 connector 输出的 visual tokens 中
+        恢复 fine-grained 信息（空间坐标、精确数值、物体属性）。
+      \item 如果 probe 无法恢复 $\rightarrow$ 信息在 connector 层就丢了。
+      \item 如果 probe 可以恢复但 LLM 没有利用
+        $\rightarrow$ 信息存在但 LLM 不知道如何提取。
+    \end{itemize}
+  \item 这一诊断区分了两种不同的瓶颈：
+    \textbf{information loss}（connector 问题）
+    vs.\ \textbf{information utilization}（LLM 问题）。
+\end{enumerate}
+
+\paragraph{Phase 2: Connector-Included Alignment Training.}
+
+对于诊断为 information loss 的错误类型：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Unfreeze connector during DPO/RL。}
+    标准做法是冻结 connector，只训练 LLM。
+    本方向的核心改变：
+    让 alignment loss 的梯度同时更新 connector 参数。
+  \item \textbf{Selective unfreezing。}
+    完全解冻 connector 可能导致 catastrophic forgetting
+    （connector 丢失 pre-training 学到的基本语义对齐）。
+    解决方案：
+    \begin{itemize}
+      \item \textbf{LoRA on connector}：
+        冻结 connector 的原始权重，
+        添加 low-rank adaptation 专门接受 alignment 梯度。
+      \item \textbf{Residual connection}：
+        在 connector 的原始输出之上添加一个可训练的 residual path，
+        让 alignment 信号补充（而非替代）原始映射。
+    \end{itemize}
+  \item \textbf{Alignment-targeted reward。}
+    在标准 DPO reward（哪个 response 更好？）之上，
+    增加\textbf{visual grounding reward}——
+    response 中引用的视觉细节是否确实存在于图像中？
+    这一 reward 天然需要 connector 提供更完整的视觉信息，
+    从而驱动 connector 的更新方向。
+\end{enumerate}
+
+\paragraph{Phase 3: 验证信息恢复。}
+
+训练后，重复 Phase 1 的 probing 实验。
+关键假设：
+\begin{itemize}[leftmargin=2em]
+  \item 经过 alignment-aware training 的 connector
+    输出中包含更多 fine-grained 信息。
+  \item 这些新保留的信息直接对应于 alignment 需要但之前被丢弃的维度。
+\end{itemize}
+
+\subsection{与``换更好的 encoder''的区别}
+
+InternVL 和 Cambrian-1 的路线是``用更好的 encoder 替换旧的''——
+这需要重新 pre-train。
+本方向的路线是``让现有 connector 在 post-training 阶段
+学会保留 alignment 需要的信息''——
+这在任何已有 VLM 上都可以低成本实施。
+
+类比：
+``换更好的 encoder'' $\approx$ 换一台更好的相机。
+``alignment-aware connector training'' $\approx$
+教摄影师针对你需要的主题选择更好的取景角度——
+不换相机，但拍出更好的照片。
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Probing experiment}（Phase 1 诊断）：
+    在 LLaVA-1.5、InternVL2 上进行 connector output probing。
+    测量 fine-grained 信息（spatial, numerical, attribute）
+    在 connector 前后的保留率。
+    \textbf{这一实验本身就是有价值的 empirical contribution}——
+    定量回答``connector 到底丢了什么？''。
+
+  \item \textbf{Connector-included DPO vs.\ standard DPO}：
+    相同的 preference data，
+    唯一区别是 connector 是否参与训练。
+    假设：connector-included 在 fine-grained 任务
+    （ChartQA、DocVQA、TextVQA）上显著更优，
+    在 coarse-grained 任务（VQAv2、GQA）上差距较小——
+    因为粗粒度信息 connector 本来就保留了。
+
+  \item \textbf{LoRA vs.\ full unfreeze vs.\ residual}：
+    三种 connector 参与方式的对比。
+    假设：residual connection 是最佳平衡——
+    保留原始对齐能力 + 补充 fine-grained 信息。
+    Full unfreeze 有 catastrophic forgetting 风险。
+
+  \item \textbf{Information recovery visualization}：
+    训练前后的 connector output 的 t-SNE 可视化。
+    假设：训练后的 connector 输出在
+    fine-grained attribute 维度上有更好的可分性。
+\end{enumerate}
+\end{expbox}
+
+\begin{riskbox}
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Connector 的 capacity 限制}。
+    MLP connector 的参数量远小于 LLM。
+    即使解冻，它可能没有足够的容量
+    来同时保留语义对齐和 fine-grained 信息。
+    可能需要增大 connector 的参数量，
+    这引入了架构修改。
+  \item \textbf{Vision encoder 的天花板}。
+    如果 vision encoder 本身就没有编码某些信息
+    （如 14$\times$14 分辨率下的微小文字），
+    connector 再怎么优化也恢复不了。
+    本方向的适用范围是
+    ``encoder 看到了但 connector 丢了''的情况。
+  \item \textbf{训练稳定性}。
+    同时训练 connector 和 LLM 可能导致训练不稳定——
+    两个组件的 learning rate 和 gradient scale 差异巨大。
+    需要仔细的 learning rate scheduling。
+\end{itemize}
+\end{riskbox}
+
+
+\newpage
+% ============================================================
+\section{方向九：二维难度分解——感知课程与推理课程的正交设计}
+\label{sec:prop9}
+% ============================================================
+
+\begin{proposalbox}[2D Difficulty Decomposition: Orthogonal Curricula for Perception and Reasoning]{prop9}
+\textbf{一句话摘要：}
+VLM 的失败有两个正交维度：感知难度和推理难度。
+当前方法将所有失败混在一起训练。
+分解为二维课程，可以实现``用更少的数据达到更好的效果''——
+因为每份训练数据都精准靶向\textit{实际}的瓶颈维度。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} does increasing training data for VLMs yield diminishing returns?\\
+$\rightarrow$ 因为很大一部分训练数据没有命中模型的\textit{实际}弱点。
+一道``模型因为看不清图而答错''的题，
+如果被用来训练推理能力，就是浪费。\\[3pt]
+\textbf{Why} does this mismatch happen?\\
+$\rightarrow$ 因为 VLM 的 failure mode 有\textit{两个}独立来源
+（感知 vs.\ 推理），
+但训练数据的难度只有\textit{一个}维度
+（``模型答对的概率''）。\\[3pt]
+\textbf{Why} is one-dimensional difficulty insufficient?\\
+$\rightarrow$ 因为``$p = 0.5$''（DPE 的 sweet spot）可以来自
+完全不同的原因组合：
+(a) 感知容易 + 推理困难，
+(b) 感知困难 + 推理容易，
+(c) 两者都中等。
+这三种情况需要完全不同的训练策略。\\[3pt]
+\textbf{Root cause:}
+DPE 的 $p(1-p)$ 原则在 text-only 中是一维最优的，
+但在多模态中退化为\textbf{低效}——
+因为它将两个正交的难度维度坍缩为一个标量。
+\end{whybox}
+
+\subsection{核心论点}
+
+\begin{insightbox}
+将 DPE 的一维 difficulty landscape 推广到二维：
+
+\begin{center}
+\begin{tabular}{c|c|c|c}
+ & \textbf{感知 Easy} & \textbf{感知 Medium} & \textbf{感知 Hard} \\
+\hline
+\textbf{推理 Easy} & 已掌握 & 感知瓶颈 & 感知瓶颈 \\
+\hline
+\textbf{推理 Medium} & 推理瓶颈 & \textbf{双重前沿} & 混合训练 \\
+\hline
+\textbf{推理 Hard} & 推理瓶颈 & 混合训练 & 超出能力 \\
+\end{tabular}
+\end{center}
+
+\noindent
+一维 DPE 将整个矩阵压缩成一个$p$值。
+二维分解让我们为每个区域设计\textit{不同的训练策略}——
+这是信息论上严格更优的课程设计。
+\end{insightbox}
+
+\subsection{方法：正交探测与分流训练}
+
+\paragraph{Step 1: 构建正交探测框架。}
+
+对每个视觉推理问题，构造两类探测来分离感知难度和推理难度：
+
+\textbf{推理难度探测}（控制感知）：
+\begin{itemize}[leftmargin=2em]
+  \item 将图像中的关键信息替换为完美的文本描述
+    （即``假装 OCR 完美、物体识别完美''），
+    让模型基于\textit{完美感知}回答问题。
+  \item 模型在此设定下的成功率 = 推理能力的纯度量。
+\end{itemize}
+
+\textbf{感知难度探测}（控制推理）：
+\begin{itemize}[leftmargin=2em]
+  \item 设计仅需\textit{简单推理}但需要\textit{精确感知}的子问题：
+    ``图中 X 轴的最大值是多少？''
+    ``第三行第二列的数字是什么？''
+  \item 模型在此设定下的成功率 = 感知能力的纯度量。
+\end{itemize}
+
+\noindent
+两个探测的交叉给出每个样本在 2D 空间中的位置。
+
+\paragraph{Step 2: 定义四个训练区域。}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{3.5cm}p{2.5cm}p{5cm}l}
+\toprule
+\textbf{区域} & \textbf{坐标} & \textbf{训练策略} & \textbf{权重} \\
+\midrule
+Mastered
+  & P-easy, R-easy
+  & 少量保持能力的数据
+  & 5\% \\
+Perception Frontier
+  & P-medium, R-easy
+  & 高分辨率视觉数据 + 精确 OCR/计数训练
+  & 30\% \\
+Reasoning Frontier
+  & P-easy, R-medium
+  & 长链推理数据 + step-by-step verification
+  & 30\% \\
+Dual Frontier
+  & P-medium, R-medium
+  & 综合训练 + 方向六的解耦 self-assessment
+  & 25\% \\
+Beyond Reach
+  & P-hard, R-hard
+  & 训练诚实拒绝（``这超出我的能力''）
+  & 10\% \\
+\bottomrule
+\end{tabular}
+\caption{2D difficulty decomposition 的五区域训练策略。
+每个区域的训练数据\textit{格式}不同——
+Perception Frontier 强调视觉细节验证步骤，
+Reasoning Frontier 强调逻辑推理深度。}
+\label{tab:2d-regions}
+\end{table}
+
+\paragraph{Step 3: 区域特异的数据格式。}
+
+\textbf{Perception Frontier 数据格式}（重点是教模型仔细看）：
+\begin{tcolorbox}[colback=gray!5,colframe=gray!50,boxrule=0.3pt,left=4pt,right=4pt]
+\small
+\texttt{Question: [需要精确视觉感知的问题]}\\[2pt]
+\texttt{Visual inventory: 让我仔细列出图中的关键视觉元素...}\\
+\texttt{- 我看到 [元素1]: [精确描述，包括位置、大小、颜色]}\\
+\texttt{- 我看到 [元素2]: [精确描述]}\\
+\texttt{- 需要双重检查的元素: [可能看错的部分]}\\[2pt]
+\texttt{Based on verified visual information: [简短推理 + 答案]}
+\end{tcolorbox}
+
+\textbf{Reasoning Frontier 数据格式}（重点是教模型深入推理）：
+\begin{tcolorbox}[colback=gray!5,colframe=gray!50,boxrule=0.3pt,left=4pt,right=4pt]
+\small
+\texttt{Question: [视觉信息清晰但推理复杂的问题]}\\[2pt]
+\texttt{Visual facts (straightforward):}\\
+\texttt{- [快速准确的视觉提取]}\\[2pt]
+\texttt{Reasoning chain:}\\
+\texttt{Step 1: [推理步骤] ... 验证: [验证逻辑]}\\
+\texttt{Step 2: [推理步骤] ... 验证: [验证逻辑]}\\
+\texttt{...}\\
+\texttt{Answer: [最终答案]}
+\end{tcolorbox}
+
+\paragraph{Step 4: 迭代探测与更新。}
+
+训练后重新运行正交探测，
+2D landscape 会发生变化：
+\begin{itemize}[leftmargin=2em]
+  \item Perception Frontier 的问题可能移入 Mastered
+    （感知能力提升了）。
+  \item 新的问题进入 Perception Frontier
+    （更难的感知挑战成为新的前沿）。
+  \item 同理 Reasoning Frontier。
+\end{itemize}
+
+\noindent
+这实现了\textbf{二维自适应课程}——
+不再是 DPE 的一维 frontier，
+而是一个在 perception-reasoning 平面上移动的 2D frontier。
+
+\subsection{为什么二维严格优于一维}
+
+\textbf{信息论论证：}
+一维 $p$ 值是 $(\text{perception difficulty}, \text{reasoning difficulty})$
+二维信号的\textit{边际化}。
+边际化总是丢失信息。
+在二维空间中选择训练数据，
+等价于在更丰富的特征空间中做课程设计——
+理论上不可能比一维更差。
+
+\textbf{实践论证：}
+考虑一个模型，它的感知能力很强但推理能力一般。
+一维 DPE 会选择 $p \approx 0.5$ 的问题——
+其中很多是``感知 Hard + 推理 Easy''的题。
+这些题对这个模型来说，
+``$p \approx 0.5$''纯粹因为感知困难——
+但模型的\textit{真正}瓶颈是推理。
+二维分解可以避免这种错误分配。
+
+\subsection{与方向三/六的关系}
+
+方向三（Contrastive Self-Diagnosis）的``失败 $\rightarrow$ 分析 $\rightarrow$ 纠正''框架
+自然适配本方向：
+\begin{itemize}[leftmargin=2em]
+  \item Perception Frontier 的失败轨迹中，
+    ``Error analysis'' 聚焦于``我在哪里看错了''。
+  \item Reasoning Frontier 的失败轨迹中，
+    ``Error analysis'' 聚焦于``我在哪一步推错了''。
+\end{itemize}
+
+\noindent
+方向六（Decomposed Uncertainty）的 P-error / R-error 分类
+直接为本方向的 2D 探测提供信号。
+两者的区别：方向六关注\textit{训练后}的 runtime meta-cognition，
+本方向关注\textit{训练时}的课程设计。
+它们是同一洞察（``VLM 的难度是二维的''）的两个面向。
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{2D vs.\ 1D curriculum}：
+    固定总训练 compute，对比
+    2D difficulty decomposition vs.\ 标准 DPE（1D）
+    vs.\ random sampling。
+    评估在 mixed benchmarks 上的综合表现。
+    假设：2D $>$ 1D $>$ random，
+    且差距在\textit{不平衡}模型上最大
+    （感知 $\gg$ 推理 或 推理 $\gg$ 感知）。
+
+  \item \textbf{Perception-Reasoning distribution map}：
+    对 MathVista、ChartQA、MMMU 等 benchmark 中的问题
+    绘制 2D 难度地图。
+    \textbf{这一 empirical contribution 本身就有价值}——
+    定量回答``这些 benchmark 到底在测感知还是推理？''。
+
+  \item \textbf{Targeted training efficiency}：
+    识别一个模型的主要瓶颈维度（如感知），
+    仅在该维度上投入训练资源。
+    对比``仅 perception training''的效率
+    vs.\ 全量混合训练。
+    假设：靶向训练以 30\% 的数据
+    达到全量训练 80\% 的效果。
+
+  \item \textbf{跨模型泛化}：
+    在 LLaVA-1.5（connector = MLP）
+    和 InstructBLIP（connector = Q-former）上
+    分别进行 2D 探测。
+    假设：不同架构的 2D profile 不同——
+    MLP connector 可能在 perception 维度更弱，
+    Q-former 在某些细粒度任务上更强。
+    这揭示了架构选择对 difficulty landscape 的影响。
+\end{enumerate}
+\end{expbox}
+
+\begin{riskbox}
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{正交探测的准确性}。
+    ``用文本替换图像''不是完美的感知控制——
+    有些视觉信息难以用文本精确描述。
+    需要设计更精细的探测方法。
+  \item \textbf{维度间的交互}。
+    现实中感知和推理可能不是完全正交的——
+    例如，某些高级推理需要对视觉信息的\textit{精确}编码
+    （不仅仅是``看到''了，还需要``精确记住''）。
+    2D 分解可能遗漏这种交互效应。
+  \item \textbf{数据格式设计的敏感性}。
+    Perception Frontier 和 Reasoning Frontier 的
+    训练数据格式差异可能引入 confounding variable。
+    需要控制实验来隔离
+    ``2D 选择''和``格式差异''各自的贡献。
+\end{itemize}
+\end{riskbox}
+
+
+\newpage
+% ============================================================
+\section*{五个方向的统一图景}
+% ============================================================
+
+五个方向围绕一个核心问题展开：
+\textbf{VLM post-training 的信息流从图像到文本，
+每个环节都有独特的失败模式和优化机会}。
+
+\begin{center}
+\begin{tikzpicture}[
+  node distance=0.7cm,
+  box/.style={rectangle, draw, rounded corners=3pt,
+    minimum width=11.5cm, minimum height=1.2cm,
+    text width=11cm, align=center, font=\small},
+  arrow/.style={-{Stealth[length=3mm]}, thick, gray!70}
+]
+\node[box, fill=prop8!10, draw=prop8!70] (p8)
+  {\textbf{方向八：Connector 是 Alignment 瓶颈}\\
+   攻击信息流的最上游——让 connector 保留 alignment 所需的视觉信息};
+\node[box, fill=prop5!10, draw=prop5!70, below=of p8] (p5)
+  {\textbf{方向五：主动视觉回看}\\
+   在推理过程中重新查询图像——将视觉从被动输入变为可查询记忆};
+\node[box, fill=prop6!10, draw=prop6!70, below=of p5] (p6)
+  {\textbf{方向六：模态解耦不确定性}\\
+   区分感知错误和推理错误——精准归因才能精准训练};
+\node[box, fill=prop7!10, draw=prop7!70, below=of p6] (p7)
+  {\textbf{方向七：跨模态自验证}\\
+   利用图像本身作为 free reward——打破多模态 reward bottleneck};
+\node[box, fill=prop9!10, draw=prop9!70, below=of p7] (p9)
+  {\textbf{方向九：二维难度分解}\\
+   感知课程和推理课程正交设计——用更少数据达到更好效果};
+
+\draw[arrow] (p8) -- (p5);
+\draw[arrow] (p5) -- (p6);
+\draw[arrow] (p6) -- (p7);
+\draw[arrow] (p6) -- (p9);
+\end{tikzpicture}
+\end{center}
+
+\noindent
+逻辑递进关系：
+\begin{itemize}[leftmargin=2em]
+  \item 方向八 $\rightarrow$ 方向五：
+    先确保 connector 传递了足够的信息，
+    再赋予模型主动回看的能力。
+  \item 方向五 $\rightarrow$ 方向六：
+    有了回看能力后，
+    模型需要知道\textit{何时}回看（感知不确定时）
+    vs.\ \textit{何时}深入推理（推理不确定时）。
+  \item 方向六 $\rightarrow$ 方向七/九：
+    有了解耦的不确定性后，
+    可以用图像作为 reward（方向七）或设计正交课程（方向九）。
+\end{itemize}
+
+\subsection*{与前四个方向（Text-Only）的映射}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{5cm}p{5.5cm}p{2cm}}
+\toprule
+\textbf{Text-Only 方向} & \textbf{VLM 对应} & \textbf{关系} \\
+\midrule
+方向一：统一 Self-Consistency Reward
+  & 方向七：Cross-Modal Self-Verification
+  & 深化 \\
+方向二：Meta-Capability 假说
+  & 方向六：Modality-Decomposed Uncertainty
+  & 扩展 \\
+方向三：对比式自我诊断
+  & 方向九：2D Difficulty Decomposition
+  & 推广 \\
+方向四：多视角稳健性验证
+  & 方向七：Cross-Modal Self-Verification
+  & 特化 \\
+（无对应）
+  & 方向五：Active Re-Perception
+  & 原生 \\
+（无对应）
+  & 方向八：Connector Bottleneck
+  & 原生 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection*{优先排序}
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{最高 risk/reward}：方向八（Connector Bottleneck）——
+    若验证``connector 是真正瓶颈''，将改变整个 VLM post-training 范式。
+  \item \textbf{最可行的近期实验}：方向九（2D Difficulty Decomposition）——
+    仅需标准 VLM + 精心设计的探测实验，
+    ``2D difficulty map'' 本身就是高价值的 empirical contribution。
+  \item \textbf{最具原创性}：方向五（Active Re-Perception）——
+    提出了一种全新的 VLM 推理范式，
+    如果成功则是 paradigm shift。
+  \item \textbf{最实用的即时价值}：方向七（Cross-Modal Self-Verification）——
+    零标注成本的 reward signal，
+    可以直接应用到任何 VLM alignment pipeline。
+  \item \textbf{理论贡献最大}：方向六（Modality-Decomposed Uncertainty）——
+    将 meta-cognition 理论从 1D 推广到结构化的 2D，
+    为 VLM 的 calibration 研究奠定理论基础。
+\end{itemize}
+
+\end{document}

@@ -1,0 +1,1801 @@
+% === Chapter 5: Thread 5 — Multimodal Post-Training ===
+\section{Thread 5: Multimodal Post-Training}
+\label{sec:t5}
+
+% ============================================================
+% 5.1 Problem Origin
+% ============================================================
+\subsection{问题起源：从 Text-Only 到 Vision-Language}
+\label{sec:t5-origin}
+
+Pre-trained vision-language model（VLM）面临的核心困境与 text-only LLM 高度相似但又更加尖锐：
+仅靠 image-text contrastive learning（如 CLIP \cite{radford2021clip}）或
+image-text matching pre-training（如 BLIP-2 \cite{li2023blip2}）获得的模型，
+虽然具备了视觉-语言对齐的基础能力，
+但既无法遵循开放式的多模态指令，也无法生成结构化的长文本回答。
+换言之，pre-training 阶段赋予 VLM 的是 \textbf{perceive} 的能力，
+而 post-training 阶段需要赋予它 \textbf{reason、follow instructions、stay faithful} 的能力。
+
+\begin{problembox}
+如何将 text-only post-training 中发展成熟的 SFT、RLHF/DPO 等技术
+迁移到 vision-language 联合建模场景中？
+这一迁移面临三重挑战：
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{模态对齐}（Modality Alignment）：
+    visual features 和 text tokens 位于不同的 embedding space 中，
+    如何设计 projection 或 fusion 机制使 LLM 能够"理解"视觉信息？
+  \item \textbf{数据构建}（Data Construction）：
+    多模态 instruction-following 数据的标注成本远高于纯文本，
+    如何利用现有 vision-language 数据集或借助强模型自动生成高质量训练数据？
+  \item \textbf{Multimodal Hallucination}：
+    VLM 会生成与图像内容不一致的描述（如声称图中存在不存在的物体），
+    这一问题在 text-only LLM 中虽然存在但在多模态场景下更加显著和易于度量。
+\end{enumerate}
+\end{problembox}
+
+\noindent
+从技术演化的视角看，multimodal post-training 的发展直接继承并扩展了
+Thread~1 中 instruction tuning 的核心范式
+\crossref{1}{sec:sft}，
+同时又将 Thread~2 中 preference optimization 的方法论
+\crossref{2}{sec:pref}
+引入视觉-语言场景以解决 hallucination 和 alignment 问题。
+这条线程的独特贡献在于：
+它不仅解决了多模态场景下的 alignment 挑战，
+还反过来为 text-only post-training 提供了新的启发 ---
+例如，multimodal hallucination 的研究推动了 factual grounding 技术的发展，
+而 visual grounding 的训练方法则启发了 text-only LLM 中的 citation generation。
+
+% ============================================================
+% 5.2 Foundation Methods
+% ============================================================
+\subsection{奠基方法}
+\label{sec:t5-foundation}
+
+本节深入分析三项奠基性工作：
+Flamingo \cite{alayrac2022flamingo} 确立了 VLM 的架构范式，
+LLaVA \cite{liu2023llava} 开创了 visual instruction tuning，
+InstructBLIP \cite{dai2023instructblip} 则系统性地推进了 instruction-aware 的视觉特征提取。
+
+% --- Flamingo ---
+\subsubsection{Flamingo: Visual Language Model for Few-Shot Learning}
+\label{sec:t5-flamingo}
+
+\landmark{alayrac2022flamingo}
+Flamingo \cite{alayrac2022flamingo} 是 DeepMind 于 2022 年提出的视觉语言模型，
+它首次证明了通过在 frozen LLM 中注入视觉信息，
+可以在不 fine-tune 的情况下实现强大的 few-shot multimodal 能力。
+Flamingo 为后续所有 VLM post-training 工作奠定了架构基础。
+
+\paragraph{Architecture.}
+Flamingo 的架构由三个核心组件构成：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Vision Encoder}：
+    采用 pre-trained 并 frozen 的 NFNet-F6 作为视觉编码器，
+    经过 contrastive learning on image-text pairs 训练，
+    将输入图像（或视频帧）编码为 spatial features。
+
+  \item \textbf{Perceiver Resampler}：
+    这是 Flamingo 的关键创新之一。
+    Vision encoder 对不同分辨率的图像/视频产生 \textit{可变数量} 的 visual features，
+    Perceiver Resampler 通过一组固定数量的 \textit{learned latent queries}（64 个）
+    对这些 features 进行 cross-attention，
+    将任意数量的 visual tokens 映射为固定的 64 个 visual output tokens。
+    这一设计的核心优势在于：
+    （1）解耦了 visual feature 数量与 LLM 输入长度的依赖关系；
+    （2）为处理多图像和视频输入提供了统一的接口。
+
+  \item \textbf{Gated Cross-Attention Dense (XATTN-DENSE) Layers}：
+    在 frozen LLM（Chinchilla）的每一层 self-attention 之前，
+    插入一个新的 cross-attention 层，让 text tokens attend to visual tokens。
+    关键设计是 \textbf{tanh gating}：
+    每个 cross-attention 层的输出乘以一个可学习的标量 $\tanh(\alpha)$，
+    其中 $\alpha$ 初始化为 0。
+    这确保在训练开始时，新插入的视觉模块对 LLM 输出的影响为零，
+    从而保护 LLM 在 pre-training 阶段习得的语言能力不被破坏。
+    训练过程中，模型逐步学会利用视觉信息。
+\end{enumerate}
+
+\paragraph{Training.}
+Flamingo 的训练策略体现了 pragmatic engineering 的精髓：
+vision encoder 和 LLM 均保持 frozen，
+只训练 Perceiver Resampler、gated cross-attention layers 以及 layer norms。
+训练数据包含三类来源：
+（1）M3W（MultiModal MassiveWeb）--- 从互联网抓取的 43M 个包含图文交错内容的网页；
+（2）LTIP（Long Text \& Image Pairs）--- 312M 个 image-text pairs；
+（3）VTP（Video \& Text Pairs）--- 27M 个 video-text pairs。
+M3W 数据的独特价值在于它天然提供了 \textit{interleaved image-text sequences}，
+使 Flamingo 能够在 in-context learning 中处理多张图像。
+
+\paragraph{Results.}
+80B 参数的 Flamingo 在 16 个 multimodal benchmarks 上设立了 few-shot 新的 state-of-the-art。
+更引人注目的是，仅使用 32 个示例的 few-shot Flamingo 就在 6 个 benchmark 上
+超越了经过 full fine-tuning 的 prior SOTA 模型。
+这一结果强有力地证明了 frozen LLM + visual adapter 范式的有效性。
+Flamingo 的架构理念迅速催生了开源复现：
+IDEFICS \cite{laurencon2023idefics} 基于公开的 OBELICS 数据集
+构建了 Flamingo 的开源变体，为后续 VLM 研究提供了可复现的基线。
+与此同时，PaLM-E \cite{driess2023palme} 将 Flamingo 式的 frozen LLM + visual adapter 范式
+推广到\textbf{具身场景}——将机器人传感器输入、场景图像和自然语言指令
+统一编码进 PaLM 562B 的输入空间，
+证明了多模态 LLM 不仅能``看懂图片''，还能直接驱动机器人执行物理世界中的任务
+（\crossref{6}{sec:thread6}）。
+
+\evolution{分离训练的 vision model + language model}
+  {Frozen LLM + Visual Adapters 的统一 VLM}
+  {Perceiver Resampler + Gated XATTN}
+
+% --- LLaVA ---
+\subsubsection{LLaVA: Visual Instruction Tuning}
+\label{sec:t5-llava}
+
+\landmark{liu2023llava}
+如果说 Flamingo 确立了 VLM 的架构范式，
+那么 LLaVA (Large Language and Vision Assistant) \cite{liu2023llava} 则开创了
+\textbf{visual instruction tuning} 的训练范式 ---
+即通过在多模态 instruction-following 数据上进行 SFT，
+将 VLM 从一个视觉问答工具转化为一个通用的多模态 AI assistant。
+这一工作直接将 Thread~1 中 instruction tuning 的核心思想
+\crossref{1}{sec:sft}
+迁移到了 vision-language 场景。
+
+\paragraph{Architecture.}
+LLaVA 的架构设计以简洁著称，由三个组件构成：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Vision Encoder}：
+    pre-trained CLIP ViT-L/14（分辨率 224$\times$224），
+    取最后一层 transformer layer 之前的 features 作为 visual representation。
+  \item \textbf{Projection Layer}：
+    一个可训练的线性投影矩阵 $\mathbf{W}$，
+    将 CLIP visual features 映射到 LLM 的 word embedding space：
+    $\mathbf{H}_v = \mathbf{W} \cdot \mathbf{Z}_v$，
+    其中 $\mathbf{Z}_v$ 是 CLIP 输出的 visual feature sequence。
+    这是整个架构中连接视觉和语言模态的唯一桥梁。
+  \item \textbf{LLM}：
+    Vicuna \cite{chiang2023vicuna}（基于 LLaMA 的 instruction-tuned 模型），
+    接收 visual tokens 和 text tokens 的拼接序列作为输入。
+\end{itemize}
+
+\noindent
+相比 Flamingo 的 Perceiver Resampler + gated cross-attention 设计，
+LLaVA 的一层线性投影显得极其简单。
+但正是这种 ``radical simplicity'' 使得 LLaVA 成为最易复现的 VLM baseline，
+并催生了庞大的后续工作。
+
+\paragraph{Data Construction via GPT-4.}
+LLaVA 最具影响力的贡献之一是提出了利用 GPT-4 自动生成多模态 instruction-following 数据的方法。
+具体而言，研究者将 COCO \cite{lin2014coco} 图像的 captions 和 bounding box 信息
+以纯文本形式输入 GPT-4（注意：此时 GPT-4 尚无视觉能力），
+并通过精心设计的 prompt 让 GPT-4 生成三类数据：
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Conversation}（58K 条）：
+    围绕图像内容进行多轮问答的对话数据。
+  \item \textbf{Detailed Description}（23K 条）：
+    对图像内容进行详细、全面描述的数据。
+  \item \textbf{Complex Reasoning}（77K 条）：
+    需要对图像内容进行深层推理的问答数据。
+\end{itemize}
+
+\noindent
+这种 ``text-only GPT-4 + image metadata $\rightarrow$ multimodal training data'' 的范式
+完全绕过了多模态数据标注的高昂成本，
+为后续 ShareGPT4V \cite{chen2023sharegpt4v}、
+LLaVA-1.5 \cite{liu2023llava15} 等工作中的数据扩展奠定了方法论基础。
+
+\paragraph{Two-Stage Training.}
+LLaVA 的训练分为两个阶段：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Stage 1 --- Feature Alignment Pre-Training}：
+    Vision encoder 和 LLM 均保持 frozen，
+    仅训练 projection matrix $\mathbf{W}$。
+    使用 CC3M 过滤后的 595K image-text pairs，
+    训练目标是标准的 next-token prediction（仅对 text tokens 计算 loss）。
+    这一阶段的作用是让 projection layer 学会将 visual features 映射到 LLM 能理解的语义空间。
+
+  \item \textbf{Stage 2 --- End-to-End Visual Instruction Tuning}：
+    Vision encoder 保持 frozen，
+    projection matrix $\mathbf{W}$ 和 LLM 均 unfrozen 并联合训练。
+    使用 GPT-4 生成的 158K multimodal instruction-following 数据，
+    训练目标仍为 next-token prediction，但此时输入是完整的 multimodal instruction。
+    这一阶段使模型学会遵循多模态指令并生成结构化回答。
+\end{enumerate}
+
+\paragraph{Results \& Impact.}
+在 LLaVA-Bench（In-the-Wild）上，
+LLaVA 达到了 GPT-4（text-only + image caption 输入）评分的 85.1\% 相对得分。
+更重要的是，LLaVA 确立了一个极其有影响力的 VLM 训练范式：
+\textit{CLIP encoder + simple projection + LLM + two-stage training}。
+后续的 LLaVA-1.5 \cite{liu2023llava15} 将 linear projection 替换为 MLP，
+引入更高分辨率（336$\times$336），并加入 academic-task-oriented VQA 数据，
+在多个 benchmark 上大幅提升了性能。
+这一 LLaVA 家族的持续演化
+（LLaVA $\rightarrow$ LLaVA-1.5 $\rightarrow$ LLaVA-NeXT $\rightarrow$ LLaVA-OneVision）
+成为 multimodal post-training 领域最重要的 baseline 系列。
+
+\evolution{人工标注多模态 instruction 数据}
+  {GPT-4 自动生成 + Two-Stage SFT}
+  {LLaVA pipeline}
+
+% --- InstructBLIP ---
+\subsubsection{InstructBLIP: Instruction-Aware Visual Feature Extraction}
+\label{sec:t5-instructblip}
+
+\landmark{dai2023instructblip}
+InstructBLIP \cite{dai2023instructblip} 构建于 BLIP-2 \cite{li2023blip2} 之上，
+其核心创新是提出了 \textbf{instruction-aware Q-Former} ---
+在视觉特征提取阶段就引入 instruction 信息，
+使 Q-Former 能够根据不同的 task instruction 提取 \textit{与任务相关} 的视觉特征。
+
+\paragraph{Architecture.}
+BLIP-2 的 Q-Former 使用一组固定数量的 learned queries
+通过 cross-attention 从 frozen vision encoder 的输出中提取视觉信息。
+InstructBLIP 的关键改进是：
+将 instruction text tokens 作为额外输入与 learned queries 一同送入 Q-Former，
+使得 Q-Former 的 self-attention 可以同时 attend to queries 和 instruction tokens，
+而 cross-attention 则基于这些 instruction-conditioned queries 从视觉特征中提取信息。
+形式化地，设 $\mathbf{Q}$ 为 learned queries，$\mathbf{I}$ 为 instruction tokens，
+$\mathbf{V}$ 为 visual features，则：
+\begin{equation}
+  \mathbf{Q}' = \text{Q-Former}(\mathbf{Q}, \mathbf{I}, \mathbf{V})
+\end{equation}
+其中 self-attention 作用于 $[\mathbf{Q}; \mathbf{I}]$，
+cross-attention 让 $\mathbf{Q}'$ attend to $\mathbf{V}$。
+这一设计使得对同一张图像，不同的 instruction 会引导 Q-Former 关注不同的视觉区域和属性。
+
+\paragraph{Training.}
+InstructBLIP 进行了迄今为止最系统化的 vision-language instruction tuning 研究：
+从 26 个公开数据集中构建训练集，覆盖 11 个 task categories
+（image captioning、VQA、visual reasoning、image classification 等）。
+每个数据集使用专门设计的 instruction template 转化为 instruction-following 格式。
+训练时 vision encoder 和 LLM 保持 frozen，仅训练 Q-Former。
+
+一个重要的工程细节是 \textbf{balanced dataset sampling}：
+直接按数据集大小比例采样会导致小数据集被大数据集淹没。
+InstructBLIP 采用的策略是将每个数据集的采样概率设为与其大小的平方根成正比：
+$p_i \propto \sqrt{|D_i|}$，有效平衡了数据集间的覆盖率。
+
+\paragraph{Results.}
+InstructBLIP 在全部 13 个 held-out（未参与训练的）数据集上实现了 zero-shot SOTA，
+证明了 instruction-aware feature extraction 的泛化能力。
+更令人瞩目的是，仅 4B 参数的 InstructBLIP（Vicuna-7B backbone）
+在多个 benchmark 上超越了 80B 参数的 Flamingo，
+充分说明了 instruction tuning 的效率优势：
+\textit{高质量的 post-training 可以弥补数量级的参数差距}。
+
+\begin{solutionbox}
+\textbf{LLaVA vs InstructBLIP --- 两种视觉特征提取范式：}
+\begin{itemize}[leftmargin=2em]
+  \item LLaVA：simple projection，将 \textit{所有} visual features 直接送入 LLM，
+    由 LLM 的 attention 机制自行决定关注哪些视觉信息。
+    优点：实现简单、LLM 获得完整视觉信息；缺点：visual tokens 较多，计算开销较大。
+  \item InstructBLIP：instruction-aware Q-Former，
+    在视觉特征提取阶段就进行 task-relevant 过滤。
+    优点：visual tokens 数量固定且较少（32 个 queries）、任务适应性强；
+    缺点：Q-Former 引入额外训练复杂度，可能丢失与当前 instruction 无关但仍有价值的视觉信息。
+\end{itemize}
+后续发展表明，LLaVA 的 simple projection 路线（辅以更高分辨率和更好的 projection 设计）
+逐渐成为主流选择，原因在于其 \textbf{simplicity} 和 \textbf{scalability}。
+\end{solutionbox}
+
+% ============================================================
+% 5.3 Limitations & Branching
+% ============================================================
+\subsection{局限与分支演化}
+\label{sec:t5-branches}
+
+视觉 instruction tuning 奠定了 multimodal post-training 的基础框架，
+但在实际部署中暴露出多个亟待解决的问题，催生了四条分支演化路径。
+
+% --- Branch A: VLM Preference Optimization ---
+\subsubsection{分支 A：VLM Preference Optimization}
+\label{sec:t5-branch-a}
+
+\begin{problembox}
+SFT 训练的 VLM 存在与 text-only LLM 类似的 alignment 缺陷：
+模型倾向于生成看似合理但不忠实于图像内容的回答，
+且缺乏拒绝不确定问题的能力。
+如何将 preference optimization 技术从纯文本场景迁移到多模态场景？
+\end{problembox}
+
+\paragraph{LLaVA-RLHF: 首个多模态 RLHF.}
+\landmark{sun2023llava-rlhf}
+LLaVA-RLHF \cite{sun2023llava-rlhf} 是首个将完整 RLHF pipeline 应用于 VLM 的工作，
+直接将 Thread~2 中 RLHF 的方法论
+\crossref{2}{sec:pref}
+迁移到多模态场景。
+其训练分为三个阶段：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Multimodal SFT}：
+    在 LLaVA 基础上使用增强的高质量数据
+    （VQA-v2 \cite{goyal2017vqav2}、A-OKVQA \cite{schwenk2022aokvqa}、Flickr30k \cite{plummer2015flickr30k}）
+    进行 SFT，提供更好的 warm start。
+
+  \item \textbf{Hallucination-Aware Human Preference Collection}：
+    收集约 10K 条人类偏好标注（成本约 \$3,000）。
+    标注过程专门设计为关注 hallucination：
+    标注者在比较两个回答时需要优先惩罚包含事实错误的回答，
+    而非仅基于流畅度或详细程度进行判断。
+
+  \item \textbf{Factually Augmented RLHF (Fact-RLHF)}：
+    这是本工作最核心的创新。
+    标准 RLHF 中 reward model 仅接收 (image, question, response) 作为输入，
+    容易产生 \textbf{reward hacking} ---
+    reward model 可能对「自信但错误」的回答给出高分。
+    Fact-RLHF 的解决方案是在 reward model 的输入中
+    额外附加 \textit{factual information}（图像的详细 caption 和/或标准答案），
+    使 reward model 能够基于 ground truth 信息验证回答的事实正确性。
+    形式化地，reward model 的输入从 $(x_v, x_q, y)$ 扩展为 $(x_v, x_q, y, x_{\text{fact}})$，
+    其中 $x_{\text{fact}}$ 是 factual augmentation。
+\end{enumerate}
+
+\noindent
+在 MMHal-Bench（一个包含 96 个 image-question pairs 的 hallucination 评估基准，
+覆盖 8 个类别 $\times$ 12 个物体主题）上，
+LLaVA-RLHF 相比 LLaVA 基线取得了 60\% 的 hallucination 减少。
+在 LLaVA-Bench 上则达到了 GPT-4 评分的 94\%。
+
+\paragraph{RLHF-V: 细粒度纠正反馈.}
+RLHF-V \cite{yu2023rlhfv} 提出了一种更精细的偏好收集策略：
+标注者不仅标注 preferred/dispreferred response pair，
+还需要在 dispreferred response 中逐段标注哪些具体片段包含 hallucination，
+并提供对应的修正文本。
+这种 \textit{fine-grained correctional feedback} 使得 preference learning
+能够聚焦于回答中真正有问题的局部，而非对整个回答进行粗粒度判断。
+
+\paragraph{RLAIF-V: 开源 AI 反馈.}
+RLAIF-V \cite{yu2024rlaifv} 进一步解决了人类标注的成本问题：
+使用开源 VLM（而非 GPT-4V）自动生成偏好数据，
+形成完全开源的 AI feedback pipeline。
+这一工作证明了 AI feedback 在 VLM alignment 中的可行性，
+呼应了 Thread~2 中 RLAIF \cite{lee2023rlaif} 的思想
+\crossref{2}{sec:pref}。
+
+\paragraph{mDPO: 条件偏好优化.}
+mDPO \cite{wang2024mdpo} 针对多模态场景对 DPO 进行了修改。
+标准 DPO 的隐含假设是 reference policy 对 preferred 和 dispreferred response 的概率差异
+主要来自文本偏好，
+但在多模态设置中，图像条件会显著影响这一分布。
+mDPO 引入了一个 image-conditioned 的修正项，
+使 DPO 的 preference learning 更好地适应多模态输入的特性。
+
+\paragraph{LLaVA-Critic: 模型即评估者.}
+LLaVA-Critic \cite{xiong2024llava-critic} 提出训练 VLM 自身作为多模态输出的评估者，
+能够对自身或其他模型的回答进行打分和排序。
+这一工作与 Thread~2 中 reward modeling 的思想一脉相承
+\crossref{2}{sec:pref}，
+同时为 self-improvement 和 iterative DPO 提供了多模态场景下的基础设施。
+
+\paragraph{其他工作.}
+Silkie \cite{li2023silkie} 利用 GPT-4V 对多个 VLM 的回答进行偏好排序，
+通过 preference distillation 构建训练数据。
+HA-DPO \cite{zhao2023hadpo} 专门针对 hallucination 构建偏好对，
+使 DPO 的优化目标更加聚焦于减少幻觉。
+SeVa \cite{zhu2024seva} 提出 self-supervised visual preference alignment，
+无需人工标注即可通过对比正确/错误视觉输入生成偏好数据。
+DRESS \cite{chen2023dress} 则引入自然语言反馈作为 alignment 信号，
+超越了简单的 preferred/dispreferred 二元标注。
+
+\evolution{SFT-only 的 VLM 训练}
+  {SFT $\rightarrow$ RLHF/DPO 的完整 alignment pipeline}
+  {多模态偏好优化}
+
+% --- Branch B: Hallucination Reduction ---
+\subsubsection{分支 B：Hallucination Reduction}
+\label{sec:t5-branch-b}
+
+\begin{problembox}
+VLM 经常生成与图像内容不一致的描述 --- 声称图中存在不存在的物体（object hallucination），
+或错误描述物体的属性和关系。
+如何系统化地评估和减少这种 multimodal hallucination？
+\end{problembox}
+
+\paragraph{CHAIR: 经典评估指标.}
+\landmark{rohrbach2018chair}
+CHAIR (Caption Hallucination Assessment with Image Relevance) \cite{rohrbach2018chair}
+是最早的 object hallucination 定量评估指标之一，
+通过检查模型生成的 caption 中提到的物体
+是否存在于 ground truth annotation（COCO object annotations）中来计算 hallucination rate。
+CHAIR 定义了两个指标：
+$\text{CHAIR}_I$（instance-level，每个幻觉物体计一次）和
+$\text{CHAIR}_S$（sentence-level，包含幻觉的句子占比）。
+虽然简洁有效，但 CHAIR 存在明显局限：
+它仅覆盖 COCO 的 80 个物体类别，且对 prompt 措辞高度敏感。
+
+\paragraph{POPE: Polling-Based Evaluation.}
+\landmark{li2023pope}
+POPE (Polling-based Object Probing Evaluation) \cite{li2023pope}
+将 hallucination 评估转化为一个更稳定的二元分类问题。
+对于每张图像，POPE 生成一组 ``Is there a [object] in the image?'' 的 Yes/No 问题。
+其中正样本使用图像中真实存在的物体，
+负样本则通过三种策略采样：
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Random Sampling}：从 COCO 物体类别中随机采样不在图像中的物体。
+  \item \textbf{Popular Sampling}：采样 COCO 数据集中出现频率最高的 top-$k$ 物体
+    （但不在当前图像中），用于检测模型对 \textit{高频物体} 的 hallucination 倾向。
+  \item \textbf{Adversarial Sampling}：采样与当前图像中 ground truth 物体
+    在 COCO 中共现频率最高的 top-$k$ 物体，
+    用于检测模型对 \textit{共现物体} 的 hallucination 倾向。
+\end{itemize}
+
+\noindent
+POPE 的关键发现包括：
+（1）LVLMs 对 ``Yes'' 回答存在强烈偏好（Yes-ratio 远高于 50\%），
+这是导致 hallucination 的一个重要系统性偏差；
+（2）Popular 和 Adversarial 采样下的 hallucination rate 显著高于 Random 采样，
+证明模型确实倾向于幻觉训练集中频繁出现和共现的物体；
+（3）相比 CHAIR，POPE 对 prompt 变化的稳定性显著更高
+（标准差 0.78 vs. CHAIR 的 3.22），更适合作为 robust benchmark。
+
+\paragraph{MMBench: 全面评估基准.}
+MMBench \cite{liu2023mmbench} 将 VLM 评估从 hallucination 单一维度扩展到
+\textbf{20+ 个细粒度能力维度}（包括 object localization、spatial relationship、
+OCR、commonsense reasoning 等），
+采用 circular evaluation protocol（同一问题变换选项顺序多次评估）
+来消除 VLM 对选项位置的偏好（position bias），
+为多维度的 VLM 能力诊断提供了更可靠的评估框架。
+
+\paragraph{HallusionBench.}
+HallusionBench \cite{guan2023hallusionbench} 进一步扩展了 hallucination 评估的范围，
+不仅考虑 object hallucination，还涵盖了 attribute、relation、
+以及基于视觉错觉（visual illusion）的 hallucination 场景，
+提供了更全面的评估视角。
+
+\paragraph{Hallucination 的缓解方法.}
+围绕 hallucination reduction，发展出了三条互补的技术路线：
+训练阶段方法（修正数据或模型）、inference 阶段方法（修正解码过程或输出）、
+以及偏好优化方法（如分支 A 中的 LLaVA-RLHF、HA-DPO 等，
+通过构建 faithful/hallucinated response pairs 进行 DPO 训练）。
+
+\paragraph{VCD: Visual Contrastive Decoding.}
+VCD \cite{leng2023vcd}（CVPR 2024 Highlight）是一种 \textbf{training-free} 的 inference 阶段方法，
+其核心思想是：对输入图像施加 Gaussian noise 扰动（通过 diffusion forward process），
+得到退化后的视觉输入 $v'$。
+由于 $v'$ 中视觉信息被严重破坏，
+模型在 $v'$ 条件下的输出主要反映\textit{语言先验和统计偏差}
+（即``即使看不清图也会说的话''），
+而非真正基于视觉内容的推理。
+VCD 的解码公式为：
+\begin{equation}
+  p_{\text{vcd}}(y_t \mid v, v', x, y_{<t}) = \text{softmax}\left[
+    (1+\alpha) \cdot \text{logit}_\theta(y_t \mid v, x, y_{<t})
+    - \alpha \cdot \text{logit}_\theta(y_t \mid v', x, y_{<t})
+  \right]
+\end{equation}
+其中 $v$ 为原始图像，$v'$ 为噪声扰动后的图像，$\alpha$ 控制对比强度。
+通过减去``纯语言先验''logits，VCD 放大了真正依赖视觉信号的 token 概率，
+抑制了因语言偏差导致的 hallucination。
+为避免对低概率 token 的无差别惩罚，VCD 引入了 \textbf{adaptive plausibility constraint}：
+仅保留概率超过 $\beta \cdot \max_w p_\theta(w)$（默认 $\beta=0.2$）的 token 参与对比解码。
+VCD 作为 plug-and-play 模块适用于任意 VLM（在 LLaVA-1.5、InstructBLIP、Qwen-VL 上均有效），
+在 POPE benchmark 上将 InstructBLIP 的准确率提升约 3--4\%，
+F1 score 在多个模型上提升最高达 7.4 分。
+需要注意的是，后续分析表明 VCD 在 POPE（判别式评估）上的部分增益
+来源于 Yes/No 分布的偏移而非真正消除 hallucination，
+在 CHAIR（生成式评估）上的效果不一致，
+揭示了 hallucination 评估中判别式与生成式指标间的张力。
+
+\paragraph{LURE: Hallucination Revisor.}
+LURE \cite{zhou2023lure}（ICLR 2024）从统计分析入手，
+首先识别出导致 hallucination 的三个关键因素：
+（1）\textbf{共现偏差}（Co-occurrence）--- 模型倾向于幻觉出与真实物体在训练集中频繁共现的物体，
+共现度量 $\text{CoScore}$ 在 hallucinated captions 中显著高于 faithful captions；
+（2）\textbf{不确定性}（Uncertainty）--- hallucinated 物体集中在模型解码概率的高不确定性区域，
+度量 $\text{UnScore} = -\log p(o_{s,i} \mid s_{<i}, x)$；
+（3）\textbf{位置偏差}（Position）--- hallucinated 物体多出现在生成序列的后部，
+由 autoregressive generation 的 error accumulation 导致。
+基于这三个分析，LURE 设计了一个后处理的 \textbf{hallucination revisor}：
+以 MiniGPT-4（Vicuna-13B backbone）为基础模型，
+输入为 VLM 生成的描述（其中高不确定性和后部位置的物体被替换为 \texttt{[IDK]} 占位符），
+输出为修正后的忠实描述。
+训练数据通过 GPT-3.5 构建：
+从 5,000 个 image-text pairs 出发，
+对正确 caption 进行共现增强（插入高共现物体）和不确定性/位置掩蔽，
+形成 (hallucinated description $\rightarrow$ ground-truth caption) 的训练对。
+在 CHAIR benchmark 上，LURE 将 mPLUG-Owl 的 CHAIR$_S$ 从 71.2\% 降至 18.8\%
+（相对减少 73.6\%），LLaVA 的 CHAIR$_S$ 从 54.0\% 降至 27.1\%。
+
+\paragraph{Woodpecker: 多阶段事实验证.}
+Woodpecker \cite{yin2023woodpecker} 采用完全不同的策略 ---
+构建一个 \textbf{training-free 的五阶段事实验证 pipeline}，
+利用外部工具对 VLM 输出进行 claim-level 的验证和修正：
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Key Concept Extraction}（GPT-3.5）：从 VLM 输出中提取需要验证的关键物体和实体。
+  \item \textbf{Question Formulation}（GPT-3.5）：围绕提取的物体生成验证性问题，
+    包括存在性问题（``Is there [X]?''）和属性问题（``What color is [X]?''）。
+  \item \textbf{Visual Knowledge Validation}：使用 \textbf{Grounding DINO}（开集物体检测器）
+    验证物体存在性和数量，使用 \textbf{BLIP-2-FlanT5-XXL}（VQA 模型）回答属性相关问题。
+  \item \textbf{Visual Claim Generation}：将 QA 结果转化为结构化的声明式知识条目
+    （如``图中有 2 只狗''``汽车是红色的''）。
+  \item \textbf{Hallucination Correction}（GPT-3.5）：对比 VLM 原始输出与验证后的视觉声明，
+    修正不一致的部分，并附加 bounding box 作为可解释性证据。
+\end{enumerate}
+Woodpecker 的核心优势在于 \textbf{model-agnostic} 且\textbf{可解释} ---
+每个验证步骤都生成可检视的中间输出。
+在 POPE benchmark 上，Woodpecker 将 MiniGPT-4 的准确率从 54.67\% 提升至 85.33\%（+30.66\%），
+mPLUG-Owl 从 62.00\% 提升至 86.33\%（+24.33\%）。
+在 MME 的 hallucination 子集上，mPLUG-Owl 的 Existence 分数从 101.67 提升至满分 200.00。
+这些巨大增益主要体现在 hallucination 严重的弱模型上 ---
+对于本身 hallucination 率较低的模型（如 LLaVA），提升幅度有限（+1.67\%），
+暗示 Woodpecker 更适合作为弱模型的``安全网''而非强模型的增强手段。
+
+\paragraph{其他训练阶段方法.}
+HACL \cite{jiang2023hacl} 通过 hallucination-augmented contrastive learning，
+在 visual feature space 中拉远 hallucinated description 与 faithful description 的表征距离。
+HalluciDoctor \cite{yu2023hallucidoctor} 则从数据质量角度出发，
+通过 cross-checking 消除训练数据本身包含的 hallucination。
+
+% --- Branch C: Grounding ---
+\subsubsection{分支 C：Grounding and Fine-Grained Understanding}
+\label{sec:t5-branch-c}
+
+\begin{problembox}
+标准 VLM 只能进行图像级别的理解（``图中有一只猫''），
+而无法进行区域级别的定位（``猫在图像左上角 [x1, y1, x2, y2]''）。
+如何让 VLM 同时具备 grounding（文本$\rightarrow$位置）
+和 referring（位置$\rightarrow$文本）的能力？
+\end{problembox}
+
+\paragraph{Kosmos-2: 位置 Token 的开创.}
+\landmark{peng2023kosmos2}
+Kosmos-2 \cite{peng2023kosmos2} 的核心创新是将空间定位能力融入语言模型的 token vocabulary 中。
+具体而言，它将图像空间离散化为 $32 \times 32$ 的网格，
+引入 1,024 个 location tokens（\texttt{<loc\_0>} 到 \texttt{<loc\_1023>}）
+以及特殊的 markup tokens（\texttt{<box>}、\texttt{</box>}、\texttt{<p>}、\texttt{</p>}）。
+bounding box 使用 hyperlink 格式表示：
+\texttt{<p> text span </p><box><loc\_x1><loc\_y1><loc\_x2><loc\_y2></box>}。
+
+这一设计的精妙之处在于：
+grounding 和 referring 都被统一为标准的 next-token prediction 任务，
+无需引入任何额外的 detection head 或 regression loss。
+模型在生成文本的同时就能自然地输出 bounding box 坐标。
+
+\paragraph{GRIT 数据集.}
+为了训练 grounding 能力，Kosmos-2 构建了 GRIT (Grounded Image-Text) 数据集：
+从 LAION-2B 和 COYO-700M 中使用 spaCy + GLIP 的自动标注 pipeline
+抽取了 91M 张图像、115M 个 text spans 和 137M 个 bounding boxes。
+这一大规模 grounded data 的构建是 Kosmos-2 成功的关键支撑。
+
+\paragraph{Shikra: 纯文本坐标的 Referential Dialogue.}
+Shikra \cite{chen2023shikra}（EMNLP 2024）的核心洞见是：
+\textbf{空间定位不需要任何架构修改} ---
+仅将坐标编码为归一化的十进制数字
+（bounding box 格式 \texttt{[$x_{\min}$, $y_{\min}$, $x_{\max}$, $y_{\max}$]}，
+point 格式 \texttt{[$x$, $y$]}，数值归一化到 $[0,1]$ 范围，精度 3 位小数），
+即可通过标准 next-token prediction 让 LLM 学会理解和生成空间坐标。
+这些坐标直接由 LLM 的标准 tokenizer 处理，无需扩展 vocabulary。
+Shikra 定义了 \textbf{Referential Dialogue（RD）} 格式 ---
+用户和模型都可以在自然语言中自由嵌入空间坐标引用：
+用户可以指着某个区域提问（``图中 \texttt{[0.268, 0.372]} 处的夹克是什么颜色？''），
+模型的回答中也可以包含坐标（``与之相同颜色的衣物位于 \texttt{[0.134, 0.221, 0.345, 0.556]}''）。
+架构上，Shikra 与 LLaVA 完全一致（CLIP ViT-L/14 + 线性投影 + Vicuna-13B），
+训练分两阶段：
+（1）多任务预训练，在 VQAv2、RefCOCO 系列、Visual Genome、Flickr30K Entities 等数据集上
+以统一的 QA 格式训练约 100K 步；
+（2）instruction tuning，混合 LLaVA-Instruct-150K 和 5,922 条 GPT-4 生成的 referential dialogue 数据。
+在 Referring Expression Comprehension 上，Shikra-13B 在 RefCOCO val 达到 87.83\%，
+RefCOCO testA 达到 91.11\%，
+证明纯文本数值坐标方案在性能上与使用专用 position encoder 的方法具有竞争力。
+
+\paragraph{Ferret: 任意形状区域的 Grounding.}
+Ferret \cite{you2023ferret}（Apple，ICLR 2024）解决了 Kosmos-2 和 Shikra 共同面临的局限：
+它们仅支持矩形 bounding box 作为区域输入，
+而用户在实际交互中可能需要指向任意形状的区域（如涂鸦、掩码、甚至单个点）。
+Ferret 的核心创新是 \textbf{Spatial-Aware Visual Sampler} ---
+一个受 3D 点云处理（PointNet++ 风格）启发的区域特征提取模块：
+给定图像特征图 $\mathbf{Z} \in \mathbb{R}^{H \times W \times C}$ 和任意形状的二值区域掩码 $M$，
+（1）在掩码内随机采样 $N=512$ 个正样本点；
+（2）通过两级 \textbf{Set Abstraction} 块逐步精简
+（$512 \rightarrow 128 \rightarrow 32$ 个点，
+每级使用 Farthest Point Sampling + $k=24$ 近邻特征聚合 + max pooling）；
+（3）最终输出 32 个富含上下文信息的区域特征向量，投影到 LLM 嵌入空间。
+这一设计自然适配不同形状的输入：
+单点创建小圆形掩码，bounding box 视为填充掩码，涂鸦和分割掩码直接使用。
+Ferret 同时采用 \textbf{hybrid region representation} ---
+离散坐标（量化为 1000 个 bin）与连续 sampler 特征的组合，
+在输入 LLM 时通过特殊 \texttt{<SPE>} token 嵌入。
+训练数据方面，Ferret 构建了 \textbf{GRIT}（Ground-and-Refer Instruction Tuning）数据集，
+共 1.1M 样本，包含 855K 公开数据集样本、34K GPT-4 生成的空间对话、
+以及 95K \textbf{spatial hard negatives}（通过图像条件和语义条件采样的混淆样本，
+如 man$\leftrightarrow$woman、blue$\leftrightarrow$yellow），
+显著降低了 hallucination。
+Ferret-13B 在 RefCOCO val 达到 89.48\%、RefCOCOg val 达到 85.83\%，
+在 Flickr30K Entities phrase grounding 上达到 84.76\%（超越 Shikra 的 78.44\%），
+在 POPE benchmark 上 Random 设置达 90.24\%。
+
+\paragraph{其他 Grounding 工作.}
+LLaVA-Grounding \cite{zhang2023llava-grounding} 将 grounding 和 instruction tuning 联合训练，
+Osprey \cite{yuan2023osprey} 则聚焦于 pixel-level 的理解能力。
+
+\evolution{Image-level 理解（整图问答）}
+  {Region-level 理解（grounding + referring）}
+  {Location tokens + Grounded data}
+
+% --- Branch D: Multi-Image and Video ---
+\subsubsection{分支 D：Multi-Image and Video Post-Training}
+\label{sec:t5-branch-d}
+
+\begin{problembox}
+早期 VLM post-training 工作（LLaVA、InstructBLIP）主要聚焦于单图理解。
+但现实场景中，用户经常需要模型理解多张图像的对比关系或视频的时序动态。
+如何将 visual instruction tuning 从单图扩展到多图和视频？
+\end{problembox}
+
+\paragraph{Flamingo 的架构遗产.}
+\landmark{alayrac2022flamingo}
+回顾 Flamingo 的架构设计，
+它天然支持 interleaved image-text sequences 的处理能力
+正是源于其在 M3W（图文交错网页）数据上的训练。
+这一能力为后续多图理解工作提供了架构上的参照。
+
+\paragraph{VideoChat: Video-Centric Instruction Tuning.}
+VideoChat \cite{li2023videochat} 提出了两条互补的 video-language 交互路线。
+\textbf{VideoChat-Text} 将视频``文本化'' ---
+并行运行 InternVideo（动作识别）、Tag2Text（物体标注）、GRIT（密集描述）
+和 Whisper（音频转录）等感知模型，
+将多模态信号转化为带时间戳的文本描述后送入 LLM。
+\textbf{VideoChat-Embed} 则是端到端可学习的架构：
+以 EVA-CLIP ViT-G/14 为视频编码器（增加 InternVideo 的 Global Multi-Head Relation Aggregator
+处理时序建模），通过 BLIP-2 的 Q-Former + 线性投影层将视频特征映射到 StableVicuna-13B 的嵌入空间。
+训练分两阶段：
+（1）视觉-语言对齐预训练（WebVid-10M + 15M image-text pairs）；
+（2）video-centric instruction tuning（18K 样本，含 7K 视频详细描述 + 4K 视频对话 + 7K 图像数据），
+其中视频指令数据通过将 VideoChat-Text 的输出送入 GPT-4 生成。
+VideoChat 在 MSVD-QA 上达到 56.3\%，
+但在长视频（$\geq$1 分钟）和深层时序推理上仍有明显局限。
+
+\paragraph{Video-LLaMA: Audio-Visual Language Model.}
+Video-LLaMA \cite{zhang2023videollama}（EMNLP 2023 Demo）构建了 \textbf{双分支} 架构
+同时处理视觉和音频信息。
+\textbf{Vision-Language 分支}：
+EVA-CLIP ViT-G/14 逐帧提取视觉特征后添加 learnable position embeddings 注入时序顺序，
+关键的 \textbf{Video Q-Former} 通过 cross-attention 让 learned queries \textit{同时 attend to 所有帧}
+的特征（而非逐帧处理），
+将可变长度的视频压缩为固定数量的 video query tokens。
+\textbf{Audio-Language 分支}：
+使用 ImageBind 作为 frozen audio encoder，
+将音频分割为 2 秒片段并转化为 128-bin mel spectrograms，
+通过 \textbf{Audio Q-Former}（结构与 Video Q-Former 对称）聚合跨片段的音频特征。
+一个精妙的工程细节是：Audio Q-Former 的预训练使用的是\textit{视觉-文本数据}（而非音频-文本数据），
+利用 ImageBind 的跨模态对齐特性绕过了音频-文本配对数据的稀缺问题。
+两个分支独立训练：先在 WebVid-2M + CC595K 上进行视觉-语言预训练，
+再混合 MiniGPT-4 和 LLaVA 的 instruction 数据进行 fine-tuning。
+
+\paragraph{Video-ChatGPT: Temporal-Spatial Pooling.}
+Video-ChatGPT \cite{maaz2023videochatgpt} 提出了一种简洁的视频表征方案：
+从视频中采样 $T$ 帧，每帧独立通过 CLIP ViT-L/14 编码，
+得到形状为 $T \times N \times D$ 的特征张量
+（$N = h \times w$ 为空间 token 数，$D$ 为隐藏维度）。
+接下来进行 \textbf{dual-pooling}：
+\textbf{temporal representation} --- 在空间维度上平均池化（collapse $N$），
+得到 $T \times D$，每个向量捕捉该时刻发生的事件；
+\textbf{spatial representation} --- 在时间维度上平均池化（collapse $T$），
+得到 $N \times D$，每个向量捕捉该空间位置跨整段视频的内容。
+两者拼接为 $(T+N) \times D$ 后通过一个可训练的线性层投影到 Vicuna 的嵌入空间。
+CLIP encoder 和 Vicuna LLM 均 \textbf{frozen}，仅训练该线性投影层。
+数据方面，Video-ChatGPT 构建了 \textbf{100K video instruction tuning 数据集}：
+以 ActivityNet-200 视频为基础，$\sim$30\% 由人工标注者扩写 caption，
+$\sim$70\% 通过三阶段 pipeline 自动生成
+（BLIP-2 帧级 caption $\rightarrow$ GRiT 密集描述 $\rightarrow$ Tag2Text 标注 $\rightarrow$ GPT-3.5 生成 QA），
+盲测中人类标注者仅能以 52\%（近似随机）的准确率区分人工与自动数据。
+在零样本 Video QA 上，Video-ChatGPT 在 MSVD-QA 达到 64.9\%/3.3 分、
+MSRVTT-QA 49.3\%/2.8 分、ActivityNet-QA 35.2\%/2.8 分。
+
+\paragraph{LLaVA 家族的统一扩展.}
+LLaVA-NeXT-Interleave \cite{li2024llava-next-interleave}
+将 LLaVA 架构扩展到支持 interleaved image-text 输入，
+使模型能够处理多图对比、图文交错等复杂场景。
+
+\paragraph{LLaVA-OneVision: 三阶段统一训练.}
+LLaVA-OneVision \cite{li2024llava-onevision} 是首个在单图、多图和视频三类任务上
+同时达到 SOTA 的开源模型。
+架构采用 SigLIP 视觉编码器（$384 \times 384$ 基础分辨率，产生 729 个 visual tokens）、
+2 层 MLP projector 和 Qwen-2 LLM（0.5B/7B/72B 参数规模）。
+关键的 \textbf{AnyRes} 高分辨率策略将图像分割为 $a \times b$ 网格的 sub-image tiles
+（单图最多 $6 \times 6$），每个 tile 独立由 SigLIP 编码，
+再与下采样的全局 overview 拼接送入 LLM。
+训练分\textbf{三个阶段}：
+（1）\textbf{Language-Image Alignment}：558K image-text 样本，基础分辨率，
+仅训练 MLP projector；
+（2）\textbf{High-Quality Knowledge Learning}：4M 样本（含 re-captioned 描述、OCR 数据、多语言内容），
+AnyRes 启用，全参数训练开始；
+（3）\textbf{OneVision Visual Instruction Tuning}：分两个 phase ---
+Phase 1 为 3.2M 单图 SFT，Phase 2 为 1.6M 混合训练
+（单图 + 0.56M 多图 + 0.35M 视频），
+其中视频理解能力通过\textit{联合训练自然涌现}（image-to-video transfer），
+无需专门的视频预训练。
+LLaVA-OneVision-72B 在 DocVQA 上达到 91.3\%（vs.\ GPT-4V 的 88.4\%），
+多图任务 Mantis 上达到 77.6\%（vs.\ GPT-4V 的 62.7\%），
+视频任务 VideoMME 上达到 66.2\%（vs.\ GPT-4V 的 59.9\%）。
+
+\paragraph{LLaVA-Video: 合成视频指令数据.}
+LLaVA-Video \cite{zhang2024llava-video} 专注于视频场景，
+其核心贡献是 \textbf{LLaVA-Video-178K} 数据集的构建 pipeline。
+首先通过 \textbf{Dynamic Untrimmed Video Selection} 从 10 个来源
+（HD-VILA-100M、InternVid-10M、YouCook2、Ego4D 等）中筛选视频 ---
+使用 PySceneDetect 识别场景变化，
+保留 2+ 场景、5--180 秒时长、分辨率 $>$480p 的视频。
+然后采用 \textbf{GPT-4o 三级层次化 caption 生成}：
+Level-1 描述 10 秒片段（带前文上下文），
+Level-2 汇总 30 秒摘要，Level-3 生成完整视频 caption ---
+关键是以 \textbf{1 FPS} 的高采样率输入帧
+（对比 LLaVA-Hound 的 0.008 FPS 和 ShareGPT4Video 的 0.15 FPS）。
+最终数据集包含 178K 视频和 1.3M 指令样本（178K captions + 960K 开放式 QA + 196K 选择题），
+覆盖 16 种问题类型。
+架构上引入 \textbf{SlowFast} 双路径视频编码 ---
+Slow pathway 以 $p \times p$ spatial pooling 保留更多空间细节但处理更少帧，
+Fast pathway 以 $2p \times 2p$ pooling 牺牲空间细节但处理 3$\times$ 更多帧，
+两者互补实现了更好的时空覆盖。
+LLaVA-Video-72B 在 VideoMME 上达到 70.5\%/76.9\%（不带/带字幕），
+匹配或超越 Gemini-1.5-Flash 的性能。
+
+\paragraph{Video DPO.}
+LLaVA-Hound-DPO \cite{zhang2024llava-hound} 首次将 DPO 应用于视频 VLM，
+通过构建 video-grounded 的 preferred/dispreferred response pairs
+进行偏好优化，直接在视频 QA 任务上减少 hallucination。
+
+\evolution{单图 Visual Instruction Tuning}
+  {单图 + 多图 + 视频统一训练}
+  {LLaVA-OneVision pipeline}
+
+% ============================================================
+% 5.4 Convergence
+% ============================================================
+\subsection{收敛与前沿}
+\label{sec:t5-convergence}
+
+经过分支演化阶段的探索，multimodal post-training 领域在若干维度上呈现出清晰的收敛趋势。
+
+\paragraph{收敛趋势 1：SFT + DPO 作为标准 Pipeline.}
+类似于 Thread~2 中 text-only alignment 从 RLHF 收敛到 DPO
+\crossref{2}{sec:pref}，
+multimodal post-training 也从复杂的 PPO-based RLHF（如 LLaVA-RLHF）
+逐步收敛到更简洁的 SFT + DPO pipeline。
+LLaVA-OneVision \cite{li2024llava-onevision} 的三阶段训练
+（Stage 1: alignment pre-training; Stage 2: multi-task SFT; Stage 3: DPO）
+代表了这一收敛的最新形态。
+DPO 在多模态场景下的成功得益于其 implementation simplicity
+和对 hallucination reduction 的直接有效性。
+
+\paragraph{收敛趋势 2：视觉编码器的多样性与融合.}
+Cambrian-1 \cite{tong2024cambrian} 系统性地研究了 visual representation 对 VLM 性能的影响。
+其核心发现是：
+没有单一的 visual encoder 能在所有任务上最优 ---
+CLIP 擅长 semantic understanding，DINOv2 擅长 spatial/geometric features，
+SigLIP 在某些场景下优于 CLIP。
+Cambrian-1 因此提出了 \textbf{Spatial Vision Aggregator (SVA)}，
+将多个异构 visual encoders 的特征通过 learnable spatial tokens 进行聚合，
+实现了 multi-encoder fusion。
+这一工作揭示了一个重要洞见：
+\textit{VLM 的能力瓶颈可能不在 LLM 或 post-training 方法，
+而在 visual representation 本身}。
+
+\paragraph{收敛趋势 3：单图-多图-视频的统一.}
+早期工作倾向于为不同模态构建独立的模型和训练 pipeline
+（LLaVA 处理单图、VideoChat 处理视频），
+但最新趋势是在统一架构和训练框架内同时覆盖所有模态。
+LLaVA-OneVision \cite{li2024llava-onevision} 和
+Qwen-VL \cite{bai2023qwen-vl} 都展示了这种统一方法的可行性。
+
+\paragraph{当前前沿.}
+综合上述收敛趋势，当前 multimodal post-training 的前沿状态可以概括为：
+\textit{Multi-encoder visual backbone $+$ high-resolution processing $+$
+multi-task SFT on diverse data $+$ DPO for hallucination reduction $+$
+unified single/multi-image/video support}。
+这一范式在 Cambrian-1、LLaVA-OneVision 等工作中得到了集中体现。
+
+\subsubsection{2025: Multimodal Reasoning via RL}
+\label{sec:t5-reasoning-rl}
+
+2025 年，Thread~4 中 RLVR 范式的成功（\crossref{4}{sec:t4-thinking-models}）
+迅速溢出到 multimodal 领域，
+催生了一系列将 RL-based reasoning 方法应用于 VLM 的工作。
+这标志着 multimodal post-training 从``SFT + DPO''范式
+向``SFT + RL for reasoning''范式的转变。
+
+\paragraph{R1-VL: 将 GRPO 引入 VLM。}
+Zhang et al.\ \cite{zhang2025r1vl} 提出 \textbf{R1-VL}，
+将 DeepSeek-R1 中的 step-wise GRPO 方法扩展到 multimodal reasoning 任务。
+R1-VL 在视觉数学推理和图表理解等任务上，
+通过 rule-based reward（答案正确性）进行 RL 训练，
+使 VLM 学会在推理过程中生成长链视觉-语言推理链。
+该工作被 ICCV 2025 接收，验证了 RLVR 范式在多模态场景下的有效性。
+
+\paragraph{MM-Eureka 与 VLM-R1。}
+Meng et al.\ \cite{meng2025mmeureka} 的 \textbf{MM-Eureka}
+和 Shen et al.\ \cite{shen2025vlmr1} 的 \textbf{VLM-R1}
+分别从不同角度探索了 rule-based RL 在 VLM 中的应用。
+MM-Eureka 侧重于数学和科学图像推理，
+使用 rule-based reward 进行大规模 RL 训练；
+VLM-R1 则致力于构建稳定和可泛化的 R1 风格 VLM，
+解决了 RL 训练中 VLM 特有的 reward sparsity 和 training instability 问题。
+
+\paragraph{MM-RLHF: 多模态对齐的新范式。}
+Zhang et al.\ \cite{zhang2025mmrlhf} 提出 \textbf{MM-RLHF}，
+系统性地将 RLHF 方法扩展到 multimodal 场景。
+该工作在 ICML 2025 上发表，
+构建了大规模的 multimodal preference 数据集，
+并设计了针对 VLM 特有问题（如 hallucination、visual grounding 错误）
+的多维度 reward model。
+
+\paragraph{精细化 Reward 信号。}
+Fu et al.\ \cite{fu2025tldr} 的 \textbf{TLDR} 将 reward 信号
+从 sequence-level 细化到 token-level，
+为 VLM 的对齐训练提供了更精确的反馈信号。
+Yasunaga et al.\ \cite{yasunaga2025mmrewardbench} 构建了
+\textbf{Multimodal RewardBench}，
+为 VLM reward model 的系统化评估提供了标准基准。
+
+\paragraph{URSA: Process-Supervised RL for Multimodal Math.}
+Luo et al.\ \cite{luo2025ursa} 提出 \textbf{URSA}，
+将 process reward model（PRM）引入多模态 RL 训练，
+构建了三阶段 pipeline：
+（1）构建 MMathCoT-1M，大规模多模态 chain-of-thought 数据集；
+（2）构建 DualMath-1.1M 进行 process-level supervision，
+同时覆盖逻辑正确性和感知一致性两个维度；
+（3）提出 \textbf{PS-GRPO}（Process-Supervised Group Relative Policy Optimization），
+在 GRPO 的基础上用 PRM 指导 online RL 训练。
+URSA-8B 在 6 个数学 benchmark 上平均超越 Gemma3-12B 和 GPT-4o
+（分别高出 8.4\% 和 2.7\%）。
+PS-GRPO 是首个将 PRM-guided online RL 应用于多模态推理的方法，
+直接将 Thread~4 中 process reward 的思想
+\crossref{4}{sec:t4-thinking-models}
+扩展到视觉-语言联合推理场景。
+该工作被 NeurIPS 2025 接收。
+
+\paragraph{VisualPRM: 多模态过程 Reward Model.}
+InternVL 团队提出 \textbf{VisualPRM} \cite{wang2025visualprm}，
+一个 8B 参数的多模态 Process Reward Model，
+能够对 vision-language chain-of-thought 中的\textit{每一步}进行打分，
+而非仅评估最终答案。
+VisualPRM 通过自动化 pipeline 构建了 VisualPRM400K 训练数据，
+并发布了 VisualProcessBench --- 包含人工标注的 step-wise correctness labels 的评估基准。
+在 Best-of-N sampling 设置下，
+VisualPRM 将 InternVL2.5-78B 在 7 个 benchmark 上平均提升了 5.9 分，
+将 8B 模型提升了 8.4 分。
+这一工作提供了可部署的开源多模态 PRM，
+为 test-time scaling（通过搜索推理路径让弱模型达到强模型水平）
+提供了多模态场景下的基础设施。
+
+\paragraph{MVoT: 用图像思考.}
+\textbf{MVoT}（Multimodal Visualization-of-Thought）\cite{li2025mvot}
+提出了一种质性上不同于 text-only CoT 的推理范式：
+模型在推理过程中\textit{生成中间步骤的图像可视化}，
+而非仅用文本描述视觉概念。
+具体而言，MVoT 在 chain-of-thought 中交错生成图像 token 和文本 token，
+让模型``在图像中思考''而非``关于图像思考''。
+该工作引入了 token discrepancy loss 以提升中间可视化的质量。
+在动态空间推理任务上，MVoT 在最困难的场景中超越了 text-only CoT，
+证明了某些推理任务确实需要视觉化的中间表征而非语言代理。
+该工作被 ICML 2025 接收。
+
+\paragraph{范式转变总结。}
+o3 和 o4-mini \cite{openai2025o3} 的发布进一步强化了这一趋势 ---
+这些模型具备\textbf{原生多模态推理能力}，
+可以在推理过程中同时处理图像、代码和文本。
+从 URSA 的 PS-GRPO 到 VisualPRM 的 test-time scaling，
+再到 MVoT 的 ``thinking in images''，
+2025 年的多模态推理研究沿三个方向推进：
+\textit{训练信号的精细化}（process-level reward）、
+\textit{推理时间的扩展}（PRM-guided search）、
+\textit{推理模态的扩展}（从纯文本 CoT 到视觉化 CoT）。
+Multimodal post-training 的前沿正从
+\textit{SFT + DPO for hallucination reduction}
+演变为 \textit{SFT + RL for reasoning-capable VLMs}。
+
+\subsubsection{2025: VLM 架构工程与开源规模化}
+\label{sec:t5-scaling}
+
+2024--2025 年，开源 VLM 经历了一轮爆发式增长。
+InternVL、Qwen-VL、DeepSeek-VL 等系列模型在多个 benchmark 上逼近甚至超越
+GPT-4o 和 Claude 3.5 等商业模型。
+这些工作的核心贡献不仅在于性能数字，
+更在于它们系统性地回答了 VLM post-training 中的关键工程问题：
+\textit{如何编码高分辨率视觉输入？如何高效缩放视觉编码器？
+如何设计 post-training 数据配方？}
+
+\paragraph{Dynamic Resolution: 从固定分辨率到原生分辨率。}
+早期 VLM（LLaVA、InstructBLIP）将所有图像统一 resize 到固定分辨率
+（如 224$\times$224 或 336$\times$336），导致细节丢失。
+2024--2025 年的共识是 \textbf{dynamic resolution} --- 保持图像原始分辨率并自适应编码：
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{LLaVA-OneVision} \cite{li2024llava-onevision}
+    提出 \textbf{AnyRes}：将高分辨率图像分割为多个 sub-image tiles，
+    每个 tile 独立由 ViT 编码后通过 spatial pooling 压缩 token 数量，
+    再与低分辨率全局 overview 拼接送入 LLM。
+    AnyRes 成为后续 VLM 中最广泛采用的 dynamic resolution 策略。
+  \item \textbf{Qwen2-VL} \cite{wang2024qwen2vl}
+    采用 \textbf{Naive Dynamic Resolution} --- ViT 直接处理原始分辨率图像，
+    生成可变长度的 visual token 序列。
+    更重要的是，Qwen2-VL 引入了 \textbf{M-RoPE}（Multimodal Rotary Position Embedding），
+    为 text tokens、image 行/列、video 时间戳分别编码独立的位置维度，
+    提供了统一的 temporal-spatial position encoding。
+  \item \textbf{Qwen2.5-VL} \cite{bai2025qwen25vl}
+    在 ViT 内部引入 \textbf{Window Attention} ---
+    仅 4 层使用 full attention，其余层将感受野限制在 8$\times$8 窗口内，
+    在保持原生分辨率的同时大幅降低 ViT 的计算开销。
+    此外，Qwen2.5-VL 将精确物体定位（bounding box 和 point）、
+    文档解析和长视频理解（秒级事件定位）作为 first-class post-training 目标。
+\end{itemize}
+
+\paragraph{Vision Encoder Scaling.}
+Cambrian-1 \cite{tong2024cambrian} 已经揭示了 visual representation 的关键性
+（见 \S\ref{sec:t5-convergence}）。
+\textbf{InternVL2.5} \cite{chen2024internvl25} 进一步量化了这一洞见：
+其 6B 参数的 InternViT 显著降低了对训练数据量的依赖 ---
+InternVL2.5-78B 仅用 Qwen2-VL-72B 十分之一的训练 token
+即达到更优的 benchmark 结果。
+这一发现揭示了一个被低估的经验规律：
+\textit{对 vision encoder 的投资可以替代对数据的投资}。
+InternVL2.5 是首个在 MMMU 上突破 70\% 的开源模型，
+并验证了 test-time scaling（Chain-of-Thought 推理带来 +4 分提升）
+作为实用推理策略的可行性。
+
+\textbf{InternVL3} \cite{zhu2025internvl3} 迈出了更激进的一步：
+提出 \textbf{Native Multimodal Pre-Training} ---
+在 pre-training 阶段就将多模态数据与大规模文本语料交错训练，
+将传统的``先训练 LLM，再适配视觉''的两阶段范式
+合并为单阶段联合训练。
+此外，InternVL3 引入 \textbf{V2PE}（Variable Visual Position Encoding），
+为 visual tokens 提供更灵活、粒度更细的位置编码。
+Native multimodal pre-training 直接挑战了传统 post-training 中
+``多模态能力来自适配阶段''的基本假设。
+
+\paragraph{高效架构: MoE 与数据 Pipeline.}
+\textbf{DeepSeek-VL2} \cite{wu2024deepseekvl2}
+将 DeepSeek 的 MoE 架构引入 VLM：
+采用 dynamic tiling（图像分割为 1024$\times$1024 的 tiles）结合
+DeepSeekMoE 的 Multi-head Latent Attention（MLA）将 KV-cache 压缩到 latent vectors。
+DeepSeek-VL2 在 OCRBench 上达到 834 分（GPT-4o 为 736），
+以更少的 activated parameters 实现了更优的性能，
+展示了 MoE + dynamic tiling 作为高效 VLM 缩放方案的可行性。
+
+\textbf{Molmo} \cite{deitke2024molmo}（CVPR 2025）从数据角度提供了独特视角：
+其 PixMo 数据集完全由人工标注者构建 ---
+不使用任何外部 VLM 生成合成数据。
+标注方式包括让标注者口述详细图像描述（而非文字标注），
+以及构建 2D pointing 数据集实现精确空间定位。
+Molmo-72B 的性能仅次于 GPT-4o，超越了 Claude 3.5 Sonnet 和 Gemini 1.5 Pro。
+这一结果证明了数据 pipeline 的选择 ---
+特别是\textit{消除合成 VLM 数据的循环依赖} ---
+对 post-training 质量具有一阶影响。
+
+\begin{solutionbox}
+\textbf{开源 VLM 波浪的 Post-Training 启示：}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{分辨率策略}：Dynamic tiling + spatial pooling 已成为 de facto 标准，
+    具体实现在 AnyRes（LLaVA-OneVision）、Naive Dynamic Resolution（Qwen2-VL）、
+    Window Attention（Qwen2.5-VL）之间收敛。
+  \item \textbf{Vision Encoder 投资}：大尺寸 ViT（6B，InternVL）和
+    从零训练的 ViT（Pixtral \cite{agrawal2024pixtral}）都显著优于
+    直接复用 CLIP/SigLIP 的方案，
+    暗示 vision encoder 而非 LLM 是 VLM 性能的真正瓶颈。
+  \item \textbf{数据质量 > 数据规模}：
+    Molmo 用纯人工数据击败了使用海量合成数据的竞争模型，
+    InternVL2.5 用十分之一的训练 token 超越了 Qwen2-VL。
+\end{itemize}
+\end{solutionbox}
+
+\subsubsection{2025: Unified Multimodal Generation}
+\label{sec:t5-unified-generation}
+
+上述所有 VLM 工作 --- 从 LLaVA 到 InternVL3 ---
+共享一个根本假设：\textbf{模型只做理解，不做生成}。
+它们接收图像并输出文本，但无法生成图像或视频。
+2024--2025 年，一个新的范式转变正在发生：
+\textbf{将视觉理解和视觉生成统一到同一个模型和同一个训练框架中}。
+这不仅是架构上的挑战，更对 post-training 提出了全新要求 ---
+如何在同一个 alignment pipeline 中同时优化理解质量和生成质量？
+
+\paragraph{架构光谱: 从早期融合到解耦编码。}
+统一多模态生成的架构设计形成了一个清晰的光谱：
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Early Fusion --- Chameleon} \cite{team2024chameleon}：
+    Meta 提出的 7B/34B 模型，
+    从 pre-training 起就将图像和文本视为同一离散 token vocabulary，
+    在 4.4T mixed-modal tokens 上训练。
+    Chameleon 是首个大规模 early-fusion token-based foundation model，
+    消除了在 frozen LLM 上加 vision adapter 的``晚期融合''模式。
+    训练中遇到的稳定性挑战（通过 QK-Norm、z-loss 解决）
+    为后续统一模型的训练提供了重要经验。
+
+  \item \textbf{Pure Autoregressive --- Emu3} \cite{wang2024emu3}：
+    将图像、文本、视频全部 tokenize 到统一的离散空间中，
+    仅用 next-token prediction 训练一个 transformer。
+    没有 diffusion，没有独立 encoder，没有复合损失函数。
+    Emu3 同时超越了 SDXL（text-to-image）、LLaVA-1.6（理解）
+    和 OpenSora-1.2（视频生成）。
+    该工作发表于 Nature \cite{wang2024emu3}，
+    代表了统一架构光谱中最极端的立场 ---
+    如果 autoregressive prediction 就足够，
+    那么 post-training 可以直接复用 text LLM 的全套 SFT/RLHF 机制。
+
+  \item \textbf{Hybrid AR + Diffusion --- Show-o / Transfusion}：
+    Show-o \cite{xie2024showo}（ICLR 2025）在同一个 transformer 内
+    对文本使用 autoregressive modeling，对图像使用 discrete diffusion，
+    在同一个前向传播中处理 VQA、text-to-image、inpainting 等混合任务。
+    Transfusion \cite{zhou2024transfusion}（Meta）更进一步，
+    对文本施加 next-token prediction loss，
+    对\textit{连续} image patches 施加 diffusion loss，
+    无需将图像离散化为 tokens。
+    这两项工作代表了务实的中间路线 ---
+    承认不同模态可能需要不同的训练目标，但仍在统一架构中实现。
+
+  \item \textbf{Decoupled Encoding --- Janus / Janus-Pro} \cite{chen2024janus,chen2025januspro}：
+    DeepSeek 提出的 Janus（CVPR 2025）识别出一个根本性张力：
+    理解所需的 visual representation（丰富的语义特征，如 CLIP 风格）
+    与生成所需的 visual representation（细粒度空间特征，用于解码）
+    是\textit{结构性不同}的。
+    Janus 的解法是使用\textbf{两条独立的 visual encoding 路径} ---
+    一条用于理解，一条用于生成 ---
+    但共享同一个 LLM backbone 和 autoregressive 框架。
+    Janus-Pro 将这一设计缩放到 1B 和 7B 参数，
+    在理解和生成两个方向上均超越了此前的统一模型。
+\end{itemize}
+
+\paragraph{Post-Training 的新挑战。}
+统一生成模型为 post-training 带来了根本性的新问题：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{多目标 Alignment}：
+    如何在同一个 RLHF/DPO pipeline 中同时优化
+    理解的准确性（faithfulness、reduced hallucination）
+    和生成的质量（aesthetic quality、factual consistency、user intent matching）？
+    两个目标可能存在冲突 --- 对理解有益的训练信号未必对生成有益。
+  \item \textbf{Tokenization 决定 Post-Training 可行性}：
+    Emu3 的纯 autoregressive 路线意味着 text LLM 的全套 post-training 技术
+    可以直接迁移；
+    而 Transfusion 的 hybrid loss 设计则需要为不同模态
+    设计不同的 reward signal 和 preference learning 策略。
+  \item \textbf{数据需求的指数增长}：
+    理解和生成各自需要高质量数据，
+    而两者的联合训练可能需要更多的 interleaved 数据
+    来防止能力间的 catastrophic forgetting。
+\end{itemize}
+
+\evolution{Understanding-only VLMs（接收图像，输出文本）}
+  {Unified Understanding + Generation（同一模型理解并生成图像/视频）}
+  {Decoupled / AR / Hybrid 架构路径}
+
+\subsubsection{2025: Omni-Modal Post-Training}
+\label{sec:t5-omni}
+
+统一生成将视觉理解与视觉生成合并到同一模型中，
+而 \textbf{omni-modal} 模型则将这一统一扩展到\textit{所有模态} ---
+text、vision、audio 乃至 speech 的端到端联合处理。
+这一方向的核心 post-training 挑战在于：
+不同模态具有截然不同的\textit{时间尺度}（音频以毫秒为单位，视频以帧为单位，文本以 token 为单位）
+和\textit{交互模式}（语音需要实时双工，文本可以异步），
+如何在单一 alignment pipeline 中协调这些差异？
+
+\paragraph{GPT-4o: Omni 范式的商业化验证。}
+OpenAI 的 GPT-4o \cite{openai2024gpt4o} 是首个端到端训练的 omni model，
+接受 text、audio、image、video 的任意组合作为输入，
+并生成 text、audio 和（自 2025 年 3 月起）image 输出。
+音频响应延迟约 320ms，接近人类对话速度。
+GPT-4o 消除了传统的级联 pipeline（ASR $\rightarrow$ LLM $\rightarrow$ TTS），
+证明了端到端 omni 训练在工业规模上的可行性，
+并立即引发了开源社区的竞赛。
+
+\paragraph{Qwen2.5-Omni: Thinker-Talker 架构。}
+Qwen 团队提出 \textbf{Qwen2.5-Omni} \cite{xu2025qwen25omni}，
+引入了 \textbf{Thinker-Talker} 双模块架构：
+Thinker（LLM）负责多模态推理，Talker 负责流式语音生成。
+关键技术创新是 \textbf{TMRoPE}（Time-aligned Multimodal Rotary Position Embedding），
+将时间敏感的 audio 和 video 输入在位置编码层面进行同步，
+解决了多流时序数据的对齐问题。
+一个 Talker 模块的 sliding-window DiT decoder 处理 streaming audio token 生成。
+在 speech instruction following benchmarks（MMLU、GSM8K）上，
+Qwen2.5-Omni 的语音输入性能\textit{首次匹配}了文本输入性能 ---
+这是 omni model 的一个重要里程碑。
+
+\paragraph{VITA: 开源 Omni 与双工交互。}
+\textbf{VITA} \cite{fu2024vita} 是首个开源的 omni multimodal LLM，
+支持 video、image、text、audio 的同时处理，
+并具备 \textbf{duplex interaction} 能力 --- 模型生成回答的过程中可以被用户打断。
+后续的 VITA-1.5（NeurIPS 2025）将端到端语音交互延迟
+从约 4 秒降低到约 1.5 秒，多模态 benchmark 平均分从 59.8 提升到 70.8。
+Duplex interaction 带来了标准 instruction-following pipeline
+未曾处理的 post-training 挑战：
+如何在持续接收输入的同时生成输出？
+如何训练模型适时中断自己的回答？
+
+\paragraph{Phi-4-Multimodal: Mixture-of-LoRAs。}
+Microsoft 的 \textbf{Phi-4-Multimodal} \cite{abouelenin2025phi4mini}（5.6B 参数）
+提出了一种 parameter-efficient 的 omni 适配方案：
+\textbf{Mixture-of-LoRAs} --- 为每种模态（speech、vision、text）
+训练独立的 LoRA adapter，根据输入类型动态激活。
+这一设计在共享 LLM backbone 的同时最小化了跨模态干扰。
+Phi-4-Multimodal 在 5T text tokens、2.3M 小时语音和 1.1T image-text tokens 上训练，
+以 5.6B 参数超越了更大的专用 vision-language 和 speech-language 模型。
+Mixture-of-LoRAs 是 full fine-tuning 的高效替代方案，
+直接关联 Thread~7 中 parameter-efficient post-training 的方法论
+\crossref{7}{sec:efficiency}。
+
+\begin{solutionbox}
+\textbf{Omni-Modal 架构设计的三种范式：}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{End-to-end monolithic}（GPT-4o）：
+    所有模态在同一个模型中端到端训练，最高质量但训练成本最大。
+  \item \textbf{Modular decomposition}（Qwen2.5-Omni 的 Thinker-Talker）：
+    将推理和实时生成解耦为独立模块，
+    在质量和延迟间取得平衡。
+  \item \textbf{Adapter-based}（Phi-4-Multimodal 的 MoE-LoRA）：
+    保持 LLM backbone 不变，通过模态专用 adapter 注入能力，
+    最高效但可能限制跨模态交互的深度。
+\end{itemize}
+\end{solutionbox}
+
+\evolution{Text + Vision 双模态 VLM}
+  {Text + Vision + Audio 全模态 Omni Model}
+  {Thinker-Talker、Mixture-of-LoRAs、End-to-End Training}
+
+\subsubsection{2026: Self-Evolving VLM Training}
+\label{sec:t5-self-evolving}
+
+上述 RLVR 方法共享一个隐含假设：
+\textbf{训练数据是静态的，训练前一次性收集完毕}。
+但实践中，这一假设面临两个瓶颈：
+（1）模型不知道自己哪里弱 --- 训练在所有能力维度上均匀施力，
+大量计算浪费在模型已经掌握的能力上（``盲目训练''）；
+（2）静态数据集很快饱和 --- 当模型的 pass rate 在特定 prompt 上趋近 0 或 1 时，
+该 prompt 的梯度信号趋近于零，训练效率急剧下降。
+2026 年初，一系列工作开始将 \textbf{diagnostic-driven data generation}
+引入 VLM 的 RL 训练循环，标志着从``一次性训练''到``持续自我进化''的范式转变。
+
+\paragraph{DPE：诊断-生成-强化循环。}
+Jia et al.\ \cite{jia2026dpe} 提出 \textbf{DPE}（Diagnostic-driven Progressive Evolution），
+将 VLM 的 post-training 重构为一个闭环迭代过程：
+\textbf{Diagnose $\rightarrow$ Produce $\rightarrow$ Enhance}。
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Diagnose}：在每轮迭代开始时，
+    用仅 200 个样本的诊断集横跨 12 个能力维度（数学推理、图表理解、OCR 等）
+    快速评估模型的当前能力 profile。
+    这一步将不可观测的``模型弱点''转化为可操作的维度级能力信号。
+  \item \textbf{Produce}：基于诊断结果，
+    由 4-agent 协作系统（Planner、Image Selector、Question Generator、Validator）
+    自动生成针对弱维度的训练数据。
+    Planner 根据能力 profile 决定数据分布，
+    Validator 过滤不合格的数据，
+    确保生成的 prompt 落在模型的``学习区''内。
+  \item \textbf{Enhance}：使用 GRPO \cite{shao2024grpo} 对生成的数据进行 RL 训练。
+    DPE 引入了关键的 $p(1-p)$ 分析 --- 对于 pass rate 为 $p$ 的 prompt，
+    其梯度信号的期望方差正比于 $p(1-p)$，
+    在 $p=0.5$（模型决策边界）时最大化。
+    因此，difficulty-aware filtering 不是启发式的，
+    而是有信息论基础的最优采样策略。
+\end{itemize}
+
+\noindent
+DPE 的实验结果极具说服力：
+基于 Qwen2.5-VL-7B 的 DPE 模型在多个 benchmark 上超越了 72B 级别的 VLM；
+仅 3K DPE 生成的样本即超过了 47K 静态数据的训练效果。
+这一数据效率优势直接来源于 diagnostic-driven 的训练循环 ---
+每一轮训练都精确投入在模型最需要改进的能力维度上。
+
+\paragraph{ProbeLLM：系统化的失败模式探测。}
+DPE 的诊断步骤依赖预定义的 12 个能力维度进行评估。
+一个自然的追问是：\textit{如何系统化地发现模型的失败模式，
+而非依赖人工预设的能力分类？}
+Huang et al.\ \cite{huang2026probellm} 的 \textbf{ProbeLLM}
+从更一般的角度回答了这一问题。
+ProbeLLM 将``找出模型弱点''建模为一个层次化搜索问题，
+采用蒙特卡洛树搜索（MCTS）在``所有可能的测试题''空间中做策略性探索：
+\textbf{Macro Search} 在不同能力区域间广度探索（类似在大楼不同楼层快速巡视），
+\textbf{Micro Search} 在已发现的弱点区域内深度精炼（类似对某个楼层逐一检查），
+两者通过 Upper Confidence Bound（UCB）公式自动平衡探索与利用。
+ProbeLLM 在 5 个基准和 12 个目标模型（含开源和商业模型）上的评估表明，
+发现的 failure cluster 数量与平均错误率高度相关（Pearson $r=0.864$），
+且 Macro/Micro 搜索的比例在不同数据集间大致平衡，
+说明搜索策略具有良好的自适应性。
+虽然 ProbeLLM 本身针对 LLM 而非 VLM 设计，
+但其方法论与 DPE 的诊断步骤形成了精确的互补：
+\textbf{ProbeLLM $\approx$ 感知系统}（发现失败的结构是什么），
+\textbf{DPE $\approx$ 行动系统}（如何针对性地生成数据来弥补缺陷）。
+两者的结合指向了一个完整的自适应训练闭环
+（详见 \S\ref{sec:conclusion:future} 方向七至九的综合讨论）。
+
+\paragraph{VisPlay：从图像自我进化。}
+Wang et al.\ \cite{wang2025visplay} 的 \textbf{VisPlay}
+是 DPE 的直接基线和对照。
+VisPlay 采用 questioner/reasoner 双角色架构，
+让 VLM 从原始图像出发自我生成训练数据。
+与 DPE 不同，VisPlay 没有显式的能力诊断步骤，
+而是依赖 self-play 的自然探索来覆盖不同能力维度 ---
+这一差异直接验证了``诊断先行''策略的价值。
+
+\paragraph{相关工作。}
+这一方向上的多项工作从不同角度推进了 self-evolving VLM 训练：
+EvoLMM \cite{chen2025evolmm} 引入了连续值 reward（而非二值正确性判断），
+为 self-evolving 训练提供更精细的梯度信号；
+IReasonER \cite{wu2026ireasoner} 通过 trajectory-aware intrinsic reward
+使模型在推理过程中自我评估中间步骤的质量；
+C2-Evo \cite{zhang2025c2evo} 则提出数据和模型的协同进化框架，
+两者在训练过程中交替迭代更新。
+Liu et al.\ \cite{liu2024selfevolving} 对 self-evolving 训练的基础性质进行了系统分析，
+发现训练效果对数据的``可学习性''高度敏感 ---
+过难或过易的数据均导致训练停滞。
+
+\begin{evolutionbox}
+\textbf{Multimodal Post-Training 范式演化}
+
+静态 RLVR 数据（一次性收集）
+$\;\xrightarrow{\text{diagnostic-driven}}\;$
+迭代式数据生成（Diagnose $\rightarrow$ Produce $\rightarrow$ Enhance）
+$\;\xrightarrow{\text{DPE pipeline}}\;$
+持续自我进化的 VLM 训练系统
+\end{evolutionbox}
+
+\noindent
+DPE 所体现的原则 --- 观测能力 profile、在决策边界附近采样、持续迭代更新 ---
+并非 VLM 独有。
+这些原则的通用化和理论化将在 Chapter~\ref{sec:conclusion}
+的未来方向中展开详细讨论
+（方向七：能力可观测性；方向八：诊断驱动训练；方向九：突破静态数据饱和）。
+DPE 的 $p(1-p)$ 分析与 GRPO 的 group-relative advantage
+（\crossref{4}{sec:t4-thinking-models}）形成了精确的对应 ---
+两者本质上都在通过 variance maximization 找到最有信息量的训练信号。
+
+% ============================================================
+% 5.4.6 Test-Time Compute Scaling for VLMs
+% ============================================================
+\subsubsection{2025--2026: Test-Time Compute Scaling for VLMs}
+\label{sec:t5-test-time-compute}
+
+Thread~4 中 OpenAI o1 系列模型的成功揭示了一个通用原则：
+\textbf{test-time compute 的增加可以系统性地提升推理能力}
+（\crossref{4}{sec:t4-thinking-models}）。
+2025 年，这一原则开始向多模态领域迁移，
+但迁移过程暴露了一个关键差异：
+\textbf{VLM 的 test-time scaling 远不如 LLM 稳定}。
+文本推理中的错误是局部的（某一步逻辑错误），
+而视觉感知错误是全局的 --- 一旦模型``看错了''图像内容，
+后续所有推理步骤都建立在错误的感知基础上，
+无论推理链多长都无法自我纠正。
+这一洞察催生了一系列专门为 VLM 设计的 test-time scaling 方法。
+
+\paragraph{VisVM：视觉价值模型引导的推理搜索。}
+Wang et al.\ \cite{wang2024visvm} 提出 \textbf{VisVM}（Vision Value Model），
+将 test-time search 从 LLM 扩展到视觉理解任务。
+VisVM 的核心思想是训练一个专用的 value model，
+在每一步生成时评估当前句子的质量并预测后续句子的质量，
+从而引导 beam search 远离 hallucination 路径。
+通过 TD-learning 在 VLM 生成的 caption 上进行自训练，
+VisVM 在多个多模态 benchmark 上显著提升了 caption 质量和 VQA 准确率。
+这一工作的重要性在于：它证明了 VLM 的 test-time scaling
+需要\textit{视觉感知层面的引导}（而非仅依赖文本推理的搜索），
+与 LLM 场景下的 value model 有本质区别。
+
+\paragraph{VL-PRM：视觉过程奖励模型。}
+Ong et al.\ \cite{ong2025vlprm} 将 Thread~4 中 process reward model（PRM）
+的概念迁移到多模态推理。
+\textbf{VL-PRM} 采用混合框架：
+用 Monte Carlo Tree Search 对推理路径进行 rollout，
+再用 VLM judge 对每一步标注正确性，
+从而构建 step-level supervision 数据来训练视觉过程奖励模型。
+关键创新在于引入了 \textbf{perception-level supervision} ---
+不仅检查逻辑推理步骤的正确性，
+还检查视觉 grounding 步骤是否准确（例如，``图中有 3 个红色圆''这一感知是否正确）。
+实验表明，较小的 VL-PRM 可以在错误检测上匹配更大模型的性能，
+且 test-time scaling 在数学推理任务上带来显著增益。
+这与 \S\ref{sec:t5-reasoning-rl} 中 URSA 的 PS-GRPO 形成互补 ---
+\textbf{PS-GRPO 在训练时使用 PRM，VL-PRM 在推理时使用 PRM}，
+两者共同构成了 VLM process-level supervision 的完整图景。
+
+\paragraph{Test-time scaling 的局限性分析。}
+Ahmadpour et al.\ \cite{ahmadpour2025ttsvisonlanguage} 对 VLM test-time scaling
+进行了系统性的实证分析，得出了三个关键结论：
+（1）test-time scaling 的收益高度依赖任务类型 ---
+在多步推理任务上收益显著，但在感知主导的任务上几乎无效；
+（2）外部 verifier（如 PRM）是开源模型最可靠的 scaling 策略，
+而 self-consistency 等依赖模型自身判断的方法在 VLM 上表现不稳定；
+（3）增加 sampling 数量的边际收益递减速度远快于 LLM 场景。
+Chou et al.\ \cite{chou2025ttconsistency} 从另一角度揭示了 VLM test-time 的脆弱性：
+对语义等价的输入（如同一问题的不同表述），
+VLM 的预测高度不一致（consistency gap），
+并提出了 post-hoc 的 cross-entropy agreement loss 来缓解这一问题。
+
+\paragraph{RD-VLA：隐式 test-time compute。}
+Tur et al.\ \cite{tur2026rdvla} 提出了一种与上述方法截然不同的路径：
+\textbf{不在 token 空间做搜索，而是在隐空间做迭代推理}。
+RD-VLA 在 VLA（Vision-Language-Action）模型上添加了一个循环的、
+权重共享的 action head，通过 latent iterative refinement
+实现自适应的 test-time compute --- 困难任务自动获得更多迭代。
+在单次迭代下 0\% 成功率的任务，4 次迭代后成功率超过 90\%，
+且推理速度比显式推理链方法快 80 倍。
+这一工作暗示了 test-time scaling 的未来可能不在于``生成更长的推理链''，
+而在于``在隐空间中反复精炼决策''。
+
+\begin{evolutionbox}
+\textbf{VLM Test-Time Compute 范式}
+
+LLM test-time scaling（Best-of-N, self-consistency）
+$\;\xrightarrow{\text{视觉感知瓶颈}}\;$
+专用 Vision Value Model / VL-PRM 引导搜索
+$\;\xrightarrow{\text{隐空间迭代}}\;$
+Recurrent-depth latent refinement（RD-VLA）
+\end{evolutionbox}
+
+% ============================================================
+% 5.4.7 Multimodal Reward Models & VLM-as-Judge
+% ============================================================
+\subsubsection{2025--2026: Multimodal Reward Models \& VLM-as-Judge}
+\label{sec:t5-reward-models}
+
+\S\ref{sec:t5-reasoning-rl} 中的 RL 训练和上一节的 test-time scaling
+都依赖一个共同的基础设施：\textbf{可靠的 reward signal}。
+然而，多模态场景下的 reward modeling 面临独特挑战 ---
+judge 模型不仅需要评估文本推理的正确性，
+还需要评估视觉感知的准确性（是否看到了正确的内容）、
+hallucination 程度、以及图文对齐的质量。
+2025 年，一系列工作开始系统化地构建和评估多模态 reward model，
+揭示了一个令人不安的现实：
+\textbf{即使最强的 VLM 作为 judge，准确率也仅约 65--72\%}。
+
+\paragraph{VL-RewardBench：暴露 judge 能力的天花板。}
+Li et al.\ \cite{li2024vlrewardbench}（CVPR 2025）
+构建了 \textbf{VL-RewardBench}，
+包含 1,250 个精心策划的评估样本，
+覆盖通用多模态查询、视觉 hallucination 检测和复杂推理三个维度。
+在 16 个 VLM 上的测试揭示了两个关键发现：
+（1）即使 GPT-4o 也仅达到 65.4\% 的 judge 准确率；
+（2）模型在基础视觉感知上的判断失误远多于推理层面 ---
+\textit{瓶颈不在于推理能力，而在于感知可靠性}。
+这一发现直接解释了为什么 VLM 的 RLHF pipeline 效果不如 LLM ---
+reward model 本身的 noise floor 太高。
+值得注意的是，通过 post-training 让 7B 模型``学会判断''（learn to judge），
+可以将准确率提升 14.7\%，说明 judge 能力是可训练的。
+
+\paragraph{MM-RLHF：大规模多模态偏好数据。}
+\S\ref{sec:t5-reasoning-rl} 已介绍 MM-RLHF \cite{zhang2025mmrlhf}（ICML 2025）
+在 RL 训练中的贡献。
+这里强调其作为 \textbf{reward model 基础设施}的意义：
+MM-RLHF 提供了 120K 条 fine-grained、human-annotated 的多模态偏好对，
+覆盖 8 个评估维度，由 50+ 标注者花费 2 个月完成。
+基于此数据训练的 MM-RLHF-Reward-7B 生成式 reward model
+在多模态 judge 任务上超越了 72B 级别的开源模型。
+该工作还引入了 \textbf{Critique-Based Reward Model} ---
+reward model 在给出数值分数的同时生成自然语言解释，
+以及 \textbf{Dynamic Reward Scaling} 根据样本难度动态调整 reward 权重。
+
+\paragraph{Skywork-VL Reward：专用多模态 Reward Model。}
+Wang et al.\ \cite{wang2025skyworkvlreward} 的 \textbf{Skywork-VL Reward}
+代表了``从通用 VLM 到专用 reward model''的路径。
+基于 Qwen2.5-VL-7B-Instruct，
+通过多阶段 fine-tuning 和 pairwise ranking loss 训练，
+Skywork-VL Reward 在 VL-RewardBench 上达到 SOTA，
+同时在纯文本 RewardBench 上保持竞争力。
+该工作验证了一个重要假设：
+\textbf{专用的 reward model 训练比使用通用 VLM-as-judge 更有效} ---
+这与 Thread~2 中 text-only reward model 的演化路径
+（\crossref{2}{sec:pref}）一致。
+
+\paragraph{Critic-V \& M-JudgeBench：结构化评判。}
+Zhang et al.\ \cite{zhang2024criticv}（CVPR 2025）的 \textbf{Critic-V}
+采用 Actor-Critic 架构将推理过程分离为 Reasoner（生成推理路径）
+和 Critic（提供自然语言反馈）两个角色，
+Critic 通过 DPO 在 rule-based reward 数据上训练。
+Chen et al.\ \cite{chen2026mjudgebench} 的 \textbf{M-JudgeBench}
+则构建了十维度的 judge 评估基准，
+并提出 \textbf{Judge-MCTS} ---
+用 MCTS 生成不同正确性和长度的成对推理轨迹来训练 judge 模型。
+这两项工作共同推进了从``黑盒打分''到``结构化评判''的演进。
+
+\paragraph{多模态 reward modeling 的系统性挑战。}
+综合上述工作，多模态 reward modeling 面临三个层次的挑战：
+（1）\textbf{感知层}：judge 模型自身的视觉感知可能出错，
+导致``blind judge''问题 ---
+一个看不清图像的 judge 无法可靠地判断回答是否忠实于图像内容；
+（2）\textbf{对齐层}：图文对齐的偏好高度主观且多维度
+（factuality vs.\ helpfulness vs.\ safety），
+单一 scalar reward 无法捕捉这种复杂性；
+（3）\textbf{规模层}：高质量多模态偏好标注的成本远高于纯文本
+（需要标注者同时理解图像和文本），限制了 RLHF 数据的规模化。
+Yasunaga et al.\ \cite{yasunaga2025mmrewardbench} 的 Multimodal RewardBench
+（5,000+ expert-annotated triplets）进一步量化了这些挑战：
+即使 Gemini 1.5 Pro 和 Claude 3.5 Sonnet 也仅达 72\% 的整体准确率，
+在 reasoning 和 safety 维度尤其薄弱。
+
+% ============================================================
+% 5.4.8 Domain-Specialized VLM RL
+% ============================================================
+\subsubsection{2025: Domain-Specialized VLM RL}
+\label{sec:t5-domain-rl}
+
+\S\ref{sec:t5-reasoning-rl} 中的 GRPO 方法最初应用于数学和科学推理。
+2025 年下半年，RL-based post-training 开始向三个高价值垂直领域扩散：
+\textbf{文档导航}、\textbf{图表理解}和 \textbf{GUI 操控}。
+这些领域的共同特征是：
+（1）任务结构天然适合 RL（有明确的成功/失败信号）；
+（2）SFT 独自无法解决的探索性行为（如``是否翻页''``是否点击''）
+需要 RL 的试错学习；
+（3）multi-turn interaction 使得 reward 的时间跨度远长于单轮 QA。
+
+\paragraph{SCoPE VLM：文档导航中的 RL。}
+Lim et al.\ \cite{lim2025scopevlm} 提出 \textbf{SCoPE VLM}，
+首次将 GRPO 适配到多页文档导航任务。
+核心创新是 \textbf{Chain of Scroll} 机制 ---
+模型在每一步面临一个决策：
+\textit{是基于当前可见页面回答问题，还是翻到下一页继续阅读？}
+这一``scroll or answer''决策本质上是一个 exploration-exploitation trade-off，
+SFT 无法有效训练，因为 SFT 只能从正确的 scroll 序列中学习，
+无法从``翻多了''或``翻少了''的错误中获得有用信号。
+SCoPE VLM 采用 \textbf{Episodic GRPO}，
+在每个 episode（一次完整的文档导航）结束后计算 reward，
+通过 group-relative advantage 让模型学会在不确定性下做出最优的导航决策。
+
+\paragraph{BigCharts-R1：图表推理的专用 Reward。}
+Masry et al.\ \cite{masry2025bigchartsr1} 的 \textbf{BigCharts-R1}
+将 RL post-training 应用于图表理解 --- 一个看似简单但 VLM 经常失败的任务。
+图表推理的独特挑战在于\textit{数值估计}：
+从柱状图中读取一个数值需要视觉空间推理（估计柱高相对于坐标轴的位置），
+这与数学推理中的精确计算截然不同。
+BigCharts-R1 首先构建了 BigCharts 数据集 pipeline，
+从真实数据源生成视觉多样化的图表图像并保留精确的底层数据；
+然后设计了\textbf{图表专用 reward 函数}，
+同时覆盖数值估计精度、数学运算正确性和视觉推理逻辑三个维度。
+在 GRPO 框架下训练后，
+BigCharts-R1 在多个图表 QA benchmark 上超越了更大的通用 VLM。
+
+\paragraph{UI-TARS-2：GUI Agent 的 Multi-Turn RL。}
+Wang et al.\ \cite{wang2025uitars2} 的 \textbf{UI-TARS-2}
+代表了 VLM RL 在复杂度上的一次跃迁：
+从单轮 QA 的 RL 演进到\textbf{多轮交互环境中的 RL}。
+GUI agent 需要在真实桌面/移动端环境中执行多步操作
+（点击、输入、滚动、切换应用），每一步的 action 空间巨大，
+reward signal 极其稀疏（只有最终任务完成时才有明确反馈）。
+UI-TARS-2 的解决方案包含三个创新：
+（1）\textbf{Data Flywheel}：
+通过 continual SFT 和 RL 的交替迭代实现数据和模型的协同进化 ---
+模型的 rollout 数据经过筛选后反馈为下一轮 SFT 数据，
+与 \S\ref{sec:t5-self-evolving} 中 DPE 的自进化思想一脉相承；
+（2）\textbf{稳定化 multi-turn RL 框架}，
+通过 hybrid GUI 环境（集成文件系统、终端和桌面）降低环境交互的不稳定性；
+（3）\textbf{统一的 sandbox 平台}用于大规模分布式训练。
+UI-TARS-2 在 OSWorld 上达到 47.5\%、WindowsAgentArena 50.6\%、
+AndroidWorld 73.3\%，大幅超越 Claude 和 OpenAI 的 agent baseline。
+
+\paragraph{相关工作。}
+多项工作从不同角度推进了 domain-specialized VLM RL：
+Lian et al.\ \cite{lian2025uiagile} 的 \textbf{UI-AGILE}
+引入了连续 reward 函数以激励高精度 GUI grounding，
+在 ScreenSpot-Pro 上将准确率提升 23\%；
+Li et al.\ \cite{li2025dart} 的 \textbf{DART}
+解决了 multi-turn RL 的系统效率问题，
+通过四个解耦的异步模块（environment cluster、rollout service、
+data manager、trainer）实现了高效的分布式训练，
+DART-GUI-7B 在 OSWorld 上达到 42.13\%；
+Huang et al.\ \cite{huang2025dave} 的 \textbf{DAVE}
+则从视觉编码器层面出发，
+设计了专用于文档结构理解的两阶段 post-training 流程
+（self-supervised + autoregressive）。
+
+\begin{evolutionbox}
+\textbf{VLM RL 的领域分化}
+
+通用 GRPO（数学推理）
+$\;\xrightarrow{\text{task-specific reward}}\;$
+领域专用 RL（文档导航 / 图表理解 / GUI 操控）
+$\;\xrightarrow{\text{multi-turn}}\;$
+多轮交互环境中的 Data Flywheel（UI-TARS-2）
+\end{evolutionbox}
+
+% ============================================================
+% 5.4.9 Spatial & 3D Reasoning Post-Training
+% ============================================================
+\subsubsection{2025--2026: Spatial \& 3D Reasoning Post-Training}
+\label{sec:t5-spatial-reasoning}
+
+标准 VLM 在 2D 图像-文本数据上训练，
+能回答``这是什么颜色''但无法回答``这两个物体相距多远'' ---
+\textbf{定量空间推理}（距离、大小、方向、深度）是 VLM 的系统性盲区。
+这一缺陷不仅限制了 VLM 在机器人、自动驾驶、AR/VR 中的应用，
+更从根本上制约了 VLM 对物理世界的理解能力。
+2024--2026 年，一系列工作通过 post-training 阶段注入 3D 结构知识，
+开辟了``空间推理 post-training''这一新方向。
+
+\paragraph{SpatialVLM：大规模空间 VQA 数据。}
+Chen et al.\ \cite{chen2024spatialvlm}（CVPR 2024）的 \textbf{SpatialVLM}
+从根本问题出发：VLM 缺乏空间推理能力是因为训练数据中几乎没有空间 QA 样本。
+其解决方案直接而有效 ---
+从 1,000 万张真实图像中利用现有的 3D 标注
+（depth estimation、object detection）
+自动生成 \textbf{20 亿} 条空间 VQA 样本
+（``A 和 B 之间的距离是多少？''``哪个物体更靠近摄像头？''），
+然后 fine-tune VLM。
+这一数据工程方法虽然简单，但揭示了一个重要原则：
+\textbf{能力的缺失往往是数据的缺失，而非架构的缺陷}。
+SpatialVLM 训练后的模型可以进行链式空间推理
+（``要从 A 走到 B，需要先向左转再走 3 米''），
+并直接用于机器人任务中的距离/大小估计。
+
+\paragraph{MetaSpatial：3D 空间策略优化。}
+Pan \& Liu \cite{pan2025metaspatial} 提出 \textbf{MetaSpatial}，
+首次将 \textbf{RL-based post-training} 引入 3D 空间推理。
+核心创新是 \textbf{3D Spatial Policy Optimization（3D-SPO）} ---
+一种物理感知的 RL 算法：
+模型在每一步提出物体在 3D 空间中的摆放方案，
+环境渲染该方案的视觉效果，
+reward 函数结合物理约束（不穿透、重力稳定）和美学评价进行评分，
+模型根据 reward 信号迭代精炼空间布局。
+这一 multi-turn RL 范式使模型通过``试错''学会 3D 空间推理，
+而非仅从静态标注数据中记忆。
+
+\paragraph{Smooth Operator：RL 激活空间推理能力。}
+Jiao et al.\ \cite{jiao2026smoothoperator} 的 \textbf{Smooth Operator}
+带来了一个反直觉的发现：
+VLM 可能\textit{已经具备} 3D 空间推理的潜在能力，
+只需通过恰当的 RL post-training 即可``激活''。
+该工作引入了 \textbf{Smooth Numerical Reward Activation（SNRA）}
+和 \textbf{Absolute-Preserving GRPO（AP-GRPO）}，
+一种单阶段 RL 范式，
+仅使用 50K 可验证的 3D 空间任务数据集（Numerical3D-50k）
+即达到了与大规模监督方法相当的空间推理性能。
+这一结果呼应了 Thread~4 中 DeepSeek-R1
+（\crossref{4}{sec:t4-thinking-models}）的核心发现 ---
+\textbf{RL 可以``唤醒''模型在预训练阶段已习得但在 SFT 后被抑制的能力}。
+
+\paragraph{G2VLM 与 4D 推理。}
+Hu et al.\ \cite{hu2025g2vlm} 的 \textbf{G\textsuperscript{2}VLM}
+在单一 VLM 中统一了 3D 重建和空间推理 ---
+模型同时预测场景的 3D 几何结构和回答空间推理问题，
+两个任务通过 in-context learning 相互增强。
+Zhou et al.\ \cite{zhou2025reason4d} 将空间推理扩展到时间维度，
+构建了 DSR Suite 用于动态空间推理训练，
+在 Qwen2.5-VL-7B 上添加轻量的 Geometry Selection Module
+并进行 post-training，
+显著提升了动态空间推理能力同时保持了通用视频理解性能。
+Huang et al.\ \cite{huang2025threedimensionalr1} 的 \textbf{3D-R1}
+则将 GRPO 直接应用于 3D 场景理解，
+构建了包含 chain-of-thought 标注的 Scene-30K 合成数据集，
+通过 perception reward、semantic similarity reward 和 format reward
+三维度 reward 进行 RL 训练，
+在多个 3D 场景理解 benchmark 上平均提升 10\%。
+
+% ============================================================
+% 5.4.10 World Models as Data Engines
+% ============================================================
+\subsubsection{2025--2026: World Models as Data Engines for VLM/VLA}
+\label{sec:t5-world-models}
+
+上述各节中的 post-training 方法都假设\textit{训练数据来自真实世界}
+（人类标注、真实图像、真实环境交互）。
+但真实世界的数据收集成本高昂，
+尤其在 embodied AI 领域（机器人操作、自动驾驶），
+每一条训练轨迹都需要物理机器人在真实环境中执行。
+2025 年，随着 video generation model 的成熟
+（如 NVIDIA Cosmos 系列），
+一个新范式开始涌现：
+\textbf{用 world model 作为 data engine，
+通过生成合成视频/环境来为 VLM/VLA 提供 post-training 数据}。
+
+\paragraph{Cosmos 平台：world model 的基础设施。}
+NVIDIA 的 \textbf{Cosmos} 平台 \cite{agarwal2025cosmoswfm}
+构建了 Physical AI 的 world model 基础设施：
+包含视频 curation pipeline、预训练的 world foundation model、
+post-training workflow 和 video tokenizer。
+在此基础上，\textbf{Cosmos-Predict2.5} \cite{ali2025cosmospredict25}
+统一了 Text2World、Image2World 和 Video2World 生成，
+在 2B 和 14B 参数规模上训练，
+使用 \textbf{2 亿} 条 curated 视频 clip 并经过 RL 精炼。
+Cosmos 平台的开源发布降低了 world model 的使用门槛，
+使得``world model as data engine''不再是 NVIDIA 内部独有的能力。
+
+\paragraph{Cosmos-Reason1：物理常识推理的 Post-Training。}
+\textbf{Cosmos-Reason1} \cite{azzolini2025cosmosreason1}
+直接回答了一个关键问题：
+\textit{如何让 VLM 理解物理世界的因果关系？}
+该工作在 7B 和 56B 参数规模上构建了多模态大模型，
+采用两阶段 Physical AI post-training：
+\textbf{第一阶段 SFT} --- 在空间（spatial）、时间（temporal）
+和物理（physics）三个层次的本体论标注上训练，
+使模型习得``球向右滚动，因此会撞到墙''这类物理推理链；
+\textbf{第二阶段 RL} --- 针对 embodied reasoning 任务进行强化学习，
+使模型能够基于物理理解生成行动决策。
+Cosmos-Reason1 是首个系统化地将 \textbf{物理常识}
+作为 post-training 目标（而非仅作为预训练的隐含知识）的工作。
+
+\paragraph{GigaBrain/GigaWorld：合成数据驱动的 VLA。}
+Ye et al.\ 的 \textbf{GigaBrain-0} \cite{ye2025gigabrain0}
+和 \textbf{GigaWorld-0} \cite{ye2025gigaworld0}
+构成了一个完整的 world model $\rightarrow$ VLA pipeline。
+GigaWorld-0 作为 \textbf{data engine}，
+由两个组件构成：
+GigaWorld-0-Video 通过大规模视频合成生成多样化的 embodied 序列
+（控制物体外观、动作语义和环境变化）；
+GigaWorld-0-3D 通过 3D 生成建模和物理模拟确保几何一致性。
+GigaBrain-0 作为 \textbf{VLA model}，
+消费 GigaWorld-0 生成的合成数据进行 post-training，
+结合 RGB-D 输入和 embodied chain-of-thought supervision。
+关键结果是：
+\textbf{完全在合成数据上 post-training 的 VLA
+能够在真实机器人任务上实现强泛化}，
+无需任何物理交互数据。
+
+\paragraph{RehearseVLA：虚拟排练替代真实交互。}
+Xiao et al.\ \cite{xiao2026rehearsevla}（CVPR 2026）
+的 \textbf{RehearseVLA} 将 world model 的角色
+从``数据生成器''升级为``虚拟训练环境''。
+与 GigaBrain 的离线数据生成不同，
+RehearseVLA 在 world model 生成的虚拟环境中
+进行 \textbf{在线 RL post-training} ---
+model 在虚拟环境中尝试动作，
+world model 预测下一帧视觉输出，
+VLM-guided reflector 提供即时 reward 信号和动作终止预测。
+仅需每个任务 5 条真实示范轨迹即可实现显著性能提升，
+这对高风险工业场景（如手术机器人、化工操作）尤为关键 ---
+在这些场景中，试错学习的物理成本和安全风险都不可接受。
+
+\paragraph{VLAW：策略与世界模型的协同进化。}
+Guo et al.\ \cite{guo2026vlaw} 的 \textbf{VLAW}
+指出了上述方法的一个隐含假设：
+\textit{world model 的质量是固定的}。
+但实际上，world model 在接触场景（contact-heavy manipulation）等物理精度
+要求极高的任务上仍然不够准确。
+VLAW 提出了 VLA 策略和 world model 的\textbf{迭代协同改进}框架：
+VLA 在真实环境中收集交互数据 $\rightarrow$
+world model 用这些数据精炼自身 $\rightarrow$
+精炼后的 world model 生成合成 rollout 增强 VLA 训练数据 $\rightarrow$
+VLA 再次在真实环境中交互。
+这一闭环实现了 39.2\% 的绝对成功率提升，
+其中合成 rollout 贡献了 11.6\% 的增量 ---
+证明了 world model 生成的数据确实提供了真实交互以外的有用信息。
+
+\begin{evolutionbox}
+\textbf{World Model $\rightarrow$ VLA 训练范式}
+
+离线合成数据（GigaWorld-0 as data engine）
+$\;\xrightarrow{\text{online RL in sim}}\;$
+虚拟环境中的在线 RL（RehearseVLA）
+$\;\xrightarrow{\text{co-evolution}}\;$
+策略与世界模型的迭代协同进化（VLAW）
+\end{evolutionbox}
+
+\noindent
+World model as data engine 的成熟意味着 VLM/VLA post-training 的数据瓶颈
+正在从``如何收集''转变为``如何验证合成数据的物理真实性''。
+这一方向与 \S\ref{sec:t5-self-evolving} 中 DPE 的诊断驱动数据生成
+形成了有趣的对比 ---
+DPE 从\textit{真实图像}出发生成\textit{问题}，
+而 world model 从\textit{物理模拟}出发生成\textit{图像}。
+两者的融合 --- 用 world model 生成场景，
+再用 DPE 式诊断生成针对性的训练问题 ---
+是一个尚未被探索的方向
+（详见 Chapter~\ref{sec:conclusion} 的未来方向讨论）。
+
+% ============================================================
+% 5.5 Open Problems
+% ============================================================
+\subsection{未解决问题与未来方向}
+\label{sec:t5-open}
+
+尽管取得了显著进展，multimodal post-training 仍面临多个未解决的核心问题。
+注意，以下部分问题已被上述工作部分缓解，
+但仍有根本性挑战未被解决。
+
+\begin{openproblembox}
+\textbf{Open Problem 1: Fine-Grained Visual Understanding.}
+
+Qwen2.5-VL 的 bounding box / point 定位能力和 Molmo 的 pointing 数据集
+已将 fine-grained understanding 推进到实用水平。
+然而，对于需要\textit{像素级}精确理解的任务（如医学影像分析、遥感图像解读、
+工业缺陷检测），现有方法的粒度仍然不足。
+核心瓶颈在于：
+当前 VLM 的 visual token 粒度（通常 14$\times$14 像素对应一个 token）
+与像素级任务的需求之间存在数量级的分辨率差距。
+如何在 post-training 阶段弥合这一差距 ---
+是引入 segmentation-aware 的训练数据，还是设计 multi-scale visual token 机制 ---
+仍是一个开放问题。
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 2: Long Video Understanding \& Temporal Alignment.}
+
+2025 年已出现多项缓解方案：
+Video-XL \cite{shu2024videoxl}（CVPR 2025）提出 \textbf{Visual Summarization Tokens（VST）} ---
+在视频 token 序列中定期插入特殊 token，
+模型学会将该区间的信息压缩到这些 token 中，实现 16$\times$ 的 compression ratio，
+使单卡 A100 即可处理数千帧的长视频。
+VideoLLaMA 3 \cite{zhang2025videollama3} 提出``先图像后视频''的训练哲学 ---
+先在高质量 image-text 数据上构建强视觉基础，再扩展到视频，
+通过 similarity-based frame merging 减少冗余 token。
+MLVU \cite{zhou2024mlvu}（CVPR 2025）建立了首个覆盖 3 分钟到 2 小时视频的
+9 类任务标准评估基准，
+揭示了即使最强模型（GPT-4o）在 multiple-choice 任务上也仅达 64.6\%。
+
+尽管如此，\textbf{hour-scale temporal grounding}（定位事件的精确时间区间）
+和 \textbf{streaming video understanding}（在视频持续输入时进行实时推理）
+仍然是未解决的挑战。
+InternLM-XComposer2.5-OmniLive \cite{chen2024omnilive}
+将 perception、long-term memory 和 reasoning 分离为三个独立模块，
+是 streaming 方向的初步探索，
+但如何在 post-training 中有效训练``记忆管理''能力仍缺乏系统化方法。
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 3: Omni-Modal Safety.}
+
+视觉模态为 jailbreaking 攻击打开了新的攻击面。
+Qi et al.\ \cite{qi2023visual} 证明了将对抗性扰动嵌入图像中
+可以成功绕过 VLM 的 text-based safety alignment；
+FigStep \cite{gong2023figstep} 展示了将有害指令渲染到图像中
+即可绕过文本安全过滤器的更简单攻击；
+MM-SafetyBench \cite{liu2023mm-safetybench} 系统化地评估了多种攻击方式的有效性；
+VLGuard \cite{zong2024vlguard} 提出了以极低成本进行 safety fine-tuning 的方法。
+
+随着 omni-modal 模型的出现（\S\ref{sec:t5-omni}），
+安全问题的攻击面进一步扩大 ---
+audio 模态提供了又一个 unguarded backdoor
+（例如通过语音中嵌入的隐蔽指令绕过安全过滤）。
+当前 VLM 的 safety alignment 主要针对文本模态构建
+\crossref{3}{sec:t3-safety}，
+如何构建 \textbf{modality-agnostic} 的 safety alignment 方法，
+使模型对\textit{任何}模态的有害输入都具备鲁棒的拒绝能力，
+是一个随着模态数量增加而日益紧迫的问题。
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 4: Deep Multimodal Reasoning.}
+
+URSA 的 PS-GRPO 和 VisualPRM 已将 process-level reward
+引入多模态推理训练（\S\ref{sec:t5-reasoning-rl}），
+MVoT 则探索了``在图像中思考''的新推理模态。
+然而，当前的多模态推理仍然高度依赖 \textit{text-based chain-of-thought} ---
+即使处理视觉问题，推理链仍然是纯文本的，
+视觉信息仅在输入阶段被处理一次，之后就被``遗忘''在 attention 的深处。
+
+真正的 deep multimodal reasoning 应该能够在推理过程中
+\textit{反复查阅和重新解读视觉信息}（类似人类在解题时反复查看图表）。
+如何在 post-training 阶段训练这种``视觉回看''能力 ---
+是通过 MVoT 式的可视化中间步骤，
+还是通过类似 agentic tool use（\crossref{6}{sec:thread6}）的
+``调用 vision encoder 作为工具''的范式 ---
+仍是一个开放的研究方向。
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 5: Post-Training for Unified Generation.}
+
+\S\ref{sec:t5-unified-generation} 中的统一模型（Janus、Emu3、Show-o、Transfusion）
+已证明在架构层面同时实现理解和生成是可行的。
+但 \textbf{post-training 方法论}严重滞后于架构创新 ---
+当前这些模型主要依赖 SFT，
+几乎没有工作系统化地研究如何对统一模型进行 preference optimization。
+核心困难在于 \textbf{多目标 alignment}：
+理解任务的 alignment 目标（faithfulness、reduced hallucination）
+与生成任务的 alignment 目标（aesthetic quality、user intent matching）
+可能存在冲突。
+如何设计能够同时优化这两类目标的 reward model 和 preference learning 策略，
+是统一模型从``能力展示''走向``产品级部署''的关键瓶颈。
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 6: Omni-Modal Alignment 的跨模态一致性.}
+
+Omni model（\S\ref{sec:t5-omni}）要求模型对同一查询
+在不同模态输入下给出一致的回答 ---
+用文本问``巴黎的首都是什么''和用语音问同一问题
+不应产生不同质量的答案。
+Qwen2.5-Omni 的 speech-text 性能匹配是一个里程碑，
+但更深层的一致性问题尚未被触及：
+当模型同时接收冲突的多模态信号时
+（如图像中显示``红色''但语音说``蓝色''），
+如何通过 post-training 建立清晰的模态优先级和冲突解决机制？
+此外，duplex interaction（VITA）要求模型在
+生成过程中持续处理新输入并适时调整输出 ---
+这是标准 SFT / DPO pipeline 完全未覆盖的训练场景。
+\end{openproblembox}
+
+\bigskip
+\noindent
+Multimodal post-training 赋予模型``看''和``理解''视觉世界的能力，
+但这一能力的真正价值在于为\textbf{行动}奠定基础。
+当 VLM 能够理解屏幕截图、定位 UI 元素、解读图表时，
+它距离``在真实环境中自主操作''仅一步之遥——
+这正是 Thread~6 所追踪的 agentic capabilities 演化路径，
+其中 computer use 的突破尤其依赖本章中发展的视觉理解能力。

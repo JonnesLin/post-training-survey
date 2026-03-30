@@ -1,0 +1,436 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[UTF8,fontset=fandol]{ctex}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{tcolorbox}
+\usepackage{multirow}
+\usepackage{makecell}
+
+% === Proposal Colors ===
+\definecolor{propOne}{HTML}{C0392B}
+\definecolor{propTwo}{HTML}{2980B9}
+\definecolor{propThree}{HTML}{16A085}
+\definecolor{propFour}{HTML}{8E44AD}
+\definecolor{propFive}{HTML}{D35400}
+\definecolor{accent}{HTML}{2C3E50}
+
+% === Proposal Box ===
+\newtcolorbox{proposalbox}[2][]{%
+  colback=#2!5,colframe=#2!70,boxrule=0.5pt,
+  fonttitle=\bfseries,title={#1},
+  left=6pt,right=6pt,top=4pt,bottom=4pt
+}
+
+% === Insight Box ===
+\newtcolorbox{insightbox}[1][]{%
+  colback=yellow!5,colframe=yellow!60!black,boxrule=0.4pt,
+  fonttitle=\bfseries,title={Core Insight},#1
+}
+
+% === Risk Box ===
+\newtcolorbox{riskbox}[1][]{%
+  colback=red!3,colframe=red!40,boxrule=0.3pt,
+  fonttitle=\bfseries,title={Open Risks},#1
+}
+
+% === Experiment Box ===
+\newtcolorbox{expbox}[1][]{%
+  colback=blue!3,colframe=blue!40,boxrule=0.3pt,
+  fonttitle=\bfseries,title={Key Experiments},#1
+}
+
+% === Why Box ===
+\newtcolorbox{whybox}[1][]{%
+  colback=gray!5,colframe=gray!60,boxrule=0.4pt,
+  fonttitle=\bfseries,title={First-Principles Chain},#1
+}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black!70,
+  citecolor=blue!60!black,
+  urlcolor=blue!70!black,
+}
+
+\title{\textbf{VLM 多模态 High-Impact Project Proposals}\\
+\large{从第一性原理出发的五个研究方向}\\[6pt]
+\normalsize{Independent Research Directions for Vision-Language Models}}
+
+\author{Jinhong Lin}
+\date{March 2026}
+
+\begin{document}
+
+\maketitle
+
+\section*{概览}
+
+本文档提出 5 个彼此区分明确的 VLM 研究方向。
+筛选标准只有三个：
+\begin{enumerate}[leftmargin=2em]
+  \item 不是只靠 scaling 就能自然解决的问题。
+  \item 如果做成，会改变 VLM 的能力边界，而不只是刷高单一 benchmark。
+  \item 能从第一性原理往下追问，定位到结构性 root cause。
+\end{enumerate}
+
+\begin{insightbox}
+如果连续追问 ``why''，当前 VLM 的主要瓶颈并不是``模型还不够大''，
+而是 5 类结构性错配：
+\begin{enumerate}[leftmargin=2em]
+  \item 它把视频当作一堆帧，而不是随时间演化的状态。
+  \item 它把空间看成 2D pattern matching，而不是可操作的 3D geometry。
+  \item 它把外部知识当作附加文本，而不是与视觉证据共同裁决答案的证据系统。
+  \item 它把长上下文 demonstration 当作 prompt stuffing，而不是临时可编译的 task adaptation。
+  \item 它的 benchmark 仍然允许 shortcut，所以整个领域可能在优化``看起来会看图''，而不是``真的依赖图像推理''。
+\end{enumerate}
+\end{insightbox}
+
+\subsection*{快速优先级}
+
+\renewcommand{\arraystretch}{1.25}
+\begin{center}
+\begin{tabular}{>{\raggedright\arraybackslash}p{3.3cm} >{\raggedright\arraybackslash}p{4.8cm} >{\centering\arraybackslash}p{1.2cm} >{\centering\arraybackslash}p{1.2cm} >{\raggedright\arraybackslash}p{3.3cm}}
+\toprule
+\textbf{方向} & \textbf{Root Cause} & \textbf{影响力} & \textbf{风险} & \textbf{适合的人} \\
+\midrule
+Stateful Video VLM & 视频被压缩成一次性 token & 很高 & 高 & long-video / agent / world understanding \\
+Geometry-Grounded VLM & 缺少 metric 级空间表征 & 很高 & 高 & robotics / 3D / embodied AI \\
+Retrieval-Calibrated Expert VLM & 外部知识与视觉证据缺少仲裁机制 & 很高 & 中 & medical / science / deployment \\
+Context-to-Adapter VLM & many-shot context 不能转化为临时适配 & 高 & 中 & efficient adaptation / open ecosystem \\
+Intervention-Centric Benchmark & 评测奖励 shortcut 而非真理解 & 很高 & 中 & benchmark + method + field shaping \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\newpage
+\section{Proposal 1: Stateful Video VLM}
+
+\begin{proposalbox}[从``看很多帧''转向``维护可推理的事件状态'']{propOne}
+\textbf{一句话摘要：}
+长视频理解失败，不是因为模型没看够帧，
+而是因为它没有形成一个可以持续更新、回溯、查询的事件状态系统。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} are long videos hard?\\
+$\rightarrow$ 因为 token budget 固定，而视频信息量随时长近似线性增长。\\[3pt]
+\textbf{Why} doesn't a longer context solve this?\\
+$\rightarrow$ 因为注意力会被大量低价值帧稀释，关键因果事件反而更难保留。\\[3pt]
+\textbf{Why} does naive compression still fail?\\
+$\rightarrow$ 因为当前压缩大多保留``看到了什么''，却丢掉``什么时候发生、因谁而起、后面会影响什么''。\\[3pt]
+\textbf{Root cause:}\\
+现有 video VLM 本质上仍把视频当成 frame bag，而不是 state transition process。
+\end{whybox}
+
+\subsection{核心假设}
+
+如果让 VLM 学会显式维护 \texttt{event state memory}，
+并把后续推理建立在``事件状态的演化''而不是``帧级摘要''上，
+那么它在长视频上的性能会比单纯扩 context 更稳、更便宜，也更可解释。
+
+\subsection{方法草案}
+
+\begin{enumerate}[leftmargin=2em]
+  \item 设计 \texttt{state slots}，每个 slot 表示一个正在演化的事件或实体状态。
+  \item 引入三类动作：\texttt{write}、\texttt{update}、\texttt{rewind}。
+  \item 构造 ``same frames, different order'' 的反事实视频，让模型必须学习顺序与因果。
+  \item 对 memory 做 question-conditioned credit assignment，逼迫模型只保留未来问答真正需要的状态。
+  \item 先用小模型验证 memory 结构本身带来的增益，再迁移到大模型。
+\end{enumerate}
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=2em]
+  \item 主 benchmark 用 \href{https://arxiv.org/abs/2405.21075}{Video-MME} 和 \href{https://arxiv.org/abs/2406.04264}{MLVU}。
+  \item 重点看长视频分桶，不只看 overall score。
+  \item 增加 order-sensitive 和 causal-sensitive stress test。
+  \item 额外评估 memory trace 是否可解释：错误答案时，memory 中是否早已丢掉关键事件。
+\end{enumerate}
+\end{expbox}
+
+\subsection{为什么 high impact}
+
+长视频是 agent、监控、手术录像、教育录像、会议分析、机器人长期任务理解的共同底层能力。
+如果这个方向做出来，它不会只影响一个 benchmark，而会影响所有需要在时间上持续建模世界的 VLM 系统。
+
+\begin{riskbox}
+风险在于 memory 机制可能只是在架构上增加复杂度，却没有真的学到 state abstraction。\\
+\textbf{Mitigation:}
+先做两个最小闭环：
+\begin{enumerate}[leftmargin=2em]
+  \item 用合成视频验证模型是否真的学会``顺序敏感''，而不是更强 OCR。
+  \item 用可控小游戏环境生成视频，让 ground-truth state 可直接监督。
+\end{enumerate}
+\end{riskbox}
+
+\newpage
+\section{Proposal 2: Geometry-Grounded VLM}
+
+\begin{proposalbox}[让 VLM 从``看起来懂空间''变成``真的会算空间'']{propTwo}
+\textbf{一句话摘要：}
+很多 VLM 在图像问答里像是会空间推理，
+但它们真正缺的是 metric-aware 的几何表征，
+所以一旦任务需要可执行的 3D 推理，性能会快速坍塌。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} do current VLMs look strong on many visual tasks?\\
+$\rightarrow$ 因为大量 benchmark 只要求语义识别，不要求可执行的空间量化。\\[3pt]
+\textbf{Why} do they fail in robotics, AR, and navigation?\\
+$\rightarrow$ 因为这些任务需要距离、深度、遮挡、可达性、相对尺寸等可计算关系。\\[3pt]
+\textbf{Why} can't language CoT fix this directly?\\
+$\rightarrow$ 因为空间错误主要不是 reasoning format 问题，而是输入表征里根本没有稳定几何量。\\[3pt]
+\textbf{Root cause:}\\
+当前 VLM 学到的是 image-text correlation，不是 geometry-faithful world representation。
+\end{whybox}
+
+\subsection{核心假设}
+
+如果把 3D geometry 明确提升为中间表征，并让语言推理建立在几何对象与关系图之上，
+VLM 才可能真正获得可转移的 spatial reasoning 能力。
+
+\subsection{方法草案}
+
+\begin{enumerate}[leftmargin=2em]
+  \item 从图像或多视角输入中构建轻量级 scene graph、point tokens、object-centric geometry tokens。
+  \item 所有空间问题都先转换成对几何对象的引用，再进行语言推理。
+  \item 构造几何反事实数据，例如保持语义基本不变，只改距离、朝向、遮挡或大小关系。
+  \item 对输出施加 \texttt{geometry consistency loss}，要求答案与中间几何表征一致。
+\end{enumerate}
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=2em]
+  \item 基础评估可参考 \href{https://arxiv.org/abs/2401.12168}{SpatialVLM} 一类的 3D spatial reasoning 设定。
+  \item 在合成场景中测量距离估计误差、相对大小排序错误率、遮挡判断准确率。
+  \item 在下游场景验证，例如机器人 pick-and-place、室内导航、AR 指令理解。
+\end{enumerate}
+\end{expbox}
+
+\subsection{为什么 high impact}
+
+一旦空间推理从``描述层''走到``执行层''，
+VLM 才真正连接到 embodied AI、机器人操作、工业检测和真实世界代理。
+这是从 demo intelligence 走向 operational intelligence 的关键一步。
+
+\begin{riskbox}
+几何中间层可能带来额外噪声，尤其是单图 3D 恢复不稳定时。\\
+\textbf{Mitigation:}
+先做 object-centric 相对几何，再逐步过渡到绝对 metric geometry；先证明关系正确，再追求尺度也准。
+\end{riskbox}
+
+\newpage
+\section{Proposal 3: Retrieval-Calibrated Expert VLM}
+
+\begin{proposalbox}[面向医学/科学的证据仲裁型多模态系统]{propThree}
+\textbf{一句话摘要：}
+专家场景下，真正难的不是``图像 + 文本一起输入''，
+而是视觉证据、外部知识、任务规范三者经常冲突，
+现有 VLM 缺少一个显式的证据仲裁机制。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} do general-purpose VLMs drop sharply in expert domains?\\
+$\rightarrow$ 因为这些任务的答案通常不能只从图像里直接读出。\\[3pt]
+\textbf{Why} is domain fine-tuning alone insufficient?\\
+$\rightarrow$ 因为专家知识会变化、会版本化，而且很多关键规则本来就应该留在参数外部。\\[3pt]
+\textbf{Why} is multimodal RAG harder than text RAG?\\
+$\rightarrow$ 因为视觉所见与检索到的文本证据可能冲突，而现有模型通常没有明确地区分``我看到了什么''和``外部资料说了什么''。\\[3pt]
+\textbf{Root cause:}\\
+当前 VLM 没有把答案看作一个由多源证据共同裁决的过程，而是在做 end-to-end next-token imitation。
+\end{whybox}
+
+\subsection{核心假设}
+
+如果把视觉发现、检索证据、任务规范拆成三个显式证据层，
+并训练模型进行跨证据一致性判断与 selective answering，
+那么专家型多模态系统会显著更可靠。
+
+\subsection{方法草案}
+
+\begin{enumerate}[leftmargin=2em]
+  \item 模型先生成 \texttt{visual findings}，明确区分可见事实和不可见推断。
+  \item Retriever 只根据 findings 和 query 去抓取规范、论文、病例知识库。
+  \item 构建 \texttt{evidence graph}，边表示支持、冲突、缺失、需要补充证据。
+  \item 引入 \texttt{answer / abstain / request-more-context} 三路决策。
+  \item 在训练中加入冲突证据对，让模型学会在视觉证据与文本先验矛盾时优先报告不确定性。
+\end{enumerate}
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=2em]
+  \item 用 \href{https://arxiv.org/abs/2406.19593}{SK-VQA} 这类 context-augmented multimodal setting 做基础评估。
+  \item 医疗场景可参考 \href{https://arxiv.org/abs/2405.03162}{Med-Gemini} 暴露出来的问题，尤其是 3D CT 报告和临床可接受性。
+  \item 除了最终准确率，还要评估 evidence attribution、citation faithfulness、校准误差和 abstention quality。
+\end{enumerate}
+\end{expbox}
+
+\subsection{为什么 high impact}
+
+这是最接近真实落地价值的 VLM 方向之一。
+医疗、科学助手、专利检索、工业检修、法律图文材料审阅，
+本质上都不是``识图''，而是``视觉证据参与知识密集型判断''。
+
+\begin{riskbox}
+风险在于系统最后退化为更复杂的 RAG pipeline，但不产生新的学习机制。\\
+\textbf{Mitigation:}
+关键不是只搭系统，而是把``证据冲突仲裁''做成新的训练目标和 benchmark，
+逼迫模型学习何时相信图像、何时相信检索、何时必须 abstain。
+\end{riskbox}
+
+\newpage
+\section{Proposal 4: Context-to-Adapter VLM}
+
+\begin{proposalbox}[把 many-shot multimodal ICL 变成临时适配能力]{propFour}
+\textbf{一句话摘要：}
+many-shot multimodal ICL 说明长上下文里藏着巨大的适配潜力，
+但现在的用法太粗糙了。
+真正的机会不是塞更多示例，而是把示例``编译''为临时任务适配器。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} is many-shot ICL important?\\
+$\rightarrow$ 因为它证明模型在不更新参数的情况下，仍然能从大量示例里获得显著增益。\\[3pt]
+\textbf{Why} are current methods still inefficient?\\
+$\rightarrow$ 因为 demonstration 只是被串接进 prompt，没有被压缩成持久、可复用、任务相关的内部状态。\\[3pt]
+\textbf{Why} does this become a bottleneck?\\
+$\rightarrow$ 因为长 prompt 成本高、延迟高，而且示例一换，模型就得重新读一遍教材。\\[3pt]
+\textbf{Root cause:}\\
+当前 ICL 仍是 retrieval-and-read，而不是 retrieval-and-compile。
+\end{whybox}
+
+\subsection{核心假设}
+
+如果把 many-shot multimodal context 显式蒸馏成一个临时 adapter、latent task sketch 或 routing state，
+模型就能更便宜、更稳定地适应新 domain，同时保留 ICL 的免微调优势。
+
+\subsection{方法草案}
+
+\begin{enumerate}[leftmargin=2em]
+  \item 先检索大量 demonstration，但不直接把它们完整送入主模型。
+  \item 用一个 \texttt{context compiler} 把这些示例压缩成临时 task adapter，例如 prefix state、LoRA-like ephemeral weights 或 latent task program。
+  \item 主模型只消费``编译结果 + 少量代表性样例''，而不是完整原始示例。
+  \item 训练目标直接优化给定大量示例后的 adaptation quality，而不是普通 next-token loss。
+  \item 加入 uncertainty-aware example selection，减少无关示例对临时适配器的污染。
+\end{enumerate}
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=2em]
+  \item 以 \href{https://arxiv.org/abs/2405.09798}{Many-Shot In-Context Learning in Multimodal Foundation Models} 为出发点，关注从 few-shot 到近 2000 例的 scaling 区间。
+  \item 比较三种成本曲线：原始 many-shot ICL、full fine-tuning、context-to-adapter。
+  \item 任务覆盖分类、VQA、定位、医疗影像、遥感、分子图像等跨域设置。
+  \item 重点汇报 accuracy-latency-cost 三维 trade-off，而不是只报一个精度数。
+\end{enumerate}
+\end{expbox}
+
+\subsection{为什么 high impact}
+
+这条线最有机会改变多模态模型的部署范式。
+它指向一个现实命题：能否让 VLM 在不重新训练大模型的前提下，
+快速适配一个新任务、新医院、新工厂、新卫星数据源。
+
+\begin{riskbox}
+临时 adapter 可能学到的只是 prompt compression，而不是 task adaptation。\\
+\textbf{Mitigation:}
+做强分布外测试：训练时给的是某类任务 demonstration，
+测试时要求迁移到结构相近但表面形式不同的新任务，
+验证其是否真的学到了可迁移 task program。
+\end{riskbox}
+
+\newpage
+\section{Proposal 5: Intervention-Centric Benchmark and Training}
+
+\begin{proposalbox}[重新定义``真的会看图'']{propFive}
+\textbf{一句话摘要：}
+如果 benchmark 本身奖励 shortcut，那么整个领域都会被带偏。
+高影响的一步不是再堆一个更大的模型，
+而是发明一套让``真假多模态能力''彻底分家的评测与训练框架。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} do many VLM scores look strong but break in real use?\\
+$\rightarrow$ 因为 benchmark 往往允许语言先验、OCR shortcut、选项猜测、数据泄漏等旁门左道。\\[3pt]
+\textbf{Why} is this worse than one model failing?\\
+$\rightarrow$ 因为 benchmark 决定整个社区在优化什么。\\[3pt]
+\textbf{Why} isn't cleaning the dataset enough?\\
+$\rightarrow$ 因为只要没有 intervention，模型仍可能通过统计相关性而不是因果依赖来做题。\\[3pt]
+\textbf{Root cause:}\\
+当前领域对``模型到底因为什么答对''缺乏强识别力。
+\end{whybox}
+
+\subsection{核心假设}
+
+只有当 benchmark 包含系统性的图像干预、文本干预、检索干预、选项干预，
+并能明确测出``答案是否随真正因果因素而改变''时，
+我们才能开始真正训练 grounded VLM。
+
+\subsection{方法草案}
+
+\begin{enumerate}[leftmargin=2em]
+  \item 以 \href{https://arxiv.org/abs/2311.16502}{MMMU} 为 base setting，但进一步采用 \href{https://arxiv.org/abs/2409.02813}{MMMU-Pro} 那种更严格的思路，系统消除 text-only shortcut。
+  \item 为每个样本构造至少一组 intervention pair：图像改了但文本不改；文本改了但图像不改；检索上下文改了但核心视觉事实不改；选项扰动使猜测失效。
+  \item 指标不只看 accuracy，还看 \texttt{intervention consistency}、\texttt{causal sensitivity}、\texttt{spurious invariance}。
+  \item 在 benchmark 之上再做训练方法：对同一问题的 intervention pair 施加对比式 grounded training，让模型只对真正因果证据敏感。
+\end{enumerate}
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=2em]
+  \item 先在 MMMU / MMMU-Pro 上复现实证，确认现有模型的 shortcut 类型。
+  \item 再构建新的 intervention split，并测不同模型在因果敏感性上的排名是否发生重排。
+  \item 用 \href{https://arxiv.org/abs/2406.11839}{mDPO} 暴露出的 unconditional preference problem 作为训练侧动机，
+  测试新训练目标能否减少``忽略图像条件''的现象。
+\end{enumerate}
+\end{expbox}
+
+\subsection{为什么 high impact}
+
+这类工作有明显的 field-shaping potential。
+它不仅能发 benchmark paper，还能影响后续 alignment、data curation、RL、RAG、reasoning 的评价标准。
+高影响论文很多时候不是``最强模型''，而是``改写了别人怎么证明自己强''。
+
+\begin{riskbox}
+如果只停留在 benchmark，容易被看成评测工程。\\
+\textbf{Mitigation:}
+必须把 benchmark 和训练方法绑定起来，形成一个闭环：
+先用 intervention 暴露 shortcut，再用 intervention-aware training 消掉 shortcut。
+\end{riskbox}
+
+\section*{推荐切入点}
+
+如果目标是``high impact + 能讲出强 why-chain''，我最推荐三个切入点：
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Proposal 1}：适合 long-video / agent / world understanding，大问题、大空间，但工程难度高。
+  \item \textbf{Proposal 3}：最接近现实价值，最容易讲 application story，尤其适合医疗、科学、工业知识系统。
+  \item \textbf{Proposal 5}：最有可能做出 field-shaping 工作，尤其适合 benchmark + method + theory positioning 路线。
+\end{enumerate}
+
+\section*{参考依据}
+
+\begin{enumerate}[leftmargin=2em]
+  \item \href{https://arxiv.org/abs/2311.16502}{MMMU}.
+  \item \href{https://arxiv.org/abs/2409.02813}{MMMU-Pro}.
+  \item \href{https://arxiv.org/abs/2405.21075}{Video-MME}.
+  \item \href{https://arxiv.org/abs/2406.04264}{MLVU}.
+  \item \href{https://arxiv.org/abs/2401.12168}{SpatialVLM}.
+  \item \href{https://arxiv.org/abs/2405.09798}{Many-Shot In-Context Learning in Multimodal Foundation Models}.
+  \item \href{https://arxiv.org/abs/2406.19593}{SK-VQA}.
+  \item \href{https://arxiv.org/abs/2405.03162}{Advancing Multimodal Medical Capabilities of Gemini}.
+  \item \href{https://arxiv.org/abs/2406.11839}{mDPO}.
+\end{enumerate}
+
+\end{document}

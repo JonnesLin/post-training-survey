@@ -1,0 +1,604 @@
+% === Chapter 8: Conclusion ===
+\section{Conclusion}
+\label{sec:conclusion}
+
+通过七条问题驱动的演化线程，
+本文系统地梳理了 LLM/VLM post-training 从早期 instruction tuning
+到当代 RL-based reasoning 训练的完整发展脉络。
+本章不重复各线程的技术细节，
+而是从宏观视角提炼跨线程的共性趋势、
+识别反复出现的 meta-pattern，
+并展望 post-training 领域的未来演化方向。
+
+\subsection{宏观趋势}
+\label{sec:conclusion:trends}
+
+回顾七条线程的演化历程，可以识别出七条贯穿全局的宏观趋势。
+
+\paragraph{趋势一：从 supervised imitation 到 reinforcement learning。}
+Post-training 的技术重心经历了从 SFT 到 RL 的系统性迁移。
+在早期阶段，SFT 是 post-training 的绝对主力 ---
+FLAN \cite{wei2022flan}、InstructGPT \cite{ouyang2022instructgpt} 的 SFT 阶段、
+以及 Alpaca \cite{taori2023alpaca} 等开源项目均以 supervised learning 为核心。
+\crossref{1}{sec:sft}
+RLHF 的引入（\crossref{2}{sec:pref}）标志着 post-training 进入了优化人类偏好的阶段，
+但早期 RLHF 仍高度依赖 SFT warm start，RL 更像是一个"微调的微调"。
+真正的转折点出现在 reasoning 线程（\crossref{4}{sec:thread4}）：
+OpenAI o1 \cite{openai2024o1} 和 DeepSeek-R1 \cite{deepseek2025r1}
+展示了大规模 RL 训练可以从模型中涌现出全新的推理能力 ---
+这些能力无法通过 SFT 对已有数据的模仿获得，
+而是通过 RL 的探索-利用（exploration-exploitation）机制自主发现的。
+GRPO \cite{shao2024grpo} 等 compute-efficient RL 算法的出现
+（\crossref{7}{sec:efficiency:compute-rl}）进一步降低了 RL 训练的门槛，
+使得 RL-first 的 post-training paradigm 从少数头部实验室扩展到更广泛的社区。
+
+\noindent
+这一趋势的深层逻辑是：
+SFT 的能力上界受限于训练数据中人类示范的质量 ---
+模型最多只能学到人类标注者能做到的事情。
+而 RL 通过环境反馈（reward signal）允许模型探索超越人类示范的策略空间，
+其能力上界理论上仅受 reward signal 质量的约束。
+从 "imitation ceiling" 到 "reward-guided exploration" 的转变，
+是 post-training 从"教模型做人类已经会做的事"
+演化为"让模型发现人类尚未掌握的策略"的根本性转向。
+
+\paragraph{趋势二：从 text-only 到 multimodal。}
+Post-training 技术最初完全在文本模态内发展，
+但几乎每一项核心技术都经历了向多模态场景的迁移：
+SFT 的 instruction tuning 被 LLaVA \cite{liu2023llava} 扩展为
+visual instruction tuning（\crossref{5}{sec:t5}）；
+RLHF 被 RLHF-V \cite{sun2023rlhfv} 应用于减少 multimodal hallucination；
+DPO 被 LLaVA-RLHF \cite{sun2024llava-rlhf} 引入 VLM 的偏好优化。
+这种跨模态迁移并非简单的技术搬运 ---
+多模态场景引入了视觉接地（visual grounding）、
+跨模态一致性（cross-modal consistency）等新维度的挑战，
+推动了原有技术的实质性扩展和改进。
+
+\paragraph{趋势三：从 human feedback 到 automated \& verifiable feedback。}
+Feedback 信号的来源经历了三代演变。
+第一代：纯人类标注（InstructGPT 的 RLHF）---
+质量高但成本高昂、难以规模化。
+第二代：AI feedback ---
+Constitutional AI \cite{bai2022constitutional} 让模型自我批评，
+RLAIF \cite{lee2023rlaif} 用 AI 生成偏好标注
+（\crossref{7}{sec:efficiency:synthetic}），
+Zephyr \cite{tunstall2023zephyr} 实现了完全零人工标注的 alignment pipeline。
+\crossref{3}{sec:t3-safety}
+第三代：verifiable reward ---
+在数学和编程等可自动验证正确性的领域，
+reward 直接基于 ground truth（答案正确性、代码通过测试用例等），
+完全绕过了 reward model 和人类标注。
+GRPO \cite{shao2024grpo} 和 DeepSeek-R1 \cite{deepseek2025r1}
+在 verifiable reward 上的成功（\crossref{4}{sec:thread4}）
+引发了一个根本性问题：
+\textbf{verifiable reward 的边界在哪里？}
+哪些能力可以被形式化为可验证的 reward，哪些不可以？
+
+\paragraph{趋势四：从 single-turn instruction following 到 agentic capability。}
+模型的目标行为从"回答单个问题"
+演化为"在环境中完成多步骤复杂任务"。
+早期 SFT 关注的是单轮 instruction following（\crossref{1}{sec:sft}），
+随后扩展到多轮对话（LIMA 的 30 条对话示例的消融实验即证明了这一方向的重要性，
+\crossref{7}{sec:efficiency:data-selection}），
+再到 tool use（Toolformer \cite{schick2023toolformer}，\crossref{6}{sec:thread6}），
+最终演化为完整的 agentic behavior ---
+包括任务规划、工具选择、错误恢复和长期记忆管理。
+这一演化方向对 post-training 提出了新的数据和评估挑战：
+agent 的训练数据需要包含 trajectories（而非独立的 QA pairs），
+评估需要在交互式环境中进行（而非静态的 benchmark）。
+
+\paragraph{趋势五：从 prohibitive cost 到 democratized access。}
+Thread~7 的效率技术使得 post-training 从大型实验室的专属领域
+扩展为整个研究社区和工业界都能参与的活动。
+LoRA \cite{hu2022lora} 将参数量降低 10,000$\times$，
+QLoRA \cite{dettmers2023qlora} 使 65B 模型在单卡 48GB GPU 上可训
+（\crossref{7}{sec:efficiency:foundation}），
+Self-Instruct \cite{wang2023selfinstruct} 和 UltraChat \cite{ding2023ultrachat}
+将数据获取成本降低数个数量级，
+GRPO \cite{shao2024grpo} 去掉了 PPO 中最占资源的 value model。
+这一"efficiency stack"的累积效应是深远的 ---
+它不仅降低了进入门槛，还加速了整个领域的迭代速度，
+形成了正反馈循环：
+更低的成本 $\rightarrow$ 更多的研究参与者 $\rightarrow$
+更快的方法创新 $\rightarrow$ 更高效的技术 $\rightarrow$ 更低的成本。
+
+\paragraph{趋势六：Thinking Models 作为默认范式。}
+2025--2026 年最显著的范式转变是推理能力从``专用模型的特殊能力''
+演变为``通用模型的默认模式''（\crossref{4}{sec:t4-thinking-models}）。
+OpenAI o3 系列 \cite{openai2025o3}、DeepSeek V3.1/V3.2 \cite{deepseek2025v32}
+和 Qwen3 \cite{yang2025qwen3}
+都将推理作为可切换的模式内置于通用模型之中。
+这一转变对 post-training 流水线产生了深刻影响：
+SFT 不再是最终步骤而是推理能力冷启动的基础（\crossref{1}{sec:sft:2025}），
+RLVR 成为获取推理能力的核心训练方法（\crossref{2}{sec:pref:rlvr}），
+thinking mode fusion 成为 post-training 流水线中的新环节。
+
+\paragraph{趋势七：Computer Use 与 Agentic 前沿。}
+2024--2025 年，LLM agent 从调用预定义 API 演进到
+直接操作计算机图形界面（\crossref{6}{sec:t6-computer-use}）。
+Claude Computer Use \cite{anthropic2024computeruse}、
+OpenAI Operator \cite{openai2025operator} 等系统展示了
+AI agent 在真实桌面和浏览器环境中完成复杂任务的能力。
+与此同时，MCP \cite{anthropic2024mcp} 等标准化协议和
+Agent SDK 的涌现正在将 agent 从实验原型推向工业部署。
+这一趋势对 post-training 提出了全新的训练数据和评估挑战：
+agent 的训练需要 GUI 交互轨迹而非传统的 text-only QA pairs，
+评估需要在真实软件环境中进行端到端测试。
+
+\subsection{跨线程的 Meta-Pattern}
+\label{sec:conclusion:meta}
+
+在七条宏观趋势之下，
+七条线程的演化过程中反复出现了若干结构性的 meta-pattern。
+这些 pattern 不限于某一线程，
+而是贯穿 post-training 领域的共性规律。
+
+\paragraph{Pattern 1: Simplification Through Reformulation。}
+几乎每条线程都经历了"复杂方法被更简洁的重构取代"的过程：
+\begin{itemize}[leftmargin=2em]
+  \item Thread~2: PPO（4 个模型 + 复杂训练循环）
+    $\rightarrow$ DPO（重构为 classification loss，2 个模型）。
+  \item Thread~4: PPO + value model + GAE
+    $\rightarrow$ GRPO（去掉 value model，group-relative reward）。
+  \item Thread~7: Full fine-tuning（全量参数更新）
+    $\rightarrow$ LoRA（低秩分解，0.01\% 参数）。
+\end{itemize}
+这些简化并非通过牺牲性能实现的 ---
+DPO 匹配或超过 PPO，GRPO 超过 PPO，LoRA 匹配 full fine-tuning ---
+而是通过\textbf{数学上的等价变换或低秩近似}
+发现了原始问题中冗余的计算结构。
+这一 pattern 暗示了一个更深层的规律：
+post-training 中许多看似复杂的问题，
+其有效信息维度（effective dimensionality）远低于表面复杂度。
+
+\paragraph{Pattern 2: Data Quality $\gg$ Data Quantity。}
+多条线程的证据一致支持"数据质量远比数量重要"的结论：
+\begin{itemize}[leftmargin=2em]
+  \item Thread~1/7: LIMA 用 1,000 条高质量数据匹配 RLHF 模型的性能。
+  \item Thread~7: AlpaGasus 用 9K 高质量子集超过了 52K 全量 Alpaca 数据。
+  \item Thread~7: Phi-1 用 textbook-quality 合成数据训练 1.3B 模型超过
+    10$\times$ 更大的模型。
+  \item Thread~7: Muennighoff et al.\ 发现 perplexity-based 质量过滤
+    比简单去重更有效。
+\end{itemize}
+这一 pattern 与 LoRA 的低秩发现形成了优雅的呼应：
+如果 alignment 所需的"信息量"本身就很小（Superficial Alignment Hypothesis），
+那么少量高质量数据自然就足够了 ---
+增加低质量数据只是在高维空间中引入噪声，
+不会增加有效信息量。
+
+\paragraph{Pattern 3: The Teacher $\rightarrow$ Self-Improvement Loop。}
+Post-training 技术正在从"依赖外部 teacher"向"模型自我改进"演化：
+\begin{itemize}[leftmargin=2em]
+  \item 数据生成：Self-Instruct（用模型自身生成训练数据）
+    $\rightarrow$ Humpback（用模型为 web 文本生成 instruction）
+    $\rightarrow$ Self-Play（模型与自身博弈生成 preference data）。
+  \item Feedback：Human feedback $\rightarrow$ AI feedback（RLAIF, CAI）
+    $\rightarrow$ Self-reward（模型评估自身输出）。
+  \item Reasoning：SFT 模仿 CoT $\rightarrow$
+    RL 自主发现推理策略（DeepSeek-R1 的"aha moment"）。
+\end{itemize}
+这一 pattern 揭示了 post-training 的终极方向：
+\textbf{减少对外部资源（人类标注、强模型 API）的依赖，
+让模型通过自我交互和环境反馈持续改进}。
+但这同时引入了新的风险 ---
+self-improvement loop 可能放大模型已有的偏差（bias amplification），
+或者收敛到局部最优而非全局最优（mode collapse）。
+
+\paragraph{Pattern 4: Cross-Thread Technique Migration。}
+本文的跨线程引用结构揭示了技术迁移的高度活跃性：
+Reward modeling 的思想从 Thread~2 流向 Thread~4（process reward model），
+再通过 GRPO 回流到 Thread~2；
+SFT 的 instruction tuning 从 Thread~1 流向 Thread~5（LLaVA）和 Thread~6（Toolformer）；
+Thread~7 的 LoRA 赋能了所有其他线程的低成本训练。
+2025 年 RLVR 范式的兴起提供了一个新的典型案例：
+RLVR 的思想在 Thread~2 中被系统化（DAPO \cite{yu2025dapo}），
+在 Thread~4 中被大规模应用（reasoning training），
+随后迅速迁移到 Thread~5（R1-VL \cite{zhang2025r1vl}、MM-Eureka \cite{meng2025mmeureka}），
+形成了 T2 $\rightarrow$ T4 $\rightarrow$ T5 的清晰迁移路径。
+这种密集的技术流动意味着 \textbf{post-training 本质上是一个高度互联的研究网络，
+而非若干独立的研究方向}。
+任何一条线程的突破都可能在其他线程产生连锁效应 ---
+例如 GRPO 在 Thread~7 中作为 efficiency 创新被提出，
+但其最大影响却体现在 Thread~4（DeepSeek-R1 的 reasoning 训练）。
+
+\paragraph{Pattern 5: Evaluation Bottleneck。}
+贯穿所有线程的一个系统性挑战是评估方法的滞后：
+\begin{itemize}[leftmargin=2em]
+  \item Thread~2: Reward model overoptimization ---
+    proxy reward 持续上升但 true reward 下降。
+  \item Thread~3: Safety benchmark 无法覆盖长尾的 jailbreak 策略。
+  \item Thread~4: 静态 reasoning benchmark 无法评估模型的探索性推理能力。
+  \item Thread~6: Agent 评估需要交互式环境，
+    现有 benchmark 覆盖面远不如 text-only 评估完善。
+\end{itemize}
+Training 方法的快速迭代与 evaluation 方法的相对滞后之间的 gap
+是 post-training 领域面临的最重要的系统性挑战之一。
+
+\subsection{未来方向}
+\label{sec:conclusion:future}
+
+基于上述趋势和 meta-pattern，
+我们展望 post-training 领域的几个关键未来方向。
+
+\paragraph{方向一：Unified Post-Training Pipeline。}
+当前 post-training 通常是多阶段串行的（SFT $\rightarrow$ RM $\rightarrow$ RL，
+或 SFT $\rightarrow$ DPO），
+每个阶段有独立的数据、超参数和优化目标。
+一个重要的开放问题是：
+\textbf{能否设计统一的单阶段 post-training 框架，
+同时优化 instruction following、safety、reasoning 等多个目标？}
+ORPO \cite{hong2024orpo}（合并 SFT 和 DPO 为单阶段）和
+Self-Play \cite{chen2024selfplay}（合并 data generation 和 preference optimization）
+在这一方向上迈出了初步的一步，
+但距离真正的统一框架仍有很长的路要走。
+
+\paragraph{方向二：Extending Verifiable Reward --- 从二分法到一致性连续谱。}
+GRPO 和 DeepSeek-R1 的成功高度依赖 verifiable reward
+（数学答案正确性、代码执行通过测试等）。
+但 post-training 中大量重要的能力维度 ---
+创意写作、开放式对话、价值观对齐 ---
+没有自然的 verifiable reward。
+传统的思路将 reward signal 划分为``可验证''与``不可验证''两类，
+但这种二分法忽略了一个关键的中间地带：
+\textbf{一致性检验（consistency verification）构成了从外部验证到纯内部信号的连续谱}——
+外部一致性（verifiable reward，答案 $=$ ground truth）
+$\rightarrow$ evaluator 一致性（reward model 的 preference judgment）
+$\rightarrow$ 内部一致性（模型多次采样的 self-consistency）。
+近两年最活跃的探索正集中在这个谱的内部一致性端。
+
+\textbf{Self-consistency as reward} 的演化链揭示了这一方向的成熟过程。
+ScPO \cite{prasad2024scpo} 率先将 self-consistency 从推理时的投票机制
+提升为训练时的偏好信号——
+通过多次采样识别最一致（winner）和最不一致（loser）的 response，
+构造 preference pairs 进行优化，在 GSM8K 和 MATH 上接近 supervised 性能。
+然而，SRT \cite{sheikh2025srt} 发现了一个关键的失败模式：
+当模型仅以 majority voting 的一致性作为 reward 时，
+会出现 \textbf{consistency collapse}——模型学会最大化一致性而非正确性，
+生成日益统一但可能错误的答案，
+本质上是一种新形式的 reward hacking。
+Co-Rewarding \cite{corewarding2025} 通过引入 cross-view supervision 缓解了这一问题：
+多个模型视角之间的交叉验证打破了单一模型 self-reinforcing 的循环。
+CoVo \cite{zhang2025covo} 则提出了更精细的双信号设计——
+同时度量推理路径的 \textit{consistency}（中间状态向最终答案的收敛程度）
+和 \textit{volatility}（向替代答案的偏离程度），
+在无外部标签的条件下达到或超过 supervised RL 的性能。
+
+\noindent
+在 self-consistency 路径之外，
+另有两条替代路线值得关注。
+JEPO \cite{jepo2025} 将 chain-of-thought 视为 latent variable，
+通过优化 Jensen's evidence lower bound 完全绕过了 verifiable reward 的需求——
+在数学任务上匹配基于 verifiable reward 的 RL，在开放域任务上显著超越。
+RLPR \cite{yu2025rlpr} 则利用模型自身对 reference answer 的 token probability 作为 reward，
+以内部 confidence 信号替代外部验证器。
+
+\noindent
+这一方向的核心开放问题是：
+\textbf{统一的 reward-free RL 框架尚不存在}。
+ScPO/CoVo 依赖采样一致性，JEPO 依赖 ELBO 近似，RLPR 依赖 token probability——
+这些方法在不同任务类型上各有优劣，
+但缺乏一个将它们统一在同一数学框架下的理论。
+更重要的是，对于 open-ended creative tasks（如创意写作、价值观对话），
+即使是 self-consistency 信号也不天然适用——
+创造性回答的``一致性''与``质量''之间的关系远比数学推理复杂。
+
+\paragraph{方向三：Post-Training for Continual Learning。}
+当前 post-training 通常是一次性的 ---
+模型训练完成后部署，不再更新。
+但现实世界持续产生新知识、新需求和新的 safety 威胁。
+\textbf{如何实现持续的 post-training（continual post-training）
+而不遗忘此前习得的能力？}
+LoRA 的模块化特性为此提供了天然的框架 ---
+不同时间点、不同能力维度的 LoRA adapter 可以独立训练、组合和替换 ---
+但 adapter 之间的干扰（interference）和组合泛化（compositional generalization）
+仍是未解决的挑战。
+
+\paragraph{方向四：Post-Training 的理论基础。}
+尽管 post-training 在实践中取得了巨大成功，
+其理论理解仍然相当薄弱。
+核心的开放理论问题包括：
+（1）LoRA 的低秩假设何时成立、何时失效？
+其与 pre-training 数据分布和下游任务之间的关系是什么？
+（2）DPO 和 RLHF 在什么条件下是等价的？
+现有的等价性证明依赖于强假设（如 Bradley-Terry model），
+在实际场景中这些假设的违反会带来多大的 gap？
+（3）Reward model overoptimization 的 fundamental limit 是什么？
+是否存在不依赖 reward model 准确性的 alignment 方法？
+（4）Self-improvement loop 的收敛性保证 ---
+模型自我训练在什么条件下收敛到更好的解，
+在什么条件下导致 mode collapse 或 bias amplification？
+
+\paragraph{方向五：Safety-Aware Efficiency。}
+Thread~3（Safety）和 Thread~7（Efficiency）目前在很大程度上是独立发展的，
+但它们之间存在潜在的 tension：
+efficiency 技术（如合成数据、蒸馏、LoRA）
+是否会无意中削弱 safety alignment 的效果？
+LoRA 的低秩约束是否会限制模型表达复杂 safety boundary 的能力？
+蒸馏过程是否会丢失 teacher 模型中精细的 safety behavior？
+\textbf{设计在保持效率的同时不牺牲 safety 的 post-training 方法}
+是一个既有实际意义又有理论深度的研究方向。
+
+\paragraph{方向六：Adjustable Reasoning as a Service。}
+趋势六中 thinking models 的普及引出了一个新的系统设计问题：
+\textbf{如何让用户在推理深度与响应延迟之间动态权衡？}
+Kimi k1.5 的 long2short 训练 \cite{moonshot2025kimi} 和
+Qwen3 的 thinking mode fusion \cite{yang2025qwen3}
+已经展示了在同一模型中实现可调推理预算的可行性。
+这一问题的核心挑战已被实证清晰地定义：
+Chen et al.\ \cite{chen2025underthinking} 系统地量化了
+underthinking（过早终止推理，错失正确路径）
+与 overthinking（冗余推理，浪费计算资源）两种失败模式的分布特征；
+Sui et al.\ \cite{sui2025stopoverthinking} 的综述
+将 efficient reasoning 的方法论系统化为
+model-based（训练阶段优化模型简洁性）、
+reasoning output-based（推理时动态缩减步骤）和
+input prompt-based（通过 prompt 属性控制效率）三类策略。
+
+\noindent
+在 post-training 层面，adaptive compute allocation 正在从概念走向具体实现。
+AdaptThink \cite{zhang2025adaptthink} 训练模型自主选择
+Think（深度推理）或 NoThink（直接回答）模式——
+通过 RL reward 强化模式选择的准确性，
+使模型在简单问题上节省推理 token 而在困难问题上充分展开。
+Self-Backtracking \cite{selfbacktracking2025}
+则训练了一种更精细的控制能力：
+模型学会在推理过程中插入 backtrack token，
+主动回溯已发现有误的推理路径并从正确的分支重新开始——
+这是一种\textit{错误恢复}机制，
+而非简单的 early stopping 或 token budgeting。
+结合方向十中 SelfBudgeter \cite{selfbudgeter2025}
+和 AutoThink \cite{tu2025autothink} 的工作，
+adaptive reasoning 的技术路线已覆盖三个层次：
+\textit{是否推理}（AdaptThink）、
+\textit{推理多深}（SelfBudgeter/AutoThink）、
+\textit{推理出错怎么办}（Self-Backtracking）。
+
+\noindent
+未来的方向指向系统层面的整合：
+reasoning as a metered resource ---
+在 inference 服务层面将 ``thinking tokens'' 作为独立的计算资源进行定价和调度，
+使得不同应用场景可以根据 latency-accuracy tradeoff 选择最优的推理预算。
+这一方向连接了 Thread~4（reasoning 能力）和 Thread~7（efficiency），
+是 post-training 技术从实验室走向大规模服务部署的关键桥梁。
+
+\paragraph{方向七：From Scalar Metrics to Multi-Dimensional Capability Observability。}
+Post-training 的一个根本瓶颈是 \textbf{``观测问题''}：
+scalar loss 或 scalar reward 隐藏了多维度能力的动态变化。
+当训练 reward 持续上升时，模型可能在某些维度上严重退化，
+但这些退化被 aggregate metric 的均值效应掩盖了。
+
+ProbeLLM \cite{huang2026probellm} 通过层次化 MCTS
+主动搜索模型的失败区域（技术细节见 \S\ref{sec:t5-self-evolving}），
+揭示了即使最强模型也存在大量内在弱点。
+``对齐税''的量化研究进一步证实了这一问题的严重性：
+Lin et al.\ \cite{lin2024alignmenttax} 发现 RLHF 导致不同能力维度以不同速率退化，
+Huang et al.\ \cite{huang2025safetytax} 量化了 safety alignment 使推理能力下降 7--31\%，
+Chen et al.\ \cite{geometric2026alignmenttax} 给出了 alignment cost 的解析表达式。
+Du et al.\ \cite{du2025reshaping}（COLM 2025 Outstanding Paper）
+从机械可解释性角度将 post-training 效果分解为四个维度，
+揭示了维度间的非平凡相互作用。
+
+\noindent
+这一方向有三个子方向值得深入：
+(1) \textbf{IRT-based 能力 profiling}——
+ATLAS \cite{li2025atlas} 用自适应测试将评估 item 数减少 90\%；
+(2) \textbf{动态/对抗性评估}——
+LiveBench \cite{white2024livebench}、AutoDetect \cite{cheng2024autodetect}
+将评估集成到训练循环中；
+(3) \textbf{训练过程中的机制追踪}——
+Wu et al.\ \cite{wu2024featuretracking} 使用 SAE
+追踪 feature-level 的动态变化。
+
+\paragraph{方向八：Diagnostic-Driven Adaptive Training --- ``Train What You Don't Know''。}
+方向七解决了``如何观测能力''，方向八则问：
+\textbf{观测到能力 profile 后，如何自适应地调整训练？}
+核心原则是 \textit{closed loop}：
+诊断弱点 $\rightarrow$ 生成针对性数据 $\rightarrow$ 训练 $\rightarrow$ 重新诊断。
+
+DPE \cite{jia2026dpe} 是这一原则的典型实现
+（技术细节见 \S\ref{sec:t5-self-evolving}）。
+其 $p(1-p)$ 分析揭示了一个关键的信息论原理：
+\textbf{最有信息量的训练信号来自模型``半会半不会''的样本}——
+即模型决策边界处。
+多项独立工作从不同数学框架收敛到同一结论：
+AERO \cite{gao2026aero} 的 entropy-based positioning、
+VCRL \cite{jiang2025vcrl} 的 reward variance proxy、
+DGPO \cite{dai2026dgpo} 的 difficulty-aware reweighting、
+Actor-Curator \cite{gu2026actorcurator} 的 bandit formulation——
+所有方法都收敛于同一原则：
+\textbf{在模型决策边界附近采样以最大化信息增益}。
+
+一个重要的实践问题是 difficulty labels 的时效性。
+Zhang et al.\ \cite{zhang2025adcl} 报告了``Difficulty Shift''现象：
+随着模型能力变化，静态的 difficulty 标签快速过时，
+这进一步论证了 closed-loop diagnostic 的必要性。
+
+\noindent
+上述工作聚焦于 $p \approx 0.5$ 的决策边界区域，
+但 \textbf{高置信度错误}（$p$ 接近 1 但实际错误的样本）
+构成了一个互补的高价值训练信号来源。
+ACE \cite{ace2026} 发现标准 RLVR 对所有错误施加均匀惩罚，
+虽然提升了 pass@1 但收窄了模型的推理边界、降低了多样性。
+ACE 提出 \textbf{asymmetric confidence penalty}——
+对 overconfident errors 施加更强的惩罚，
+迫使模型重新审视自己``确信正确但实际错误''的认知盲区。
+LENS \cite{feng2025lens} 则解决了 GRPO 的一个关键低效问题：
+当一组采样中没有正确答案时，
+标准 GRPO 产生零梯度、浪费了这些 negative samples。
+LENS 通过 confidence-weighted penalty
+从全错样本组中提取训练信号，
+使模型从自己的``彻底失败''中也能学到东西。
+DPE 的 $p(1-p)$ 区域与 ACE/LENS 的高置信错误区域
+共同描绘了一幅更完整的训练信号分布图：
+\textbf{决策边界处提供最大信息增益，
+高置信错误区域则矫正最危险的认知错觉}。
+
+\paragraph{方向九：Breaking Static Data Saturation --- 持续自我进化。}
+当固定数据集上的训练信号耗尽后，模型如何继续进化？
+朴素的 self-play 会 collapse——
+模型与自身博弈时容易收敛到 trivial equilibria
+\cite{liu2026selfplayinfo,sheikh2025srt,yi2025collapse}。
+
+\noindent
+解决 saturation 的方案可分为三类：
+(1) \textbf{Corpus-grounded self-play}——
+SPICE \cite{liu2025spice} 将 self-play 锚定在外部语料库上，
+SPELL \cite{yang2025spell} 设计 three-role self-play 架构；
+(2) \textbf{Meta-RL teacher}——
+SOAR \cite{sundaram2026soar} 生成恰好位于学生当前能力边界之上的 stepping-stone problems；
+(3) \textbf{Replay buffer engineering}——
+ExGRPO \cite{zhan2025exgrpo} 引入结构化 replay buffer。
+
+\paragraph{方向七至九的统一视角。}
+三个方向构成了一个完整的自适应学习闭环：
+ProbeLLM $\approx$ 感知系统（定位失败模式），
+DPE $\approx$ 行动系统（生成针对性训练数据），
+self-play 机制 $\approx$ 持续进化引擎。
+然而，这一闭环仍有三个关键缺口：
+(1) 诊断者自身的系统性盲点——
+若探测模型在某能力维度同样薄弱，则无法有效诊断该维度；
+(2) 连续能力空间的表示——
+预定义类别可能错过维度间的交叉弱点；
+(3) 不可验证任务的奖励机制——
+当没有 ground truth 时，诊断的``正确性''本身难以定义。
+
+\paragraph{方向十：Meta-Capability Training --- 教会模型``如何思考''。}
+前述方向聚焦于训练\textit{过程}的优化。
+方向十则追问：
+\textbf{post-training 能否训练 meta-cognitive 能力
+（self-verification、strategy selection、effort allocation），
+使这些能力跨领域迁移？}
+
+Post-training 对模型能力的影响可分为三种机制：
+\textbf{释放潜力}（激活 pre-training 中已压缩但未良好组织的能力）、
+\textbf{组装策略}（用基础能力拼装新行为模式）、
+\textbf{连接工具}（教模型使用外部工具，\crossref{6}{sec:thread6}）。
+这意味着 post-training 的能力天花板很大程度上由 pre-training 决定。
+然而，\textbf{meta-capability} 可能是一个例外——
+它更像一种\textit{计算模式}而非具体知识，
+RL 的 reward signal 天然适合强化这类``何时采用何种策略''的行为模式。
+
+\noindent
+\textbf{``释放 vs.\ 创造''的实证分界。}
+关于 post-training 究竟是释放预训练的潜在能力还是创造全新能力，
+近期两项独立研究给出了关键证据。
+Yue et al.\ \cite{yue2025rlvr}（NeurIPS 2025）发现：
+虽然 RLVR 训练后的模型在 pass@1 上显著超过 base model，
+但当采样数 $k$ 足够大时，base model 的 pass@$k$ 反而更高——
+这意味着 \textbf{RLVR 并未创造新的推理路径，
+而是学会了更高效地选择 base model 已有的正确路径}。
+Du et al.\ \cite{du2025reshaping}（COLM 2025 Outstanding Paper）
+从机械可解释性角度提供了互补证据：
+post-training 不改变知识的存储位置，
+其效果可分解为对真实性、拒绝行为和置信度的独立调整。
+这一发现的重要推论是：
+\textbf{meta-capability 可能是 post-training 真正``创造''
+而非仅仅``释放''的少数例外之一}——
+因为``何时验证''``何时放弃''等计算策略
+在 pre-training 的 next-token prediction 目标中缺乏直接的训练信号。
+
+\noindent
+\textbf{为什么 RL $>$ SFT for meta-capability。}
+DeepSeek-R1 的``aha moment''揭示了 RL 可以涌现 self-reflection 行为。
+Chu et al.\ \cite{chu2025sftrl}（ICML 2025）给出了最直接的实证对比：
+RL 训练的模型在 rule-based 和 visual 变体上均跨域泛化，
+而 SFT 仅在训练分布内表现良好——
+\textbf{SFT memorizes, RL generalizes}。
+其深层原因在于 SFT 倾向于记忆表面 pattern
+（如特定的 CoT 模板或格式），
+而 RL 通过 outcome-based reward
+强化的是\textit{策略选择}本身而非策略的具体形式。
+\textbf{SCoRe} \cite{kumar2024score}
+首次证明 multi-turn RL 可以有效训练 self-correction，
+并揭示了 SFT 训练 self-correction 失败的两个机制原因：
+（1）distribution mismatch——SFT 训练数据反映的是数据收集策略的错误分布，
+而非模型自身的错误分布；
+（2）behavior collapse——模型在 SFT 下倾向于收敛到非纠正模式。
+``Does Math Reasoning Improve General Capabilities?'' \cite{mathreasoning2025}
+进一步发现 RL 训练保持了 latent-space geometry 的稳定性，
+而 SFT 会扭曲表示空间，这解释了 RL 跨域迁移能力的几何基础。
+
+\noindent
+\textbf{Meta-R1} \cite{dong2025metar1} 增加了显式的 meta-level cognitive layer，
+\textbf{MERA} \cite{ha2025mera} 将推理与控制解耦以解决 overthinking。
+在更广泛的维度上，
+S$^2$R \cite{ma2025s2r} 训练 self-verify + self-correct，
+SelfBudgeter \cite{selfbudgeter2025} 和 AutoThink \cite{tu2025autothink}
+实现了 adaptive token allocation（50--60\% token 压缩而无 accuracy 损失）。
+
+\noindent
+\textbf{Calibration 作为最高杠杆的 meta-capability。}
+在所有 meta-capability 中，calibration（模型对自身正确性的准确估计）
+可能是杠杆最高的一个——
+它既是 self-correction 的前提（不知道自己错了就无法纠正），
+也是 effort allocation 的基础（不知道问题难度就无法合理分配计算资源），
+还是 safety 的关键维度（overconfident 的错误答案比承认不确定更危险）。
+然而，当前的 reasoning training 与 calibration 之间存在深刻张力：
+AbstentionBench \cite{abstentionbench2025} 发现
+reasoning fine-tuning 平均降低模型的 abstention 能力 24\%，
+即使在 reasoning model 本身更擅长的领域也是如此——
+\textbf{推理训练让模型变得更强但也更``不知道自己不知道什么''}。
+Leng et al.\ \cite{leng2024tamingoverconfidence}
+揭示了这一问题的根源：RLHF 中的 reward model 对高置信度回答存在系统性偏好，
+无论回答质量如何，导致训练后的模型表达过度自信。
+
+\noindent
+针对 calibration 的 RL 训练正在形成一条新的技术路线。
+RLCR \cite{damani2025rlcr} 提出使用 bounded proper scoring rule（如 Brier score）
+作为 RL 的 reward function——
+模型在生成答案的同时预测自身的置信度，
+proper scoring rule 保证诚实报告是最优策略。
+``Rewarding Doubt'' \cite{stangel2025rewardingdoubt}
+基于 logarithmic scoring rule 设计 reward function，
+同时惩罚 over-confidence 和 under-confidence，
+在事实性问答等任务上显著改善了 calibration。
+MASA \cite{masa2025} 则将 calibration 扩展为更一般的 meta-awareness：
+通过 RL 训练模型对自身推理过程的预测准确性，
+并证明这种 meta-aware 能力可以跨域迁移。
+
+\noindent
+关键理论问题是 meta-capability 是否跨领域迁移。
+Li et al.\ \cite{transfer2025} 提供了正面证据——
+RL-tuned 模型的推理改进跨领域泛化，而 SFT 不会。
+Sun et al.\ \cite{sun2025grokking} 发现 RL 可触发 genuine phase transition，
+类似于 supervised learning 中的 grokking 现象。
+综合来看，meta-capability training 的未来方向是
+\textbf{将 calibration、self-correction、effort allocation
+整合为一个统一的 meta-cognitive RL 框架}——
+模型不仅能``想''，还能准确评估自己想得对不对、
+判断何时需要更深入地想、
+以及何时应该坦诚地说``我不确定''。
+
+\paragraph{方向十一：Multi-Objective Post-Training --- Pareto 优化。}
+Post-training 同时优化多个相互干扰的目标
+（helpfulness、safety、reasoning、calibration）。
+新兴的解决方案指向 \textbf{orthogonal subspace decomposition}——
+将不同目标的梯度投影到互不干扰的子空间中。
+PAMA \cite{he2025pama} 给出了 $O(n)$ 的 closed-form Pareto 解，
+OrthAlign \cite{orthalign2025} 实现了单维度 34--51\% 的改进而不损害其他维度，
+NSPO \cite{nspo2025} 在 capability 的 null space 中执行 safety optimization。
+Chen et al.\ \cite{chen2026vat} 借鉴 Schwartz 价值理论
+揭示了 alignment 目标之间的共变结构——
+某些 values 天然协同，另一些天然冲突——
+为 multi-objective 优化提供了结构化的先验。
+
+这一方向的成熟将使 post-training 从``顾此失彼的权衡''
+演化为``在 Pareto frontier 上精确导航''的系统性工程。
+
+\bigskip
+\noindent
+总结而言，post-training 正在从一个以 SFT 为核心的"格式化"阶段，
+演化为一个以 RL 驱动的"能力发现"阶段。
+这一转变的底层逻辑是清晰的：
+pre-training 赋予模型庞大的知识库和语言能力，
+post-training 的任务从"教会模型如何呈现这些能力"（SFT 范式）
+深化为"让模型通过 reward-guided exploration 发现新的行为策略"（RL 范式）。
+2025--2026 年 thinking models 的普及和 computer use 的突破进一步证实了这一方向：
+RL 不仅能涌现推理能力，还能训练模型在真实环境中执行复杂的多步操作。
+与此同时，efficiency 技术的持续进步使得这些强大但昂贵的训练范式
+得以在更广泛的范围内被研究和应用。
+从 2017 年 RLHF 的早期探索到 2026 年 thinking models 成为默认范式，
+七条演化线程的持续交叉和融合暗示着，
+\textbf{未来的 post-training 不再是若干独立技术的简单组合，
+而是一个统一的、多目标的、持续进化的训练系统}。

@@ -1,0 +1,715 @@
+% === Chapter 7: Efficiency & Data Engineering ===
+\section{Thread 7: Efficiency \& Data Engineering}
+\label{sec:efficiency}
+
+\begin{problembox}
+Post-training（SFT、RLHF、DPO 等）的计算开销极高：
+full fine-tuning 一个 175B 参数的模型需要 TB 级显存和数百块 GPU；
+RLHF 的 PPO 阶段需要同时维护 policy model、reference model、reward model 和 value model 四个大型模型的副本；
+高质量人工标注数据稀缺且获取成本高昂。
+这些成本壁垒严重制约了 post-training 技术的研究迭代速度和落地覆盖面。
+\textbf{如何以更低的计算成本、更少的数据实现同等或更优的 post-training 效果？}
+\end{problembox}
+
+\noindent
+这一问题催生了 Thread~7 的五个主要研究方向：
+（1）parameter-efficient fine-tuning，以极少的可训练参数逼近 full fine-tuning 的效果；
+（2）data selection \& curation，从海量 instruction 数据中筛选最有价值的子集；
+（3）synthetic data generation，利用强模型批量生成训练数据；
+（4）distillation for alignment，将大模型的对齐能力蒸馏至小模型；
+（5）compute-efficient RL，简化 RLHF 的训练架构。
+这些方向之间存在密切协同 --- 例如 QLoRA 使得在消费级 GPU 上进行 RLHF 成为可能，
+而合成数据则为 LoRA fine-tuning 提供了低成本的训练语料来源。
+
+\subsection{问题起源：Post-Training 的成本瓶颈}
+\label{sec:efficiency:origin}
+
+Post-training 的成本瓶颈可以从三个维度理解。
+
+\paragraph{计算成本。}
+Full fine-tuning 需要为模型的所有参数维护梯度和优化器状态。
+以 Adam 优化器为例，每个参数需要存储 gradient（FP16）、
+first moment（FP32）和 second moment（FP32）三个额外的张量，
+这意味着一个 175B 参数的模型仅优化器状态就需要约 1.2TB 显存。
+RLHF 进一步放大了这一问题：
+PPO 训练阶段需要同时加载 policy model、reference model（frozen copy）、
+reward model 和 value model --- 四个大型模型的显存开销使得
+即使是 7B 规模的模型也需要多块 A100 GPU \cite{santacroce2023efficient}。
+\crossref{2}{sec:pref}
+
+\paragraph{数据成本。}
+高质量 instruction-following 数据的人工标注成本高昂：
+InstructGPT \cite{ouyang2022instructgpt} 雇用了 40 名标注员，
+标注过程涉及复杂的质量控制流程。
+Preference 数据的标注则更为困难 ---
+标注员需要比较两个模型输出的质量，
+这一任务的 inter-annotator agreement 往往较低。
+\crossref{1}{sec:sft}
+
+\paragraph{迭代速度。}
+上述计算和数据成本的叠加导致实验周期极长。
+一次 RLHF 训练实验可能需要数天乃至数周，
+这严重制约了超参数搜索和方法迭代的效率，
+尤其对学术研究者和小型团队而言几乎构成了不可逾越的壁垒。
+
+\evolution{Full fine-tuning 175B: 需要 1.2TB 显存，数百 GPU}{LoRA: 可训练参数降至 0.01\%, 单卡可训}{参数效率}
+
+\subsection{奠基方法：LoRA 与 QLoRA}
+\label{sec:efficiency:foundation}
+
+\subsubsection{LoRA: Low-Rank Adaptation}
+\label{sec:efficiency:lora}
+
+\landmark{hu2022lora} 提出了一个关键洞察：
+\textbf{pre-trained language model 在 adaptation 过程中的权重更新具有低秩结构}。
+这意味着虽然模型参数量巨大，但 fine-tuning 所需的"信息量"远小于模型的完整参数空间。
+
+\paragraph{核心方法。}
+对于 pre-trained 权重矩阵 $W_0 \in \mathbb{R}^{d \times k}$，
+LoRA 将其更新约束为一个低秩分解：
+\begin{equation}
+h = W_0 x + \Delta W x = W_0 x + B A x
+\label{eq:lora}
+\end{equation}
+其中 $B \in \mathbb{R}^{d \times r}$，$A \in \mathbb{R}^{r \times k}$，
+rank $r \ll \min(d, k)$。
+训练期间，原始权重 $W_0$ 完全冻结（不接收梯度更新），
+仅 $A$ 和 $B$ 为可训练参数。
+$A$ 采用随机高斯初始化，$B$ 初始化为零矩阵，
+从而确保训练开始时 $\Delta W = BA = 0$，
+即 adapted model 的起始状态与 pre-trained model 完全一致。
+实际使用中还引入了缩放因子 $\alpha / r$，
+使得切换 rank 时无需大幅调整学习率。
+
+\paragraph{关键实验结论。}
+在 GPT-3 175B 上的实验表明：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{参数效率}：
+    LoRA 仅需 4.7M 可训练参数（占 175B 的约 0.003\%），
+    checkpoint 从 350GB 降至 35MB，显存需求从约 1.2TB 降至约 350GB。
+  \item \textbf{性能表现}：
+    在 WikiSQL（+0.4\%）和 SAMSum（+0.7\%）等任务上，
+    LoRA 达到甚至超过 full fine-tuning 的性能，
+    且优于此前的 parameter-efficient 方法：
+    Houlsby et al.\ \cite{houlsby2019adapters} 提出的 \textbf{Adapter}
+    在每层 Transformer 中插入小型瓶颈层，
+    以及 Li \& Liang \cite{li2021prefix} 的 \textbf{Prefix Tuning}
+    冻结模型参数仅优化输入端的连续 prefix embedding。
+    LoRA 在性能上优于两者，且更关键的是不引入额外推理延迟。
+  \item \textbf{零推理延迟}：
+    部署时可将 $\Delta W = BA$ 合并回 $W_0$，
+    得到与原始模型相同结构的权重矩阵 $W' = W_0 + BA$，
+    不引入任何额外的推理计算或延迟。
+    这一特性是 LoRA 相对于 adapter 和 prefix tuning 的显著优势。
+  \item \textbf{Rank 选择}：
+    实验发现极低的 rank（$r = 1$ 或 $r = 2$）在许多任务上已经足够，
+    说明 adaptation 的内在维度（intrinsic dimensionality）远低于模型参数空间。
+    将 LoRA 应用于 $W_q$ 和 $W_v$（attention 的 query 和 value 投影矩阵）
+    且 $r = 4$ 时效果最佳。
+\end{itemize}
+
+\paragraph{为什么低秩有效？}
+Hu et al.\ 通过分析发现，
+$\Delta W$ 与 $W_0$ 之间的子空间重叠度很低 ---
+即 adaptation 所需的方向主要位于 pre-training 未充分强调的子空间中。
+这解释了为什么极低 rank 的更新即可有效改变模型行为：
+post-training 的本质并非重写模型的全部知识，
+而是在一个低维子空间中"调节"模型已有能力的表达方式。
+这与 LIMA \cite{zhou2023lima} 的 Superficial Alignment Hypothesis 高度一致：
+\textbf{alignment 所需的信息量远小于 pre-training 赋予模型的知识量}。
+\crossref{1}{sec:sft}
+
+\begin{solutionbox}
+LoRA 的核心贡献是将 fine-tuning 从参数空间问题转化为低秩子空间问题：
+冻结 pre-trained weights $W_0$，仅学习低秩更新 $\Delta W = BA$，
+实现了 10,000$\times$ 的参数压缩和 3$\times$ 的显存节约，
+且部署时零额外推理延迟。
+\end{solutionbox}
+
+\subsubsection{QLoRA: 量化与 LoRA 的融合}
+\label{sec:efficiency:qlora}
+
+\landmark{dettmers2023qlora} 将量化技术与 LoRA 结合，
+进一步将显存需求压缩到 LoRA 的数分之一。
+其核心目标是：\textbf{在单块 48GB GPU 上 fine-tune 65B 参数的模型}，
+且性能不低于 16-bit full fine-tuning。
+
+\paragraph{三项关键技术。}
+QLoRA 引入了三项互补的创新：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{4-bit NormalFloat (NF4)}：
+    一种信息论最优的量化数据类型。
+    其设计基于一个关键观察：
+    pre-trained neural network weights 近似服从零均值的正态分布 $\mathcal{N}(0, \sigma^2)$。
+    NF4 通过计算标准正态分布的等概率分位数（quantile）来设定量化锚点：
+    \begin{equation}
+    q_i = \frac{1}{2}\left(Q_X\!\left(\frac{i}{2^k+1}\right) + Q_X\!\left(\frac{i+1}{2^k+1}\right)\right)
+    \end{equation}
+    其中 $Q_X$ 为标准正态分布的分位函数，$k = 4$ 为量化位数。
+    每个锚点区间包含等概率的权重值，
+    从而在信息论意义上最大化了每个量化 bit 所携带的信息量。
+    实验表明，NF4 在量化误差上一致优于 FP4 和 Int4。
+
+  \item \textbf{Double Quantization (DQ)}：
+    量化过程中的量化常数（quantization constants）本身也占用显存 ---
+    每 64 个参数对应一个 FP32 的缩放因子，相当于每个参数额外消耗 0.5 bits。
+    DQ 对这些量化常数进行第二次量化（使用 8-bit 量化 + 更大的 block size 256），
+    将额外开销从每参数 0.5 bits 降低至约 0.127 bits，
+    在 65B 模型上节约约 3GB 显存。
+
+  \item \textbf{Paged Optimizers}：
+    利用 NVIDIA 的 unified memory 机制，
+    当 GPU 显存不足时自动将优化器状态 page 到 CPU 内存，
+    避免了 mini-batch 内 sequence length 不均匀导致的 OOM 问题。
+    这对 RLHF 中 generation 阶段的 memory spike 尤其重要。
+\end{enumerate}
+
+\paragraph{完整计算流程。}
+QLoRA 的前向传播可以表示为：
+\begin{equation}
+Y^{\text{BF16}} = X^{\text{BF16}} \cdot \text{doubleDequant}(c_1^{\text{FP32}}, c_2^{\text{k-bit}}, W^{\text{NF4}}) + X^{\text{BF16}} \cdot L_1^{\text{BF16}} \cdot L_2^{\text{BF16}}
+\end{equation}
+其中基础模型权重以 NF4 存储（前向传播时反量化为 BF16），
+而 LoRA 适配器 $L_1$、$L_2$ 始终以 BF16 计算。
+梯度仅通过 LoRA 适配器反向传播，基础权重在整个训练过程中保持冻结。
+
+\paragraph{Guanaco：QLoRA 的大规模验证。}
+基于 QLoRA，Dettmers et al.\ 训练了 Guanaco 系列模型，
+在 OASST1 数据集（约 9,000 条多轮对话）上进行单卡 fine-tuning。
+关键结果：
+\begin{itemize}[leftmargin=2em]
+  \item Guanaco 65B 在 Vicuna benchmark 上达到了 ChatGPT 性能的 99.3\%，
+    仅需单块 48GB GPU 训练 24 小时。
+  \item Guanaco 33B 在单块 24GB GPU 上训练 12 小时即可超过所有此前的开源模型。
+  \item \textbf{4-bit QLoRA 匹配 16-bit full fine-tuning 的性能}：
+    跨多个任务和模型规模的对照实验表明，
+    QLoRA 不会引入系统性的性能损失。
+\end{itemize}
+
+\begin{solutionbox}
+QLoRA 通过 NF4 量化（信息论最优）+ Double Quantization（压缩量化常数）
++ Paged Optimizers（处理显存峰值），
+将 65B 模型的 fine-tuning 压缩到单块 48GB GPU 上，
+且实验证明 4-bit QLoRA 完全匹配 16-bit full fine-tuning 的性能。
+\end{solutionbox}
+
+\subsection{局限与分支}
+\label{sec:efficiency:branches}
+
+LoRA 和 QLoRA 解决了参数效率问题，但 post-training 的效率挑战远不止于此。
+参数效率仅是计算成本的一个维度 ---
+数据获取与筛选、训练数据的质量与多样性、蒸馏效率、
+RL 训练的架构复杂性，都是独立且重要的效率瓶颈。
+由此，Thread~7 在奠基方法之后分化为五条平行的研究分支。
+
+\subsubsection{Branch A: Parameter-Efficient Fine-Tuning 的后续发展}
+\label{sec:efficiency:peft}
+
+LoRA 开创了低秩适配范式后，后续工作从多个角度进行了改进。
+
+\paragraph{DoRA: Weight-Decomposed Low-Rank Adaptation。}
+Liu et al.\ \cite{liu2024dora} 观察到 full fine-tuning 和 LoRA 在权重更新的
+magnitude 与 direction 变化模式上存在显著差异。
+DoRA 将权重矩阵分解为 magnitude 和 direction 两个分量：$W = m \cdot \frac{V}{\|V\|}$，
+其中 magnitude $m$ 单独学习，direction $V$ 通过 LoRA 的低秩更新进行调整。
+这种分解使得 DoRA 能够在不增加推理开销的前提下（部署时同样可合并权重），
+在多种 NLP 和视觉任务上一致超越 LoRA。
+
+\paragraph{PERL: Parameter Efficient RL from Human Feedback。}
+Sidahmed et al.\ \cite{sidahmed2024perl} 将 LoRA 系统性地应用于 RLHF 的 PPO 阶段，
+证明了在 reward model 和 policy model 上都使用 LoRA 可以将
+RLHF 的显存需求降低 50\% 以上，且最终 alignment 性能与 full fine-tuning RLHF 相当。
+这一结果表明 parameter-efficient 方法与 RL-based alignment 之间的结合是可行的。
+\crossref{2}{sec:pref}
+
+\paragraph{DoRAN: 稳定化的 DoRA。}
+Diep et al.\ \cite{diep2025doran} 提出 \textbf{DoRAN}，
+在 DoRA 的 magnitude-direction 分解基础上引入 noise injection 和 auxiliary networks，
+解决了 DoRA 在某些训练设置下的不稳定性问题。
+DoRAN 在保持 DoRA 精度优势的同时，
+显著提升了训练过程的鲁棒性，尤其在 RL-based post-training 场景中表现突出。
+
+\subsubsection{Branch B: Data Selection \& Curation}
+\label{sec:efficiency:data-selection}
+
+\begin{problembox}
+Instruction tuning 的效果高度依赖数据质量，但高质量数据的标注成本高昂。
+面对大规模自动生成或网络爬取的 instruction 数据集，
+如何从中筛选出最有价值的子集以最大化训练效率？
+\end{problembox}
+
+\paragraph{LIMA: Superficial Alignment Hypothesis。}
+\landmark{zhou2023lima} 以仅 1,000 条精心筛选的 instruction-response 对
+对 LLaMA 65B 进行 fine-tuning，
+结果在人类评估中 43\% 的情况下优于或持平 DaVinci003。
+由此提出的 \textbf{Superficial Alignment Hypothesis}
+——alignment 的作用仅在于教会模型以正确的格式呈现其已有能力——
+从根本上改变了数据工程的优化目标：
+关键不在于数据量，而在于\textbf{数据质量和多样性}。
+LIMA 的实验细节和 hypothesis 的深入讨论见 Thread~1（\S\ref{sec:sft:quality}）。
+
+\paragraph{后续数据筛选方法。}
+LIMA 的发现启发了一系列自动化数据筛选方法：
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{AlpaGasus} \cite{chen2024alpagasus}：
+    使用 ChatGPT 作为质量评估器对 Alpaca 的 52K 数据进行打分，
+    仅保留 9K 高质量样本进行训练即超过使用全部 52K 数据的性能。
+
+  \item \textbf{DEITA} \cite{liu2024deita}：
+    提出三维数据评估框架 --- complexity（指令复杂度）、
+    quality（回复质量）、diversity（样本多样性），
+    通过打分 + 多样性采样选出 6K 样本即可达到 10K 随机样本的性能。
+
+  \item \textbf{IFD (Instruction Following Difficulty)} \cite{li2023ifd}：
+    利用模型自身的 perplexity 变化作为数据价值的 proxy ---
+    如果一条样本的 IFD 分数高（即模型在加入 instruction 前后 perplexity 变化大），
+    说明该样本包含模型尚未掌握的信息，因此更有训练价值。
+
+  \item \textbf{Superfiltering} \cite{li2024superfiltering}：
+    发现小模型（如 GPT-2）评估出的 IFD 排序与大模型高度一致，
+    因此可以用小模型做初筛，大幅降低筛选阶段的计算成本。
+
+  \item \textbf{LESS} \cite{xia2024less}：
+    基于 influence function 的理论框架，
+    根据目标任务的 validation loss 梯度选择最相关的训练样本，
+    仅需 5\% 的数据即可匹配甚至超过全量数据的性能。
+\end{itemize}
+
+\subsubsection{Branch C: Synthetic Data Generation}
+\label{sec:efficiency:synthetic}
+
+\begin{problembox}
+Human-annotated instruction data 质量高但获取成本高昂，难以规模化。
+能否利用已有的强模型（如 GPT-4）自动生成大规模高质量训练数据？
+\end{problembox}
+
+\paragraph{Self-Instruct: 利用模型自身生成数据。}
+\landmark{wang2023selfinstruct} 提出了一个自举（bootstrapping）pipeline：
+以少量（175 条）人工撰写的 seed instructions 为起点，
+通过四个步骤迭代扩充数据集：
+（1）让模型生成新的 task instructions，
+（2）判断新 instruction 是否为 classification task，
+（3）生成对应的 input instances，
+（4）生成 output。
+通过 ROUGE-L 去重和启发式过滤，
+最终从 GPT-3 (text-davinci-001) 生成了 52K 条 instruction 数据。
+用这些自生成数据 fine-tune 后的 GPT-3 在 user-oriented evaluation 上
+大幅超过了原始 GPT-3，接近 InstructGPT 的水平。
+Self-Instruct 直接催生了 Stanford Alpaca \cite{taori2023alpaca} 等开源项目，
+开创了"用 LLM 训练 LLM"的数据生产范式。
+
+\paragraph{Orca: Explanation Tuning。}
+\landmark{mukherjee2023orca} 指出 Self-Instruct 及 Alpaca 类方法的关键局限：
+它们只蒸馏了 teacher model 的最终输出，
+丢失了输出背后的推理过程。
+Orca 提出 \textbf{explanation tuning} ---
+通过精心设计的 system instructions（如"explain step by step"、
+"think like you are answering to a five year old"等 16 种不同的 reasoning prompts），
+引导 GPT-4 不仅给出答案，还给出详细的推理过程（explanation traces）。
+训练数据来源于 FLAN-v2 的 5M 条样本（ChatGPT 生成 trace）
++ 1M 条（GPT-4 生成 trace），
+采用\textbf{渐进式学习}（progressive learning）策略：
+先在较容易的 ChatGPT traces 上训练，再在较难的 GPT-4 traces 上继续训练。
+Orca 13B 在 BigBench Hard 上达到了 ChatGPT 的水平，
+证明了\textbf{蒸馏推理过程}比单纯蒸馏输出更为有效。
+后续的 Orca 2 \cite{mitra2023orca2} 进一步让小模型学会根据任务难度
+自适应选择推理策略（如 step-by-step、direct answer 等），
+在多个 reasoning benchmark 上超过了更大规模的模型。
+\crossref{4}{sec:thread4}
+
+\paragraph{Phi-1: Textbook Quality Data。}
+\landmark{gunasekar2023phi1} 从一个独特的角度验证了数据质量的决定性作用。
+这一工作的直接先驱是 TinyStories \cite{eldan2023tinystories}——
+Eldan \& Li 证明仅用 GPT-3.5/GPT-4 生成的短篇儿童故事
+即可训练出能流畅生成连贯英语的极小模型（$<$10M 参数），
+首次定量展示了合成数据质量对小模型能力的决定性影响。
+受此启发，Gunasekar et al.\ 不是从真实 web data 中筛选，
+而是用 GPT-3.5 直接生成"textbook quality"的合成数据 ---
+即结构清晰、循序渐进、覆盖核心概念的教材级代码训练数据。
+仅用 1.3B 参数的模型在 HumanEval 上达到 50.6\% pass@1，
+超过了许多十倍以上规模的模型。
+Phi-1.5 \cite{li2023phi15} 将这一思路扩展到通用 NLP 领域，
+用合成 textbook 数据训练的 1.3B 模型在 reasoning benchmark 上
+接近 5$\times$--10$\times$ 更大模型的水平，
+进一步证明了 \textbf{data quality can compensate for model scale}。
+
+\paragraph{WizardLM: Evol-Instruct。}
+\landmark{xu2024wizardlm} 提出了 Evol-Instruct 方法 ---
+对初始 instruction 进行多轮"进化"改写，
+通过增加约束条件、引入多步推理、具体化场景等方式
+逐步提升 instruction 的复杂度和多样性。
+这种 data augmentation 策略不需要人工重新标注，
+而是利用 LLM 自身对现有 instruction 进行系统性的复杂化处理。
+WizardLM 7B 在人类评估中接近 ChatGPT 的水平，
+展示了通过提升数据\textbf{复杂度}（而非数量）来提升模型能力的路径。
+
+\paragraph{UltraChat 与 UltraFeedback: 大规模合成数据集。}
+UltraChat \cite{ding2023ultrachat} 构建了约 1.5M 条多轮对话数据，
+涵盖 world knowledge、creative writing、data analysis 等多元主题，
+为 SFT 提供了大规模、多样化的训练资源。
+UltraFeedback \cite{cui2023ultrafeedback} 则面向 preference learning ---
+收集多个模型对同一 prompt 的回复，再用 GPT-4 进行偏好标注，
+生成大规模的 preference pair 数据。
+这两个数据集共同构成了 Zephyr \cite{tunstall2023zephyr} pipeline 的数据基础。
+
+\paragraph{Self-Alignment with Instruction Backtranslation (Humpback)。}
+Li et al.\ \cite{li2023humpback} 提出了一种逆向数据生成方法：
+先从 web corpus 中采样高质量文本作为"回复"，
+再训练模型为这些回复反向生成 instruction（backtranslation），
+然后对生成的 (instruction, response) 对进行质量筛选。
+经过两轮迭代后，
+Humpback 在 AlpacaEval 上超过了所有非蒸馏方法训练的开源模型。
+
+\paragraph{RLAIF vs.\ RLHF: AI 反馈替代人类反馈。}
+\landmark{lee2023rlaif} 系统性地比较了使用 AI 生成的偏好标注（RLAIF）
+与人类标注（RLHF）的效果差异。
+核心发现是：
+在 summarization 和 helpful dialogue 等任务上，
+\textbf{RLAIF 的最终模型性能与 RLHF 没有显著差异} ---
+AI 标注的 preference data 可以有效替代人类标注。
+这一结论为完全基于合成数据的 alignment pipeline 提供了理论支撑，
+也为 Zephyr 等零人工标注方法奠定了基础。
+\crossref{2}{sec:pref}
+
+\subsubsection{Branch D: Distillation for Alignment}
+\label{sec:efficiency:distillation}
+
+\begin{problembox}
+大模型（如 GPT-4）性能卓越但部署成本极高。
+能否将大模型的 alignment 能力"蒸馏"到小模型中，
+实现小模型低成本部署的同时保持大模型的对齐质量？
+\end{problembox}
+
+\paragraph{Zephyr: Direct Distillation of LM Alignment。}
+\landmark{tunstall2023zephyr} 提出了一个三阶段蒸馏 pipeline，
+\textbf{完全不依赖人类标注}即可将大模型的 alignment 能力转移到 7B 模型中：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Distilled SFT (dSFT)}：
+    在 UltraChat 数据集（约 200K 条由 ChatGPT 生成的多轮对话）上
+    对 Mistral-7B \cite{jiang2023mistral} base model 进行 SFT。
+    Mistral-7B 本身是一个关键的基座模型——
+    它通过 sliding window attention 和 grouped-query attention 等架构优化，
+    以 7B 参数在多个基准上超越了 LLaMA-2 13B，
+    为 Zephyr 提供了高质量的训练起点。
+    数据经过去重和质量过滤，确保训练语料的多样性和质量。
+
+  \item \textbf{AI Feedback (AIF)}：
+    使用 UltraFeedback 数据集 ---
+    对每个 prompt 收集 4 个不同模型的回复，
+    由 GPT-4 对回复质量打分（1--10 分），
+    将最高分和最低分的回复组成 preference pair。
+    这一步完全由 AI 完成，\textbf{零人工标注}。
+
+  \item \textbf{Distilled DPO (dDPO)}：
+    使用上述 AI Feedback 数据对 dSFT model 进行 DPO 训练。
+    使用 dSFT checkpoint 作为 DPO 的 reference model，
+    在约 64K preference pairs 上训练。
+\end{enumerate}
+
+\noindent
+Zephyr-7B-$\beta$ 在 MT-Bench 上达到 7.34 分，
+\textbf{超过 LLaMA2-Chat-70B}（6.86 分），
+接近 GPT-3.5-turbo（7.94 分）---
+这是首次 7B 模型在对话质量基准上击败 70B RLHF 模型。
+
+\paragraph{关键消融实验。}
+Zephyr 的消融实验揭示了几个重要发现：
+\begin{itemize}[leftmargin=2em]
+  \item 仅做 dSFT 不加 dDPO（得分 5.32）与完整 pipeline（7.34）之间存在巨大差距，
+    说明 \textbf{preference optimization 是不可或缺的}，
+    即使数据来自蒸馏也是如此。
+  \item 直接在 base model 上做 DPO 而不经过 dSFT（得分 4.76）效果极差，
+    说明 SFT 阶段提供了必要的 warm start。
+  \item DPO 训练中 train accuracy 收敛到接近 1.0（即模型完全拟合了 preference data），
+    但 MT-Bench 分数\textbf{并未下降} ---
+    这一"overfitting without degradation"的现象表明
+    DPO 在 distribution-shifted 评估上具有良好的泛化性。
+\end{itemize}
+
+\paragraph{蒸馏的局限：The False Promise。}
+然而，Gudibande et al.\ \cite{gudibande2023false} 对蒸馏范式提出了尖锐的批判。
+他们发现通过模仿 ChatGPT 输出训练的小模型（如 Alpaca 类模型）
+虽然在\textbf{风格}上（流畅性、格式）快速接近 teacher，
+但在\textbf{事实性}和\textbf{推理能力}上的差距并未显著缩小——
+imitation 主要学到了``说话方式''而非``思考能力''。
+这一发现为 Orca 的 explanation tuning 提供了反面支撑：
+单纯蒸馏输出（output-level imitation）确实不够，
+必须蒸馏推理过程（process-level imitation）才能迁移深层能力。
+
+\paragraph{其他蒸馏方法。}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{MiniLLM} \cite{gu2023minillm}：
+    使用 reverse KL divergence 替代标准的 forward KL，
+    训练 student model 更好地拟合 teacher 分布的高概率区域，
+    在 text generation 任务上一致优于 standard distillation。
+
+  \item \textbf{GKD (Generalized Knowledge Distillation)} \cite{agarwal2023gkd}：
+    提出 on-policy distillation ---
+    让 student model 在自己的输出分布上计算 KL divergence 损失，
+    而非在 teacher 的输出分布上。
+    这缓解了 train-time（teacher distribution）和
+    test-time（student distribution）之间的分布偏移问题。
+
+  \item \textbf{Lion} \cite{jiang2023lion}：
+    引入对抗训练框架，
+    交替训练 student 模型（模仿 teacher）和
+    discriminator（区分 student 与 teacher 的输出），
+    通过对抗信号提升蒸馏质量。
+\end{itemize}
+
+\subsubsection{Branch E: Compute-Efficient Reinforcement Learning}
+\label{sec:efficiency:compute-rl}
+
+\begin{problembox}
+PPO 是 RLHF 的标准 RL 算法，但其训练架构极其复杂：
+需要同时维护 4 个模型（policy, reference, reward, value），
+显存开销巨大，训练不稳定性高，超参数敏感。
+能否设计更简洁的 RL 算法来替代 PPO？
+\end{problembox}
+
+\paragraph{GRPO: Group Relative Policy Optimization。}
+\landmark{shao2024grpo} 提出了一个优雅的解决方案：
+\textbf{完全去掉 PPO 中的 critic（value）model}，
+转而利用同一 prompt 的一组输出之间的相对奖励作为 advantage baseline
+（算法细节和完整推导见 \S\ref{sec:pref:grpo}，
+推理场景下的特殊意义见 \S\ref{sec:t4-grpo}）。
+
+\paragraph{效率收益。}
+GRPO 从效率角度带来三重改善：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{去掉 value model}：
+    显存直接减少约 25\%（对于等规模模型），
+    训练架构从 4 个模型减少到 3 个（policy + reference + reward）；
+  \item \textbf{无需逐 token advantage 估计}：
+    PPO 需要 value model 给出每个 token 的价值估计来计算 GAE，
+    GRPO 直接使用 outcome-level 的 group-relative reward，
+    完全避免了 value estimation 的误差累积；
+  \item \textbf{与 verifiable reward 天然兼容}：
+    在数学和编程等可验证正确性的任务上，
+    reward 可以直接基于答案正确性（0/1 或 rule-based），
+    连 reward model 也无需训练，
+    最终只需维护 2 个模型（policy + reference），
+    开销接近 DPO 水平。
+\end{itemize}
+
+\noindent
+GRPO 在 DeepSeekMath 7B 上以 MATH 51.7\%、GSM8K 88.2\% 的成绩
+显著超过 PPO 和 DPO 对照组，
+随后被 DeepSeek-R1 \cite{deepseek2025r1} 采纳为大规模推理训练的核心算法。
+GRPO 的成功验证了一个效率原则：
+\textbf{去除不必要的组件（value model）不仅降低成本，还可能提升性能}——
+因为 value estimation 本身就是一个额外的误差来源。
+
+\paragraph{其他 compute-efficient RL 方法。}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Efficient RLHF} \cite{santacroce2023efficient}：
+    通过梯度检查点（gradient checkpointing）、
+    混合精度训练和分布式策略优化等工程手段，
+    在不改变算法的前提下将 PPO 的显存使用降低约 50\%。
+
+  \item \textbf{ReMax} \cite{li2023remax}：
+    使用 REINFORCE 的变体替代 PPO，
+    以采样均值作为 baseline（类似 GRPO 的思路），
+    去掉 value model 和 GAE 计算。
+    ReMax 的理论分析表明，在 LLM alignment 的特定设定下，
+    这种简化不会引入过大的方差。
+
+  \item \textbf{REINFORCE++} \cite{hu2025reinforcepp}：
+    在 REINFORCE 基础上引入 token-level KL 惩罚和 PPO-style clipping，
+    在保持 REINFORCE 简洁性的同时引入 PPO 的稳定性改进，
+    实现了性能与效率的良好平衡。
+
+  \item \textbf{OpenRLHF} \cite{hu2024openrlhf}：
+    开源的 RLHF 训练框架，
+    支持 PPO、GRPO、REINFORCE++ 等多种算法，
+    通过 Ray 实现高效的分布式训练编排。
+\end{itemize}
+
+\evolution{PPO: 4 models + GAE + 复杂训练循环}{GRPO: 3 models + group-relative reward + 简洁目标}{去掉 value model}
+
+\subsection{收敛与前沿：Post-Training 的 Scaling Laws}
+\label{sec:efficiency:scaling}
+
+当效率问题在具体技术层面（参数效率、数据工程、RL 简化）取得突破后，
+一个更根本性的问题浮现：
+\textbf{post-training 的效果如何随计算预算、数据量和模型规模 scale？}
+回答这一问题需要建立 post-training 领域的 scaling laws。
+
+\subsubsection{Data-Constrained Scaling Laws}
+\label{sec:efficiency:scaling-data}
+
+\landmark{muennighoff2023scaling} 将 Chinchilla 的 scaling laws
+扩展到\textbf{数据受限}（data-constrained）的场景。
+Muennighoff et al.\ 在 400+ 组训练实验中
+（模型规模 10M--9B，训练 token 量达 900B）系统性地研究了
+数据重复训练（data repetition / multi-epoch training）的效果。
+
+\paragraph{核心发现。}
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{有效数据量（effective data）}：
+    当 unique data $U_D$ 被重复 $R_D$ 个 epoch 时，
+    等效的"新数据量"可以用以下公式描述：
+    \begin{equation}
+    D' = U_D + U_D \cdot R_D^* \cdot \left(1 - e^{-R_D / R_D^*}\right)
+    \label{eq:effective-data}
+    \end{equation}
+    其中 $R_D^* \approx 15$ 为特征 epoch 数。
+    直觉上，前 4 个 epoch 的数据重复近似等价于使用新数据，
+    但超过约 16 个 epoch 后，每额外的 epoch 带来的收益急剧衰减。
+
+  \item \textbf{数据约束下的最优资源分配}：
+    在 data-constrained 场景中（即可用的 unique data 有限），
+    最优策略是将更多 compute 分配给增加 epoch 数，
+    而非增加模型参数量。
+    这与 data-unconstrained 场景下
+    Chinchilla 建议的"等比例扩展模型和数据"形成了鲜明对比。
+
+  \item \textbf{Code mixing}：
+    将代码数据混入自然语言训练可以提供约 2$\times$ 的
+    effective token 增益 ---
+    代码数据的结构化特性为自然语言任务提供了有用的归纳偏置。
+
+  \item \textbf{数据去重 vs.\ 过滤}：
+    在 downstream task 评估上，
+    perplexity-based 过滤比去重更有效 ---
+    去重虽然直觉上减少了冗余信息，
+    但对最终 task performance 的影响不如质量过滤显著。
+\end{enumerate}
+
+\paragraph{对 post-training 的启示。}
+虽然这项工作主要研究 pre-training，
+但其结论对 post-training 的数据工程具有直接指导意义：
+（1）在 instruction tuning 数据有限的场景下，适度的多 epoch 训练是合理的；
+（2）data augmentation（如 paraphrase、回译等）可以有效增加数据多样性，
+打破 epoch 重复的收益递减；
+（3）数据质量过滤的优先级应高于简单去重。
+
+\subsubsection{Post-Training 特定的 Scaling 研究}
+\label{sec:efficiency:scaling-pt}
+
+\paragraph{Does RLHF Scale?}
+Hou et al.\ \cite{hou2024doesrlhfscale} 系统性地研究了
+RLHF 效果与模型规模、数据量之间的关系。
+关键发现包括：
+RLHF 的收益随模型规模增长而增加（scaling with model size），
+但 reward model 的 overoptimization 问题也随之加剧 ---
+更大的 policy model 更擅长"exploit" reward model 的弱点。
+这暗示了一个重要的 scaling tension：
+\textbf{更大的模型需要更强的 reward model 来有效引导优化}，
+否则 reward hacking 将抵消规模带来的收益。
+\crossref{2}{sec:pref}
+
+\paragraph{Scaling Laws for Reward Model Overoptimization。}
+Rafailov et al.\ \cite{rafailov2024scaling} 将 reward model overoptimization
+的 scaling 行为扩展到 DPO 等 direct alignment algorithms（DAAs）中。
+研究发现 DAAs 同样存在 overoptimization 现象 ---
+当 KL divergence 超过一定阈值后，
+true reward（gold standard 评估）开始下降，
+而 proxy reward（训练所用的 reward signal）仍在上升。
+这一发现强调了即使在不使用显式 reward model 的 DPO 框架中，
+优化与泛化之间的 tension 仍然存在。
+
+\subsubsection{2025: RL 效率与推理蒸馏的新进展}
+\label{sec:efficiency:rl-distill-2025}
+
+\paragraph{RLVR 作为 compute-efficient RL。}
+DAPO \cite{yu2025dapo} 和 GSPO \cite{zheng2025gspo} 等 RLVR 方法
+（\crossref{2}{sec:pref:rlvr}）不仅在推理性能上取得突破，
+还为 RL-based post-training 的效率问题提供了新的解答。
+DAPO 通过去除 KL 约束和 value model，
+将 GRPO 的训练流程进一步简化，
+使得 RLVR 训练在 compute 和 memory 开销上均低于传统 PPO-based RLHF。
+这一趋势表明：\textbf{对于可验证任务，RLVR 同时是效果最优和效率最优的 RL 方法}。
+
+\paragraph{推理蒸馏的规模化。}
+DeepSeek-R1 \cite{deepseek2025r1} 证实了推理能力的可蒸馏性后，
+推理蒸馏迅速成为获取推理能力最经济的途径。
+R1 蒸馏模型（如 R1-Distill-Qwen-32B）仅需标准 SFT 训练，
+就能在推理基准上显著超过同等规模的非蒸馏模型。
+Marco-o1 v2 \cite{yin2025marcoo1v2} 进一步探索了蒸馏瓶颈的扩展方法。
+这一发现对效率领域的启示在于：
+\textbf{``大模型 RL 训练 → 小模型 SFT 蒸馏''可能是获取推理能力的最优 compute 分配策略}。
+
+\paragraph{可调推理预算。}
+Kimi k1.5 \cite{moonshot2025kimi} 的 long2short 策略和
+Qwen3 \cite{yang2025qwen3} 的 thinking mode fusion
+开启了``可调推理预算''的研究方向：
+模型可以根据问题难度动态调整 inference-time compute，
+在简单问题上快速响应，在复杂问题上深度思考。
+这将 Thread~7 的效率优化从 training-time 扩展到了 inference-time。
+
+\subsection{未解决问题}
+\label{sec:efficiency:open}
+
+\begin{openproblembox}
+\textbf{Model Collapse: 合成数据的递归陷阱。}\\
+Shumailov et al.\ \cite{shumailov2023modelcollapse} 揭示了一个根本性风险：
+当模型在自身或前代模型生成的数据上反复训练时，
+输出分布会逐步退化（mode collapse），
+低频但有价值的信息被不可逆地丢失。
+随着合成数据在 post-training 中的占比不断上升
+（Self-Instruct、UltraChat、WizardLM 的 Evol-Instruct 均依赖模型生成数据），
+model collapse 的风险日益严峻。
+如何在大规模使用合成数据的同时保持输出分布的多样性——
+是通过 Molmo 式的纯人工数据作为``锚点''，
+还是通过理论指导的合成-真实数据混合比例——
+仍是开放问题。
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Optimal Composition of Synthetic Data。}
+合成数据的 quality、diversity、complexity 三个维度之间的最优平衡尚不明确。
+Phi-1 的"textbook quality"策略、WizardLM 的"complexity evolution"策略、
+LIMA 的"less is more"策略分别强调了不同的数据特性 ---
+但目前缺乏统一的理论框架来指导合成数据的最优生成策略。
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Scaling Laws for RL-Based Post-Training。}
+GRPO 和 DeepSeek-R1 已经展示了 RL-based post-training 在 reasoning 上的巨大潜力，
+但其 scaling 行为尚未被系统性地刻画。
+关键问题包括：
+RL training compute 的最优分配策略是什么？
+group size $G$ 如何随模型规模和任务复杂度 scale？
+verifiable reward 的覆盖范围如何影响 scaling behavior？
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Data Quality Metric 的统一。}
+现有数据筛选方法（IFD、DEITA、LESS 等）各自定义了不同的质量度量标准，
+且不同度量之间的相关性和互补性尚未被充分研究。
+一个通用的、可组合的 data quality metric 将极大推动数据工程的系统化发展。
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Distillation vs.\ Native Training 的能力边界。}
+Zephyr 和 Orca 证明了蒸馏的强大威力，
+但蒸馏模型的能力是否存在理论上限？
+即 student 是否永远无法在 teacher 不擅长的能力维度上超越 teacher？
+Weak-to-strong generalization \cite{burns2023weak} 的初步探索表明
+student 在某些情况下可以超越 teacher，
+但系统性的理论分析仍然缺失。
+\crossref{3}{sec:t3-safety}
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Adaptive Reasoning Budget Optimization。}
+Thinking models 引入了一个新的效率维度：inference-time compute 的自适应分配。
+当前的方法（如 s1 的 budget forcing \cite{muennighoff2025s1}、Qwen3 的 thinking mode fusion）
+提供了粗粒度的推理预算控制，但最优的自适应策略仍不清晰。
+关键问题包括：如何在 post-training 阶段训练模型自主评估问题难度？
+如何实现推理预算的 token-level 而非 sequence-level 的细粒度控制？
+推理预算优化是否可以与 PEFT 和蒸馏技术联合优化？
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Post-Training Efficiency 的统一基准。}
+当前缺乏一个标准化的 benchmark 来公平比较不同效率技术的性价比。
+一个理想的基准应同时衡量 FLOPs、peak memory、wall-clock time、
+final task performance，以及 data annotation cost，
+使研究者能在统一框架下比较 LoRA vs.\ full FT、
+synthetic data vs.\ human data、PPO vs.\ GRPO 等不同策略组合的 ROI。
+\end{openproblembox}

@@ -1,0 +1,1516 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[UTF8]{ctex}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{tcolorbox}
+\usepackage{multirow}
+\usepackage{makecell}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric}
+
+% === Proposal Colors ===
+\definecolor{propA}{HTML}{2980B9}   % Steel Blue
+\definecolor{propB}{HTML}{8E44AD}   % Deep Purple
+\definecolor{propC}{HTML}{D35400}   % Burnt Orange
+\definecolor{propD}{HTML}{27AE60}   % Emerald Green
+\definecolor{accent}{HTML}{2C3E50}  % Dark
+
+% === Proposal Box ===
+\newtcolorbox{proposalbox}[2][]{%
+  colback=#2!5,colframe=#2!70,boxrule=0.5pt,
+  fonttitle=\bfseries,title={#1},
+  left=6pt,right=6pt,top=4pt,bottom=4pt
+}
+
+% === Insight Box ===
+\newtcolorbox{insightbox}[1][]{%
+  colback=yellow!5,colframe=yellow!60!black,boxrule=0.4pt,
+  fonttitle=\bfseries,title={Core Insight},#1
+}
+
+% === Risk Box ===
+\newtcolorbox{riskbox}[1][]{%
+  colback=red!3,colframe=red!40,boxrule=0.3pt,
+  fonttitle=\bfseries,title={Open Risks},#1
+}
+
+% === Experiment Box ===
+\newtcolorbox{expbox}[1][]{%
+  colback=blue!3,colframe=blue!40,boxrule=0.3pt,
+  fonttitle=\bfseries,title={Key Experiments},#1
+}
+
+% === Why Box (for first-principles chains) ===
+\newtcolorbox{whybox}[1][]{%
+  colback=gray!5,colframe=gray!60,boxrule=0.4pt,
+  fonttitle=\bfseries,title={First-Principles Chain},#1
+}
+
+% === Related Work Box ===
+\newtcolorbox{relatedbox}[1][]{%
+  colback=teal!3,colframe=teal!50,boxrule=0.3pt,
+  fonttitle=\bfseries,title={Related Work Positioning},#1
+}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black!70,
+  citecolor=blue!60!black,
+  urlcolor=blue!70!black,
+}
+
+\title{\textbf{VLM Post-Training 前沿研究方向提案}\\
+\large{四个范式级挑战——从第一性原理出发}\\[6pt]
+\normalsize{Independent Research Directions --- 2025/2026 Frontier}}
+
+\author{Jinhong Lin}
+\date{March 2026}
+
+\begin{document}
+
+\maketitle
+
+% ============================================================
+\section*{概览}
+% ============================================================
+
+本文档提出四个独立的 VLM post-training 研究方向，
+每个方向瞄准一个\textbf{领域尚未挑战的基本假设}。
+
+\begin{insightbox}
+2025--2026 年的``R1 时刻''降临到 VLM 领域，
+暴露了一个结构性事实：
+\textbf{VLM post-training 不是 text-only post-training 的简单扩展}。
+
+三个发现粉碎了这一假设：
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{RL 系统性地破坏视觉 grounding。}
+    对 VLM 施加 R1 式 RLVR 训练后，
+    模型会朝 language prior 偏移、远离视觉证据
+    （arXiv 2505.23941, 2602.17186）。
+  \item \textbf{纯文本推理链是瓶颈。}
+    将所有中间计算强制通过 text tokens，
+    会摧毁对视觉推理至关重要的空间/几何结构
+    （Mirage, CoVT, CVPR 2025）。
+  \item \textbf{外部监督并非必需。}
+    基于竞争性 self-play 的方法（Vision-Zero, V-Zero）
+    在零人工标注下达到 SOTA。
+\end{enumerate}
+
+本文的四个方向分别攻击上述三个结构性事实，
+外加第四个开辟全新疆域的假设：
+\textbf{VLM 从观察中学到的是相关性，不是因果性}。
+\end{insightbox}
+
+\noindent
+四个方向与其目标假设：
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{方向 A}（Visual Commitment Training）
+    挑战``RL reward 对模态中性''的假设——
+    事实上 RL 梯度走 language shortcut 的阻力最小路径，
+    造成``越训越不看图''的危机。
+  \item \textbf{方向 B}（Latent Visual Chain-of-Thought）
+    挑战``推理链必须是语言形式''的假设——
+    对空间/物理任务来说，潜在视觉 token 是更高效的推理介质。
+  \item \textbf{方向 C}（Adversarial Self-Play）
+    挑战``VLM 提升需要外部监督''的假设——
+    结构化的自我对弈可以产生无限的训练信号。
+  \item \textbf{方向 D}（World-Model Alignment）
+    挑战``VLM 从观察数据中学到理解''的假设——
+    观察只能学到相关性，因果推理需要反事实训练。
+\end{itemize}
+
+
+\newpage
+% ============================================================
+\section{方向 A：视觉承诺训练——解决``越想越不看''危机}
+\label{sec:propA}
+% ============================================================
+
+\begin{proposalbox}[Visual Commitment Training: 解决``Thinking Over Seeing''危机]{propA}
+\textbf{一句话摘要：}
+对 VLM 施加 R1 式 RL 训练后，
+模型学会了在文本中\textit{更努力地思考}，
+却同时\textit{更少地看图}。
+修复方法不是更好的 reward——
+而是强制执行一个\textbf{因果顺序}：
+视觉承诺必须先于语言推理。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} does RLVR training degrade VLM visual grounding?\\
+$\rightarrow$ 因为 RL 梯度沿阻力最小的路径流动。
+Language backbone 是远比 visual features 更强的 prior，
+所以 reward-maximizing 行为会偏向 language shortcut。\\[3pt]
+\textbf{Why} is the language backbone a ``stronger prior''?\\
+$\rightarrow$ 因为 LLM 组件在万亿量级的 text tokens 上预训练过，
+而视觉特征来自一个更小的 encoder + connector。
+LLM 拥有丰富的常识内部表征——
+它可以\textit{不看图就猜对}很多答案。\\[3pt]
+\textbf{Why} doesn't the reward signal correct this?\\
+$\rightarrow$ 因为 outcome-level reward（``答案对了还是错了''）
+是\textbf{模态盲}的——
+它奖励正确答案，不管答案是从视觉证据还是 language prior 推导出来的。
+一个``不看图就猜对''的模型和一个``仔细看图再推理''的模型
+获得\textit{相同}的 reward。\\[3pt]
+\textbf{Why} can't we just add a ``visual grounding'' reward?\\
+$\rightarrow$ 这比听起来更难。
+现有方法（VIG, RLAIF-V）是\textit{事后过滤}训练数据——
+移除模型没有使用视觉信息的样本。
+但这是\textbf{被动的}，不是\textbf{结构性的}。
+模型的\textit{架构}仍然允许绕过视觉的推理路径。\\[3pt]
+\textbf{Root cause:}
+训练目标将视觉特征当作\textbf{可选的上下文}，
+而非\textbf{必须的证据}。
+没有任何机制强制模型在生成推理 token 之前
+\textit{承诺具体的视觉观察}——
+因此也没有梯度信号来惩罚``答对了但视觉基础是错的（或根本没用视觉）''。
+\end{whybox}
+
+\subsection{核心论点}
+
+\begin{insightbox}
+考虑一位放射科医生如何读 CT 片：
+\begin{enumerate}[leftmargin=2em]
+  \item 首先\textbf{承诺}具体的观察：
+    ``我在肝右叶看到一个 2cm 的低密度病灶。''
+  \item 然后推理：
+    ``根据位置、形状和增强模式，最一致的诊断是肝细胞癌。''
+  \item 关键是：\textbf{承诺在先}。
+    一位直接写``肝细胞癌''而不先记录所见的放射科医生，
+    即使诊断碰巧正确，也是在犯医疗过失。
+\end{enumerate}
+
+当前 VLM post-training 就像只用``诊断对不对？''来训练放射科医生。
+医生很快学会根据病人的人口统计学特征来猜测
+（``乙肝阳性的老年男性 $\rightarrow$ HCC''），
+而根本不看片子。
+诊断准确率甚至可能\textit{短暂上升}——
+但这位医生已经不再做放射诊断了。
+\end{insightbox}
+
+\subsection{经验证据：危机是真实的}
+
+2025--2026 年的工作量化了这一``越想越不看''的危机：
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{``VLMs are Biased''}（arXiv 2505.23941）：
+    系统性证据表明 RL 训练使 VLM 偏向 language prior、远离视觉证据。
+  \item \textbf{vVLM}（OpenReview 2025）：
+    显式解耦 visual perception reward 和 language reasoning reward，
+    确认标准 RL 将两者混为一谈。
+  \item \textbf{VIG}（arXiv 2602.17186）：
+    引入 Visual Information Gain——
+    一个基于困惑度的指标，衡量视觉输入对预测不确定性的降低程度。
+    用 VIG 过滤掉视觉信息没有贡献的样本。
+    但这是\textit{被动过滤}，不是\textit{结构性改变}。
+  \item \textbf{Compositional gap}（arXiv 2505.19406, NeurIPS 2025）：
+    RL 训练的 VLM 在跨任务组合场景上仅达到 17.4\%（3B）。
+    ``Caption-before-thinking''（强制先做视觉 grounding 再推理）
+    带来显著提升——支持\textbf{承诺优先}的假说。
+\end{itemize}
+
+\subsection{方法：Commitment-Gated Reasoning}
+
+\paragraph{核心机制。}
+引入硬性架构约束：
+模型必须先产出一个\textbf{Visual Commitment Block}（VCB），
+然后才能生成任何推理 token。
+
+\begin{tcolorbox}[colback=gray!5,colframe=gray!50,boxrule=0.3pt,left=4pt,right=4pt]
+\small
+\texttt{Input: [图像] + [问题]}\\[3pt]
+\texttt{=== Visual Commitment Block (VCB) ===}\\
+\texttt{<commit>}\\
+\texttt{  关注区域: [bbox1: (0.2, 0.3, 0.5, 0.7)],}\\
+\texttt{            [bbox2: (0.6, 0.1, 0.9, 0.4)]}\\
+\texttt{  提取事实:}\\
+\texttt{    - 区域 1: 柱状图，数值为 [23, 45, 67, 12]}\\
+\texttt{    - 区域 2: X 轴标签为 [Q1, Q2, Q3, Q4]}\\
+\texttt{  承诺置信度: high}\\
+\texttt{</commit>}\\[3pt]
+\texttt{=== 推理（以 VCB 为门控）===}\\
+\texttt{基于承诺的视觉事实:}\\
+\texttt{Step 1: 最高值是 Q3 的 67...}\\
+\texttt{Step 2: Q3 和 Q4 的差值是 67 - 12 = 55...}\\
+\texttt{Answer: Q3 的值最高，为 67。}
+\end{tcolorbox}
+
+\paragraph{承诺门控（Commitment Gate）。}
+最关键的设计选择：
+推理 token 的生成\textbf{仅条件于 VCB，而非原始图像}。
+VCB 生成完毕后，原始 visual tokens 从后续推理 token 的 attention 中被\textbf{遮蔽}。
+
+这强制形成一个信息瓶颈：
+\textit{模型在推理中使用的任何信息，都必须通过显式的 VCB 传递}。
+如果 VCB 没有提取某个视觉事实，推理就无法访问它。
+
+\paragraph{为什么遮蔽至关重要。}
+不遮蔽的话，模型仍然可以``作弊''——
+产出一个敷衍的 VCB，然后在推理过程中直接 attend 到原始 visual tokens。
+有了遮蔽，VCB 成为视觉信息进入推理链的\textit{唯一通道}。
+这才会产生梯度压力，让 VCB 尽可能地信息丰富。
+
+\paragraph{训练：三阶段。}
+
+\textbf{Phase 1：在承诺门控轨迹上做 SFT。}
+
+构造 gold VCB + reasoning traces：
+\begin{enumerate}[leftmargin=2em]
+  \item 用强 VLM（GPT-4o）生成带 bounding box 标注的详细视觉描述。
+  \item 格式化为 VCB block + 推理链。
+  \item 在目标 VLM 上做 SFT，学习生成此格式。
+\end{enumerate}
+
+\textbf{Phase 2：Commitment Consistency RL。}
+
+核心创新——一个\textbf{承诺一致性 reward}：
+
+\begin{align}
+R_{\text{commit}} =
+  \underbrace{R_{\text{correct}}}_{\text{答案正确性}}
+  + \lambda \cdot \underbrace{R_{\text{faithful}}}_{\text{承诺忠实度}}
+  + \mu \cdot \underbrace{R_{\text{sufficient}}}_{\text{承诺充分性}}
+\end{align}
+
+其中：
+\begin{itemize}[leftmargin=2em]
+  \item $R_{\text{faithful}}$：VCB 中``提取的事实''是否真的与
+    指定区域的图像内容一致？
+    由 grounding verifier 判断（可以是独立 VLM 或 Kosmos-2 等专用模型）。
+  \item $R_{\text{sufficient}}$：
+    遮蔽承诺的区域后重新运行模型。
+    如果答案\textbf{改变了}
+    $\rightarrow$ 承诺捕获了因果相关的信息
+    $\rightarrow$ 正 reward。
+    如果答案\textbf{没变}
+    $\rightarrow$ 承诺要么无关紧要，要么模型在用 language shortcut
+    $\rightarrow$ 负 reward。
+\end{itemize}
+
+\noindent
+充分性 reward 是最新颖的组件：
+它为视觉承诺创建了一个\textbf{因果检验}。
+一个``不看图就猜对''的模型，
+其 VCB 的遮蔽不会影响答案——触发强负 reward。
+
+\textbf{Phase 3：自适应承诺深度。}
+
+不是所有问题都需要详细的视觉承诺。
+``这是一张猫的照片吗？''只需最小承诺；
+``电子表格中 (3,7) 位置的值是什么？''需要精细承诺。
+Phase 2 之后，训练模型校准承诺深度：
+
+\begin{itemize}[leftmargin=2em]
+  \item 简单视觉问题 $\rightarrow$ 简短 VCB（1--2 个事实，粗粒度区域）
+  \item 精细粒度问题 $\rightarrow$ 详细 VCB（精确区域，精确数值）
+  \item Reward：正确 + 最少 VCB tokens（惩罚不必要的冗余）
+\end{itemize}
+
+\subsection{理论基础：Information Bottleneck}
+
+VCB 在形式意义上充当 information bottleneck。
+令 $I$ 为图像，$V$ 为 VCB，$A$ 为答案。
+承诺门控强制 Markov chain $I \rightarrow V \rightarrow A$。
+
+训练目标隐式优化：
+\begin{align}
+\max_{V} \quad I(V; A) \quad \text{subject to} \quad I(V; I) \leq C
+\end{align}
+
+其中 $C$ 是 VCB 格式施加的容量约束。
+这恰好是 Information Bottleneck 目标（Tishby et al., 2000）——
+VCB 学会成为图像对于回答问题的\textbf{最小充分统计量}。
+
+相比端到端 attention 的关键优势：
+瓶颈是\textbf{显式且可审查的}。
+我们可以读取 VCB，精确知道模型使用了哪些视觉信息——
+可解释性成为免费的副产品。
+
+\begin{relatedbox}
+\textbf{与现有工作的区别：}
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{vs.\ VIG（arXiv 2602.17186）：}
+    VIG 过滤掉视觉无贡献的训练样本。
+    我们改变\textit{训练架构}以强制视觉 grounding。
+    VIG 是被动的；我们是结构性的。
+  \item \textbf{vs.\ Caption-before-thinking（arXiv 2505.19406）：}
+    Caption-before-thinking 在推理前产出自由格式的描述。
+    我们产出\textit{带 bounding box 的结构化承诺}，
+    并通过 attention masking + 因果充分性 reward 来强制执行。
+    关键区别：attention masking 确保模型\textit{无法作弊}。
+  \item \textbf{vs.\ ARGUS（CVPR 2025）：}
+    ARGUS 将 CoT 步骤 grounding 到图像区域。
+    我们更进一步：\textit{门控}推理于承诺的观察之上，
+    使视觉 grounding 成为\textit{架构上的强制}，
+    而非仅仅是训练信号。
+  \item \textbf{vs.\ MIRROR（arXiv 2602.18746）：}
+    MIRROR 在 draft-critique 循环中使用基于区域的验证。
+    我们在\textit{第一稿之前}强制承诺。
+    MIRROR 在生成后验证；我们在生成前约束。
+\end{itemize}
+\end{relatedbox}
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{RL 下的视觉 grounding 保持。}
+    用三种方法训练同一基础 VLM：
+    (a) 标准 RLVR，(b) RLVR + VIG 过滤，(c) 我们的 commitment-gated RL。
+    跨训练迭代测量视觉 grounding 质量（区域相关性、事实准确率）。
+    \textbf{假设：}(a) 呈单调 grounding 退化，
+    (b) 减缓退化，(c) \textit{随训练提升} grounding。
+
+  \item \textbf{因果充分性分析。}
+    对每个测试样本，遮蔽承诺区域后测量答案变化率。
+    \textbf{假设：}我们的模型呈高答案变化率
+    （承诺因果相关）；
+    标准 RLVR 呈低变化率（模型忽视承诺）。
+
+  \item \textbf{Benchmark：精细粒度 vs.\ 粗粒度。}
+    在精细粒度任务（ChartQA, DocVQA, TextVQA）
+    和粗粒度任务（VQAv2, GQA）上对比。
+    \textbf{假设：}我们的方法在精细粒度任务上大幅领先
+    （视觉承诺最重要的地方），
+    在粗粒度任务上持平。
+
+  \item \textbf{可解释性作为免费副产品。}
+    评估 VCB 作为解释的质量：
+    人类评估者是否觉得 VCB 比标准 attention map
+    更有助于理解\textit{模型为什么给出这个答案}？
+    \textbf{假设：}VCB 的可解释性显著优于基于 attention 的解释。
+
+  \item \textbf{Ablation：hard masking vs.\ soft attention。}
+    对比 hard masking（VCB 是唯一通道）
+    和 soft attention（鼓励 VCB 但原始 visual tokens 仍可访问）。
+    \textbf{假设：}hard masking 是必需的——
+    soft attention 允许模型绕过 VCB。
+\end{enumerate}
+\end{expbox}
+
+\begin{riskbox}
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{VCB 瓶颈过紧。}
+    如果 VCB 格式无法捕获所有相关视觉信息
+    （如无法分解为区域的整体场景理解），
+    模型性能天花板会下降。
+    缓解：允许``整体''承诺类型，无需指定区域即可总结整张图。
+  \item \textbf{Grounding verifier 质量。}
+    $R_{\text{faithful}}$ 需要独立的 grounding verifier。
+    如果 verifier 自身有误，reward 信号就有噪声。
+    缓解：使用 verifier ensemble；仅用高置信度的验证结果。
+  \item \textbf{Masking 导致的训练不稳定。}
+    Hard masking 制造了不可微的边界。
+    模型必须通过 REINFORCE 式梯度估计来学习产生有用的 VCB。
+    缓解：Phase 1 SFT 热启动，
+    给模型一个合理的 VCB 初始化。
+  \item \textbf{计算开销。}
+    VCB 为每个 response 增加 token。
+    在简单问题上，这是纯开销。
+    Phase 3（自适应深度）缓解此问题，但开销非零。
+\end{itemize}
+\end{riskbox}
+
+
+\newpage
+% ============================================================
+\section{方向 B：潜在视觉推理链——打破语言瓶颈}
+\label{sec:propB}
+% ============================================================
+
+\begin{proposalbox}[Latent Visual Chain-of-Thought: 打破多模态推理的语言瓶颈]{propB}
+\textbf{一句话摘要：}
+当前所有 VLM 推理链都是纯语言形式——
+但将空间关系转换为文本是\textit{天然有损}的。
+训练 VLM 产出紧凑的\textbf{潜在视觉 token}
+作为中间推理步骤，
+可以保留文本无法编码的几何结构，
+实现空间/物理推理的质变飞跃。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} do VLMs underperform on geometric/spatial reasoning
+compared to text-based logical reasoning?\\
+$\rightarrow$ 因为中间推理步骤是纯文本的。
+当模型推理三角形的比例关系时，
+它必须将 2D 空间关系转换为 1D 文本——
+``斜边看起来大约是短边的两倍。''
+这种语言描述是不精确且有损的。\\[3pt]
+\textbf{Why} is text lossy for spatial information?\\
+$\rightarrow$ 因为文本是\textbf{序列化且符号化}的，
+而空间关系是\textbf{连续且多维}的。
+用文本精确描述一个场景中 5 个物体的相对位置
+需要 $O(n^2)$ 个成对描述，
+但一个 2D 表征可以同时编码所有关系。\\[3pt]
+\textbf{Why} must reasoning be in text?\\
+$\rightarrow$ 因为主流 VLM 架构
+（vision encoder $\rightarrow$ connector $\rightarrow$ LLM）
+只能自回归地生成 text tokens。
+LLM 的词汇表是语言的——
+它没有``空间布局''或``几何比例''的 token。\\[3pt]
+\textbf{Why} can't we just use existing visual tokens?\\
+$\rightarrow$ 来自 encoder 的 visual tokens 表征的是\textit{输入}图像，
+而非模型关于图像的\textit{中间思考}。
+如果模型需要心理上``旋转''一个物体或``追踪''一条路径，
+没有任何机制来表征这一中间视觉状态。\\[3pt]
+\textbf{Root cause:}
+VLM 架构对所有中间计算施加了\textbf{语言瓶颈}。
+视觉信息以 visual tokens 形式进入系统，
+立即被转换为语言表征，
+所有后续推理都在文本空间中进行。
+视觉推理的连续、多维结构
+被强制通过一个符号化的 1D 管道——信息被摧毁了。
+\end{whybox}
+
+\subsection{核心论点}
+
+\begin{insightbox}
+国际象棋大师在计算时不会用语言描述棋盘局面。
+他们维护一个\textbf{视觉心理模型}并直接操作它：
+``如果我把马走到这里，主教的对角线就打开了...''
+``推理''发生在\textit{空间表征本身}中，
+而非其语言编码中。
+
+类似地，几何学家做证明时不只是写方程——
+他们在脑海中\textit{看到}几何构型，
+旋转它、投影它、分解它。
+视觉心理模型不是奢侈品——
+它是空间推理的\textbf{计算基底}。
+
+当前 VLM 就像一位被迫
+在考虑下一步之前用文字描述每个棋盘局面的棋手。
+\end{insightbox}
+
+\subsection{现有工作：``用图像思考''的谱系}
+
+2025 年的文献揭示了一个方法谱系（参见综述 arXiv 2506.23918）：
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{2.5cm}p{2.8cm}p{2.2cm}p{2.5cm}p{2cm}}
+\toprule
+\textbf{方法} & \textbf{中间表征} & \textbf{计算成本} & \textbf{信息量} & \textbf{代表} \\
+\midrule
+Text CoT & Text tokens & 低 & 空间信息有损 & 标准 VLM \\
+Tool-mediated & Python $\rightarrow$ 图像 & 高（工具调用） & 无损但慢 & ReFocus \\
+全像素生成 & Pixel images & 极高 & 无损 & MVoT \\
+\textbf{潜在视觉 token} & \textbf{紧凑 embedding} & \textbf{低} & \textbf{密集且空间化} & \textbf{Mirage, CoVT} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+潜在视觉 token 占据了\textbf{最优折中点}：
+低计算成本下的密集空间信息。
+但现有工作（Mirage, CoVT, DeepSketcher）聚焦于
+latent visual tokens \textit{能编码什么}——
+而非如何\textit{post-train} 一个 VLM
+来在复杂多步视觉推理中有效使用它们。
+
+\subsection{方法：Latent Visual Scratchpad Training}
+
+\paragraph{架构扩展。}
+向 VLM 的词汇表中添加一小组\textbf{视觉推理 token}。
+这些 token 不解码为文本——
+它们被嵌入到与 vision encoder 输出相同的连续空间中。
+
+具体地，添加 $K$ 种特殊 token 类型
+（例如 $K = 64$，带 2D 位置编码）：
+\begin{itemize}[leftmargin=2em]
+  \item \texttt{<vis\_thought\_start>}、\texttt{<vis\_thought\_end>}：
+    潜在视觉推理块的分隔符。
+  \item \texttt{<vis\_tok\_ij>}（$i, j \in \{1, \ldots, 8\}$）：
+    64 个 token 构成一个 $8 \times 8$ 的空间网格。
+    每个 token 的 embedding 在训练中学习。
+\end{itemize}
+
+\paragraph{生成过程。}
+在自回归生成中，模型可以产出 \texttt{<vis\_thought>} 块：
+
+\begin{tcolorbox}[colback=gray!5,colframe=gray!50,boxrule=0.3pt,left=4pt,right=4pt]
+\small
+\texttt{Question: 在这张平面图中，哪个房间离厨房最近？}\\[3pt]
+\texttt{让我追踪空间布局...}\\[2pt]
+\texttt{<vis\_thought\_start>}\\
+\texttt{[64 个潜在 token 编码平面图的心理地图，}\\
+\texttt{ 厨房高亮，距离关系被编码]}\\
+\texttt{<vis\_thought\_end>}\\[2pt]
+\texttt{从我的空间分析来看，餐厅与厨房共墙，是最近的房间。}\\[2pt]
+\texttt{<vis\_thought\_start>}\\
+\texttt{[64 个潜在 token 编码验证——}\\
+\texttt{ 追踪从厨房到每个房间的路径]}\\
+\texttt{<vis\_thought\_end>}\\[2pt]
+\texttt{确认。餐厅直接相邻。}\\
+\texttt{Answer: 餐厅。}
+\end{tcolorbox}
+
+\noindent
+关键特性：
+\begin{itemize}[leftmargin=2em]
+  \item 潜在块\textbf{不会被解码为文本}呈现给用户——
+    它们是中间计算，类似神经草稿纸。
+  \item 每个块仅 64 个 token——
+    远比生成一张完整图像（$256 \times 256$ 像素）便宜。
+  \item 2D 网格结构保留了 1D 文本无法编码的空间关系。
+\end{itemize}
+
+\paragraph{训练：三阶段。}
+
+\textbf{Stage 1：通过蒸馏进行表征 grounding。}
+
+潜在视觉 token 必须学会编码有意义的空间信息。
+我们从 vision encoder 蒸馏：
+\begin{enumerate}[leftmargin=2em]
+  \item 给定图像，提取 vision encoder 的 feature map
+    （如 SigLIP 的 $24 \times 24$ patch features）。
+  \item 通过 average pooling 降采样到 $8 \times 8$。
+  \item 训练模型在产出 \texttt{<vis\_thought>} 块时预测这些降采样特征。
+  \item Loss：latent token embeddings 与 ground-truth 视觉特征之间的 MSE。
+\end{enumerate}
+
+这给予了潜在 token 一个\textbf{空间 grounding}——
+$8 \times 8$ 网格中的每个 token 对应一个空间区域。
+
+\textbf{Stage 2：在交织视觉-文本推理上做 SFT。}
+
+构造视觉推理步骤交织的训练数据：
+\begin{enumerate}[leftmargin=2em]
+  \item 收集空间/几何推理任务
+    （平面图、地图、几何、图表比较、多物体场景）。
+  \item 用强模型生成逐步推理。
+  \item 在需要空间推理的步骤插入 \texttt{<vis\_thought>} 块，
+    使用来自相关图像区域的 ground-truth features。
+  \item 训练模型重现这些交织轨迹。
+\end{enumerate}
+
+同时在\textit{不需要}视觉思考的任务（文本密集型 QA、简单识别）上训练
+——不带 \texttt{<vis\_thought>} 块——
+教会模型\textit{何时}需要潜在视觉推理。
+
+\textbf{Stage 3：Reasoning quality RL。}
+
+SFT 后，模型可以产出交织轨迹但可能使用不够优化。
+RL reward：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{正确 + 使用了视觉思考}（在空间任务上）
+    $\rightarrow$ 高 reward
+  \item \textbf{正确 + 未使用视觉思考}（在非空间任务上）
+    $\rightarrow$ 高 reward
+  \item \textbf{错误 + 视觉思考本可以帮助}
+    $\rightarrow$ 负 reward（未用可用工具）
+  \item \textbf{重建质量}：
+    潜在 token 应能重建它们正在``思考''的区域的图像特征。
+    重建质量差 $\rightarrow$ 模型在产出无意义的 latent tokens
+    $\rightarrow$ 惩罚。
+\end{itemize}
+
+\subsection{为什么用 Latent，不用 Pixel？}
+
+MVoT 生成完整的像素图像作为中间推理步骤。
+我们的方法生成\textbf{潜在 token}。
+对比如下：
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{维度} & \textbf{像素生成（MVoT）} & \textbf{潜在 token（本方向）} \\
+\midrule
+计算成本 & 极高（diffusion model） & 低（64 tokens） \\
+分辨率 & 高（完整图像） & 低但够用 \\
+空间结构 & 保留 & 保留（2D grid） \\
+可解释性 & 高（人类可查看） & 低（潜在空间） \\
+集成方式 & 需要图像重编码 & 直接 attention \\
+训练数据 & 需要图像生成数据 & 从 encoder 蒸馏 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+关键折中：我们牺牲可解释性换取效率。
+但对于实际部署，效率更重要——
+在每个推理步骤生成一张 diffusion 图像
+对实时应用来说代价过高。
+
+\subsection{理论动机：推理通道的带宽}
+
+考虑不同推理通道的\textbf{信息带宽}：
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Text token}：$\sim$16 bits
+    （65K 词汇表中的一个 token $\approx$ 16 bits）。
+    编码一个空间关系需要 $\sim$10 个 token $= 160$ bits。
+  \item \textbf{Latent visual token}：$\sim$4096 bits
+    （embedding 维度 4096，假设每个维度 1 bit 有效信号）。
+    64 个 token $= 262,144$ bits 的空间信息。
+\end{itemize}
+
+\noindent
+一个 \texttt{<vis\_thought>} 块承载的空间信息量
+是等效文本描述的 $\sim$1600 倍。
+这就是潜在视觉推理在空间任务上
+优于文本推理的根本原因。
+
+\begin{relatedbox}
+\textbf{与现有工作的区别：}
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{vs.\ Mirage（arXiv 2506.17218）：}
+    Mirage 通过蒸馏 + text-only supervision + RL 训练。
+    我们为 latent tokens 增加了空间性的 \textbf{2D 网格结构}
+    和\textbf{重建 loss}，确保 latent tokens
+    编码的是特定视觉特征，而非泛化的 embedding。
+    Mirage 的 token 是无结构的；我们的有空间语义。
+  \item \textbf{vs.\ CoVT（arXiv 2511.19418）：}
+    CoVT 从外部视觉专家（深度、分割、边缘）蒸馏。
+    我们从 VLM 自身的 encoder 蒸馏，
+    创建一种 language model 可以自然 attend 的\textit{自参照}表征。
+    CoVT 需要外部专家模型；我们是自洽的。
+  \item \textbf{vs.\ DeepSketcher（arXiv 2509.25866）：}
+    DeepSketcher 内化了 tool-free 的视觉操作。
+    我们共享这一目标，但提供一个\textit{结构化}的潜在空间
+    （2D 网格），而非自由形式的 latent tokens。
+    结构使得空间推理操作（区域比较、路径追踪）
+    成为可能——非结构化 token 无法自然支持这些操作。
+\end{itemize}
+\end{relatedbox}
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{空间推理 benchmark 套件。}
+    在强空间需求的任务上评估：
+    GeoQA（几何）、MapQA（导航）、FloorPlan-QA（空间布局）、
+    ChartQA（2D 数据可视化）。
+    \textbf{假设：}Latent visual CoT 在空间任务上
+    比 text-only CoT 高出 $>$10\%，
+    在非空间任务上持平。
+
+  \item \textbf{信息保留分析。}
+    测量 (a) 潜在视觉思考 token 和
+    (b) ground-truth 空间布局之间的互信息。
+    与 text CoT 对相同布局的互信息做对比。
+    \textbf{假设：}Latent tokens 保留的空间信息量 $>$3 倍。
+
+  \item \textbf{计算效率曲线。}
+    绘制 accuracy vs.\ total compute（FLOPs）：
+    text-only CoT（更多 token）、像素生成（MVoT）、latent visual CoT。
+    \textbf{假设：}Latent visual CoT 主导 Pareto frontier——
+    相同 compute 下比 text CoT 更准确，
+    相同 accuracy 下比像素生成更便宜。
+
+  \item \textbf{Ablation：2D 网格 vs.\ 扁平序列。}
+    对比我们的 2D 结构化 latent tokens（$8 \times 8$ 网格）
+    和 64 个无空间结构的扁平 latent tokens。
+    \textbf{假设：}2D 结构至关重要——
+    它使``空间相邻''的 attention pattern 成为可能，
+    扁平序列无法自然支持。
+
+  \item \textbf{重建质量与正确率的相关性。}
+    测量 \texttt{<vis\_thought>} token 的重建质量
+    与最终答案正确性之间的相关性。
+    \textbf{假设：}高相关性（$r > 0.6$）——
+    证明模型确实在用 latent visual thoughts 推理，
+    而非产出无意义的 token。
+
+  \item \textbf{多步空间推理的 scaling。}
+    改变允许的 \texttt{<vis\_thought>} 块数量（1, 2, 4, 8）。
+    \textbf{假设：}准确率随视觉思考步骤数对数线性增长——
+    类似文本推理的 test-time compute scaling。
+\end{enumerate}
+\end{expbox}
+
+\begin{riskbox}
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{表征坍缩。}
+    Latent tokens 可能收敛到退化表征
+    （如所有 token 编码相同的全局特征）。
+    缓解：带逐 token 空间目标的重建 loss 防止坍缩。
+  \item \textbf{生成模式切换。}
+    模型必须学会在文本和 latent 模式之间切换，
+    可能过度使用或不够使用视觉思考。
+    缓解：Stage 3 RL 显式优化何时使用。
+  \item \textbf{调试困难。}
+    Latent tokens 不可人类解释。
+    模型失败时，我们无法直接检查其``视觉思考''。
+    缓解：重建解码器可以将 latent tokens 的编码内容可视化，
+    提供调试工具。
+  \item \textbf{网格分辨率折中。}
+    $8 \times 8$ 对精细粒度任务（如读小字）可能太粗。
+    更高分辨率网格更昂贵。
+    缓解：自适应网格分辨率（先粗后精）。
+\end{itemize}
+\end{riskbox}
+
+
+\newpage
+% ============================================================
+\section{方向 C：对抗性自我对弈——VLM 的 AlphaGo 时刻}
+\label{sec:propC}
+% ============================================================
+
+\begin{proposalbox}[Adversarial Self-Play: VLM Post-Training 的 AlphaGo 时刻]{propC}
+\textbf{一句话摘要：}
+当前所有 VLM post-training 都需要外部监督——
+人类偏好、gold labels 或 teacher model 蒸馏。
+通过将 VLM 训练结构化为一个\textbf{多角色竞争游戏}
+（outcome 客观可验证），
+我们创建一个开放式自我提升循环，
+自行生成训练信号——
+实现多模态 AI 的 AlphaGo 范式。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} do VLMs plateau after initial post-training?\\
+$\rightarrow$ 因为训练数据是固定的。
+SFT 在可用的 instruction data 上饱和；
+DPO 在可用的 preference pairs 上饱和；
+RLVR 在可用的 verified tasks 上饱和。
+模型已经``见过一切''，停止进步。\\[3pt]
+\textbf{Why} can't we just generate more data?\\
+$\rightarrow$ 对 text-only 模型，合成数据生成相对容易——
+改写问题、生成新的数学题等。
+对多模态模型，\textit{视觉部分}是瓶颈：
+我们无法轻易生成测试特定视觉推理技能的新图像，
+收集新的人工验证的视觉 QA 非常昂贵。\\[3pt]
+\textbf{Why} does the visual component make data generation hard?\\
+$\rightarrow$ 因为视觉推理任务需要同时具备
+(a) 具有特定属性的图像（如``计数模糊的图像''），
+(b) 靶向特定视觉技能的问题，以及
+(c) 可验证的答案。
+协调生成三者是一个困难的开放问题。\\[3pt]
+\textbf{Why} do we need external data at all?\\
+$\rightarrow$ 我们需要它来产生\textit{reward 信号}。
+但这里有关键洞察：
+\textbf{agents 之间的竞争性游戏有内部可验证的结果}。
+在``找不同''游戏中，一个 agent 知道答案
+因为它创造了挑战——
+另一个 agent 必须解答。
+结果客观可验证，不需要任何外部监督。\\[3pt]
+\textbf{Root cause:}
+``VLM 提升需要外部监督''这一假设是错误的。
+给定一个视觉环境（一组图像），
+VLM 可以通过与自己下竞争性视觉游戏来\textbf{生成自己的训练信号}。
+缺失的不是数据，而是\textbf{游戏设计}。
+\end{whybox}
+
+\subsection{核心论点}
+
+\begin{insightbox}
+AlphaGo 的突破不是更好的评估函数或更多训练数据——
+而是\textbf{self-play}：模型通过与自己竞争来生成训练信号。
+每局棋都是新的，所以模型永远不会用完训练数据。
+难度随模型的实力自然提升。
+
+Self-play 工作的关键条件：
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{可验证的结果。}
+    围棋可以客观确定胜负。
+    在视觉推理中，我们需要结果客观可验证的游戏。
+  \item \textbf{技能迁移。}
+    游戏中学到的技能必须迁移到真实任务。
+    围棋技能不迁移，但视觉推理技能可以。
+  \item \textbf{难度自动提升。}
+    挑战必须随模型进步而变难。
+    在 self-play 中，这自动发生。
+\end{enumerate}
+
+Vision-Zero（arXiv 2509.25541）用``谁是卧底''式游戏证明了条件 1。
+V-Zero（arXiv 2601.10094）用共同进化的 Questioner-Solver 对证明了条件 3。
+但两者都没有完全解决\textbf{plateau 问题}：
+朴素 self-play 会收敛到 Nash equilibrium，
+两个玩家``达成共识''的策略可能并不对应真正的视觉推理能力。
+\end{insightbox}
+
+\subsection{现有工作：Self-Play 版图}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{2.5cm}p{3cm}p{2.5cm}p{3cm}}
+\toprule
+\textbf{方法} & \textbf{游戏结构} & \textbf{Plateau 应对} & \textbf{主要局限} \\
+\midrule
+Vision-Zero & ``谁是卧底''（图像比较） & Iterative-SPO & 仅限比较任务 \\
+V-Zero & Questioner + Solver 共进化 & Dual-track reward & 无主动环境选择 \\
+VisPlay & 问题生成 + 答题 & GRPO + 多样性 reward & 固定图像池 \\
+Active-Zero & Searcher + Questioner + Solver & 主动图像检索 & 2026.02；验证不充分 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+缺口：所有现有方法对两个角色使用同一模型。
+没有工作提出过\textbf{对抗性 self-play}——
+VLM 的不同组件互相竞争——
+在模型\textit{内部}创造生成对抗动态。
+
+\subsection{方法：三角色对抗性视觉游戏}
+
+\paragraph{游戏设计：三个角色。}
+
+将 VLM 分解为三个\textit{角色}
+（不是独立模型——同一 VLM 配以不同的 system prompt 和 reward function）：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{欺骗者}（$\mathcal{D}$）：
+    给定两张相似图像，生成一段描述——
+    对一张图\textit{准确}但对另一张\textit{微妙失准}。
+    欺骗必须是\textit{视觉的}——
+    描述必须引用两张图之间不同的视觉细节。
+
+  \item \textbf{侦探}（$\mathcal{T}$）：
+    给定欺骗者的描述和\textit{两张}图像，
+    必须识别\textit{描述是为哪张图写的}，
+    并指出\textit{具体用哪个视觉细节来欺骗}。
+
+  \item \textbf{出题者}（$\mathcal{Q}$）：
+    给定一张图像，生成一个
+    \textit{只有仔细视觉检查才能回答}的问题——
+    不能靠 language prior 解决。
+    出题者在 Solver（模型的另一实例）
+    第一次尝试答错但仔细重试后答对时获得 reward。
+\end{enumerate}
+
+\paragraph{游戏流程。}
+
+\begin{tcolorbox}[colback=gray!5,colframe=gray!50,boxrule=0.3pt,left=4pt,right=4pt]
+\small
+\textbf{Round 1：欺骗游戏}\\
+1. 从大型图像池中采样图像对 $(I_A, I_B)$。\\
+2. $\mathcal{D}$ 生成描述 $d$（对 $I_A$ 准确，对 $I_B$ 误导）。\\
+3. $\mathcal{T}$ 接收 $(d, I_A, I_B)$，预测哪张图匹配 $d$。\\
+4. $\mathcal{T}$ 还必须输出揭示欺骗的\textit{具体视觉差异}。\\[4pt]
+\textbf{Reward：}
+$\mathcal{D}$ 在 $\mathcal{T}$ 猜错时胜出（欺骗成功）。\\
+$\mathcal{T}$ 在猜对\textbf{且}正确识别视觉差异时胜出。\\[6pt]
+\textbf{Round 2：刁难出题游戏}\\
+1. 从池中采样图像 $I$。\\
+2. $\mathcal{Q}$ 关于 $I$ 生成问题 $q$。\\
+3. Solver 尝试回答关于 $I$ 的 $q$。\\
+4. 对照 ground truth 验证答案
+   （由 $\mathcal{Q}$ 构造，并由欺骗者验证）。\\[4pt]
+\textbf{Reward：}
+$\mathcal{Q}$ 在 Solver 失败
+\textit{且}仔细重试后成功时获得 reward——
+证明问题是可答的但确实具有挑战性。\\
+Solver 因正确答案获得 reward。
+\end{tcolorbox}
+
+\paragraph{增强版 Iterative Self-Play Policy Optimization。}
+
+朴素 self-play 因两个玩家共同适应到固定策略而 plateau。
+我们用三个机制打破 plateau：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Population-based training：}
+    维护 $N$ 个模型 checkpoint 的种群（如 $N = 5$）。
+    每一轮，玩家从不同 checkpoint 中随机匹配。
+    防止对单一对手的共适应。
+
+  \item \textbf{RLVR refresh：}
+    每 $K$ 轮 self-play 后，注入一批
+    外部验证的视觉推理任务（有已知答案的标准 benchmark）。
+    将模型技能锚定在真实世界的相关性上，
+    防止漂移到游戏特有的策略。
+
+  \item \textbf{多样性 reward：}
+    欺骗者和出题者因生成\textit{新颖}的欺骗/问题
+    而获得额外 reward——
+    惩罚重复先前成功的策略。
+    用与最近生成缓冲区的 embedding distance 衡量。
+\end{enumerate}
+
+\paragraph{技能迁移机制。}
+
+关键问题：游戏技能能迁移到真实任务吗？
+
+\textbf{欺骗游戏 $\rightarrow$ 精细粒度视觉辨别。}
+成功欺骗需要 $\mathcal{D}$ 识别微妙的视觉差异。
+检测欺骗需要 $\mathcal{T}$ 仔细检查视觉细节。
+两种技能直接迁移到需要精细粒度视觉理解的任务
+（ChartQA, TextVQA, 医学影像）。
+
+\textbf{刁难出题游戏 $\rightarrow$ 视觉鲁棒性。}
+出题者学会靶向 language prior 无法解决的视觉细节。
+这直接对抗``越想越不看''危机（方向 A）。
+Solver 被迫回答真正依赖视觉的问题，
+发展出更强的视觉 grounding。
+
+\subsection{为什么是对抗性 Self-Play，而非仅仅 Self-Play}
+
+Vision-Zero 的``谁是卧底''是合作式的——
+两个玩家试图沟通，而非欺骗。
+我们的\textbf{欺骗游戏}是对抗性的：
+一个玩家主动试图误导另一个。
+
+对抗结构至关重要，因为它创造了\textbf{自下而上的课程压力}：
+\begin{itemize}[leftmargin=2em]
+  \item 欺骗者进步时，
+    侦探面临更难的挑战 $\rightarrow$ 被迫进步。
+  \item 侦探进步时，
+    欺骗者必须找到更微妙的欺骗 $\rightarrow$ 被迫进步。
+  \item 这创造了无界的难度递进——
+    不像固定数据集，挑战永远不会``用完''。
+\end{itemize}
+
+用博弈论语言说，欺骗游戏没有平凡的 Nash equilibrium：
+完美的欺骗需要越来越精微的视觉理解，
+完美的检测需要同等精微的感知。
+军备竞赛是生产性的，而非退化的。
+
+\begin{relatedbox}
+\textbf{与现有工作的区别：}
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{vs.\ Vision-Zero（arXiv 2509.25541）：}
+    Vision-Zero 使用合作式``谁是卧底''游戏。
+    我们使用\textit{对抗性}欺骗游戏，
+    显式要求精细粒度的视觉 grounding。
+    我们的游戏对视觉辨别施加更强的压力，
+    因为欺骗\textit{必须}靶向微妙的视觉差异。
+  \item \textbf{vs.\ V-Zero（arXiv 2601.10094）：}
+    V-Zero 的 Questioner 生成问题时没有对抗意图。
+    我们的出题者因\textit{击败} Solver 而获 reward——
+    创造靶向的难度，适应模型的弱点。
+  \item \textbf{vs.\ Active-Zero（arXiv 2602.11241）：}
+    Active-Zero 增加了主动图像检索，
+    但保持了相同的合作式游戏结构。
+    我们增加了对抗动态，
+    创造了本质上不同的训练压力。
+  \item \textbf{vs.\ GANs：}
+    GAN 生成图像；我们生成\textit{推理挑战}。
+    对抗动态作用于任务构造，而非数据生成。
+\end{itemize}
+\end{relatedbox}
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{自我提升曲线。}
+    跨 self-play 迭代（0, 10K, 50K, 200K, 500K 局游戏）
+    追踪模型在 held-out benchmark 上的表现
+    （MathVista, ChartQA, MMMU, POPE）。
+    \textbf{假设：}对数线性提升且无 plateau——
+    不同于固定数据训练的饱和。
+
+  \item \textbf{vs.\ 有监督 baseline。}
+    将我们的 self-play 训练模型与以下对比：
+    (a) 等量 compute 的人工标注数据 SFT，
+    (b) 等量 compute 的 preference pairs DPO，
+    (c) Vision-Zero 式合作 self-play。
+    \textbf{假设：}Self-play 在零标注成本下匹配 (a)(b)，
+    因对抗动态而优于 (c)。
+
+  \item \textbf{欺骗游戏质量分析。}
+    分析 $\mathcal{D}$ 跨训练产生的欺骗：
+    是否变得更微妙、更视觉 grounded？
+    \textbf{假设：}早期欺骗靶向明显差异
+    （``这张图背景是蓝色''）；
+    后期欺骗靶向精细细节
+    （``标签上第三个数字读作 7 而非 1''）。
+
+  \item \textbf{迁移到 out-of-distribution 任务。}
+    用自然图像做 self-play 训练；
+    在完全不同的领域评估
+    （医学影像、卫星图像、技术图纸）。
+    \textbf{假设：}\textit{仔细视觉检查的技能}
+    跨领域迁移，即使游戏图像完全不同。
+
+  \item \textbf{种群多样性分析。}
+    对比 population-based training（$N = 5$ checkpoints）
+    和单 checkpoint self-play。
+    \textbf{假设：}种群多样性防止了
+    单 checkpoint self-play 遭受的 Nash equilibrium 坍缩。
+
+  \item \textbf{Ablation：对抗 vs.\ 合作游戏。}
+    相同游戏结构但移除对抗激励
+    （欺骗者变为中立描述者）。
+    \textbf{假设：}对抗结构是必需的——
+    合作游戏更早 plateau，
+    因为它们不创造递增的难度压力。
+\end{enumerate}
+\end{expbox}
+
+\begin{riskbox}
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{退化的欺骗策略。}
+    欺骗者可能学会利用语言歧义
+    （``有一个 light 物体''——指明亮还是轻量？）
+    而非真正的视觉差异。
+    缓解：要求欺骗者在描述中引用
+    特定空间区域（bounding boxes），
+    将欺骗锚定到视觉内容。
+  \item \textbf{问题生成的 mode collapse。}
+    出题者可能收敛到狭窄的问题类型分布。
+    缓解：多样性 reward + 定期刷新图像池。
+  \item \textbf{Reward hacking。}
+    在任何 self-play 系统中，都有找到
+    exploiting reward 但不对应真实能力提升的策略的风险。
+    缓解：RLVR refresh + 外部 benchmark 验证检查点。
+  \item \textbf{计算成本。}
+    Self-play 需要大量游戏轮次，每轮涉及多次推理。
+    总 compute 可能显著高于标准 RLHF。
+    缓解：batch play（许多游戏并行）
+    + 高效的种群管理。
+  \item \textbf{负迁移。}
+    游戏特有的策略可能损害真实世界表现。
+    缓解：RLVR refresh 将模型锚定到真实世界任务。
+\end{itemize}
+\end{riskbox}
+
+
+\newpage
+% ============================================================
+\section{方向 D：世界模型对齐——教 VLM 因果推理而非相关推理}
+\label{sec:propD}
+% ============================================================
+
+\begin{proposalbox}[World-Model Alignment: Post-Train VLMs 做因果推理而非相关推理]{propD}
+\textbf{一句话摘要：}
+当前 VLM 学会了回答``图中有什么？''
+但无法可靠回答``如果...会怎样？''
+通过\textbf{因果脚手架}和\textbf{反事实验证}进行 post-training，
+我们将 VLM 从 pattern matcher 转变为因果推理器——
+这是再多的观察训练数据都产生不了的能力。
+\end{proposalbox}
+
+\subsection{第一性原理推导}
+
+\begin{whybox}
+\textbf{Why} do VLMs fail at physical reasoning
+(``塔会倒吗？'' ``如果移走这个积木会怎样？'')?\\
+$\rightarrow$ 因为它们从静态图像中学到的是统计相关性：
+``看起来像这样的塔通常在倒。''
+它们没有建模导致倒塌的\textit{物理力}。\\[3pt]
+\textbf{Why} don't VLMs learn physical forces from image data?\\
+$\rightarrow$ 因为图像是\textbf{观察性}的——
+它们展示世界\textit{如是}的状态，
+而非在不同条件下世界\textit{将如何}的状态。
+你无法从一张球在半空中的快照学到``重力''的概念。
+你需要看到条件改变时会发生什么。\\[3pt]
+\textbf{Why} is observational data insufficient for causal reasoning?\\
+$\rightarrow$ 这是因果推断的一个基本结论（Pearl, 2009）：
+\textbf{观察中的相关性无法区分因果关系和混淆关系}。
+``球靠近地面的图像与下落相关''可能意味着
+(a) 重力拉球向下，(b) 摄影师喜欢在球靠近地面时拍照，
+或 (c) 球正被向上抛。
+只有干预数据（``如果我放开球会怎样？''）才能消解歧义。\\[3pt]
+\textbf{Why} can't standard post-training provide interventional data?\\
+$\rightarrow$ 因为 SFT/DPO/RL 都在\textbf{结果级}信号上训练：
+``答案对了还是错了。''
+一个因错误原因答对的模型
+（``这种风格的塔通常会倒''）
+和一个正确推理的模型
+（``质心在基底之外''）获得相同的 reward。\\[3pt]
+\textbf{Root cause:}
+VLM 被训练成\textbf{观察数据上的 pattern matcher}。
+物理推理需要\textbf{反事实思维}——
+模拟模型从未观察过的条件下会发生什么的能力。
+这是一种根本不同的能力，
+\textit{不可能}仅通过扩大观察数据规模来涌现。
+需要一种显式教授因果结构的新 post-training 范式。
+\end{whybox}
+
+\subsection{核心论点}
+
+\begin{insightbox}
+考虑对``这堆积木会倒吗？''的两种回答：
+
+\textbf{回答 A（相关性推理）：}
+``会倒。我训练数据中类似的积木堆通常会倒。''
+
+\textbf{回答 B（因果推理）：}
+``积木堆有 5 块。由于第 3、4 块的偏移，
+质心大约在基底中心右侧 2cm 处。
+基底宽 10cm，所以质心在支撑多边形内。
+然而第 5 块伸出第 4 块 4cm，形成力臂。
+重力力矩超过摩擦反力矩。
+积木堆将从第 5 块开始向右倾倒。''
+
+回答 A 使用\textbf{相关性}：``看起来像会倒的东西。''
+回答 B 使用\textbf{因果性}：``这些力产生这个结果。''
+
+当前 VLM 能产出回答 A 但不能产出回答 B。
+差异不在于更多数据——
+而在于一种根本不同的推理类型。
+回答 B 需要一个内部\textbf{世界模型}——
+一个能预测物理力后果的因果模拟器。
+\end{insightbox}
+
+\subsection{版图：World Models 遇见 VLM Post-Training}
+
+2025--2026 年的版图显示两个方向的汇聚：
+
+\textbf{从 world model 一侧：}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{RLVR-World}（NeurIPS 2025, arXiv 2505.13934）：
+    对基于视频的 world model 施加 RLVR。
+    核心洞察：MLE 训练的 world model 与预测目标不对齐；
+    RL 修复了这一问题。
+    +9.2\% LPIPS 提升，收敛速度快 4 个数量级。
+  \item \textbf{Cosmos-Reason1}（NVIDIA, 2025.05）：
+    专门为物理推理 post-train VLM，
+    使用机器人和 embodied 数据上的 SFT + RL。
+\end{itemize}
+
+\textbf{从 VLM 推理一侧：}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Visual superiority hypothesis}（arXiv 2601.19834）：
+    对物理/空间任务，视觉生成是比文本更好的推理基底。
+    交织的 visual-text CoT 显著优于 text-only CoT。
+  \item \textbf{CausalPhys}（OpenReview 2025）：
+    引入因果物理推理 benchmark
+    （perception, anticipation, intervention, goal orientation）
+    和 Causal Rationale-informed Fine-Tuning（CRFT）策略。
+\end{itemize}
+
+\noindent
+缺口：这些工作分别处理 world model 和因果推理。
+没有人提出一个统一的 post-training 框架
+来\textbf{教 VLM 构建和查询物理场景的内部因果模型}。
+
+\subsection{方法：三阶段因果 Post-Training}
+
+\paragraph{Stage 1：因果脚手架（Causal Scaffolding）。}
+
+在教模型进行因果推理之前，先教它\textbf{因果推理的语言}。
+
+\begin{tcolorbox}[colback=gray!5,colframe=gray!50,boxrule=0.3pt,left=4pt,right=4pt]
+\small
+\textbf{标准 VLM 推理（相关性）：}\\
+\texttt{Q: 球会从桌子上滚下来吗？}\\
+\texttt{A: 看这张图，球似乎靠近边缘。}\\
+\texttt{根据类似情况，它可能会滚下来。}\\[6pt]
+\textbf{因果脚手架推理：}\\
+\texttt{Q: 球会从桌子上滚下来吗？}\\
+\texttt{<causal\_analysis>}\\
+\texttt{  物体：球（球体，r$\approx$5cm），桌子（平面，微倾）}\\
+\texttt{  力分析：}\\
+\texttt{    - 重力：向下，F = mg}\\
+\texttt{    - 法向力：垂直于桌面}\\
+\texttt{    - 沿桌面净力分量：F\_net = mg * sin($\theta$)}\\
+\texttt{  状态：球距边缘 3cm，桌面向右倾斜 $\approx$5°}\\
+\texttt{  预测：F\_net > 0 沿倾斜方向 → 球加速}\\
+\texttt{  到达边缘时间：$\approx$0.5s（基于估算加速度）}\\
+\texttt{</causal\_analysis>}\\
+\texttt{A: 会。桌面有约 5° 的右倾，}\\
+\texttt{产生沿边缘方向的净力分量。}\\
+\texttt{球距边缘仅约 3cm，将在约半秒内滚落。}
+\end{tcolorbox}
+
+\noindent
+\textbf{训练数据构造：}
+\begin{enumerate}[leftmargin=2em]
+  \item 从现有 benchmark 收集物理推理任务
+    （CausalPhys, CLEVRER, Physion, IntPhys）。
+  \item 用物理感知的 LLM（或带物理 prompting 的 GPT-4o）
+    生成因果脚手架：
+    物体识别 $\rightarrow$ 力分析 $\rightarrow$ 状态预测 $\rightarrow$ 结果。
+  \item 对照 ground truth 验证预测
+    （模拟环境或已知物理结果）。
+  \item 在这些因果脚手架轨迹上对 VLM 做 SFT。
+\end{enumerate}
+
+\paragraph{Stage 2：反事实验证训练（Counterfactual Verification）。}
+
+因果推理的定义特征是处理\textbf{反事实}的能力：
+``如果 X 不同会怎样？''
+我们显式训练这一能力。
+
+\textbf{数据构造：}
+对每个物理场景，生成反事实变体：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{属性反事实：}
+    ``如果球重两倍？''
+    $\rightarrow$ 轨迹相同，更快。
+    ``如果表面无摩擦？''
+    $\rightarrow$ 无减速。
+  \item \textbf{干预反事实：}
+    ``如果我把球向左推？''
+    $\rightarrow$ 方向反转。
+    ``如果我移走底部积木？''
+    $\rightarrow$ 坍塌。
+  \item \textbf{结构反事实：}
+    ``如果重力反转？''
+    $\rightarrow$ 球向上升。
+    （检验模型是否内化了因果机制，
+    而非仅仅是相关性。）
+\end{itemize}
+
+\textbf{训练：}
+在三元组上做 SFT：
+（原始场景 + 预测，反事实 + 预测，差异解释）。
+
+解释必须引用\textit{因果机制}：
+``在反事实中，质量翻倍，
+所以重力翻倍，
+但加速度不变（F = ma，两者线性缩放）。
+因此轨迹不变，只有撞击力改变。''
+
+\paragraph{Stage 3：基于模拟的因果 RL（Causal RL with Simulation-Based Reward）。}
+
+SFT 后，用 RL 精化因果推理，
+以\textbf{物理引擎作为 reward oracle}。
+
+\begin{enumerate}[leftmargin=2em]
+  \item 对一个物理场景，模型产出因果分析 + 预测。
+  \item 物理引擎（如 PyBullet, MuJoCo）
+    用提取的参数模拟该场景。
+  \item 模拟结果就是\textbf{ground truth}。
+  \item Reward：
+    \begin{itemize}
+      \item 预测与模拟一致 $\rightarrow$ 正 reward。
+      \item 因果分析与预测自洽 $\rightarrow$ 额外 reward。
+      \item 模型正确预测反事实条件下结果如何变化
+        $\rightarrow$ 更多额外 reward。
+    \end{itemize}
+\end{enumerate}
+
+\noindent
+物理引擎为物理推理提供了\textbf{完美、无限的 reward 信号}——
+不需要人工标注，reward 客观可验证。
+
+\subsection{为什么这超越了``更聪明的 VQA''}
+
+本方向不是关于在现有 benchmark 上更好的表现。
+它提出一种\textbf{质变的能力跃迁}：
+从一个识别物理情境的模型，
+到一个\textit{模拟}物理情境的模型。
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{2.5cm}p{4.5cm}p{4.5cm}}
+\toprule
+\textbf{能力} & \textbf{相关性 VLM} & \textbf{因果 VLM（本方向）} \\
+\midrule
+识别 & ``看起来像倒塌的塔'' & ``力不平衡'' \\
+预测 & 基于 pattern matching & 基于力/约束分析 \\
+反事实 & 无法处理 & ``如果基底更宽就稳定了'' \\
+干预 & 无法处理 & ``推这里可以防止倒塌'' \\
+迁移 & 领域特定 & 基于原理（迁移到新场景） \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{与 Embodied AI 的连接}
+
+一个具有真正因果推理能力的 VLM
+就是一个\textbf{zero-shot 机器人规划器}：
+给定场景图像和目标，
+它可以预测动作的后果并据此规划——
+不需要任务特定的训练。
+
+这与 Cosmos-Reason1 的愿景相连，
+但走得更深：
+我们不是在机器人特定数据上训练，
+而是训练\textit{通用因果推理能力}，
+使机器人规划成为可能。
+
+\begin{relatedbox}
+\textbf{与现有工作的区别：}
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{vs.\ RLVR-World（arXiv 2505.13934）：}
+    RLVR-World 用 RL 训练 world model（视频预测模型）。
+    我们训练 \textit{VLM}（产出语言的模型）做因果推理。
+    RLVR-World 产出更好的视频预测；
+    我们产出更好的口头因果解释。两者互补。
+  \item \textbf{vs.\ Cosmos-Reason1（NVIDIA）：}
+    Cosmos-Reason1 使用领域特定的机器人数据 post-training。
+    我们使用\textit{通用物理原理}作为脚手架，
+    目标是跨领域的因果推理，能够迁移。
+  \item \textbf{vs.\ CausalPhys / CRFT（OpenReview 2025）：}
+    CRFT 将因果图作为输入提供给模型。
+    我们训练模型\textit{自己生成}因果图。
+    CRFT 在推理时提供脚手架；我们内化了脚手架。
+  \item \textbf{vs.\ 标准物理推理 benchmark：}
+    现有 benchmark 测试模型是否答对。
+    我们训练（和评估）模型是否\textit{推理正确}——
+    对的答案出于对的原因，
+    由基于模拟的 reward 验证。
+\end{itemize}
+\end{relatedbox}
+
+\begin{expbox}
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{因果 vs.\ 相关性推理诊断。}
+    设计控制实验：
+    呈现相关性答案（基于视觉相似性）
+    与因果答案（基于物理原理）不同的物理场景。
+    例如：一个视觉上``看起来不稳''
+    但因隐藏约束而实际稳定的塔。
+    \textbf{假设：}标准 VLM 预测``倒''（相关性）；
+    我们的模型预测``稳定''（因果性）。
+
+  \item \textbf{反事实推理 benchmark。}
+    创建物理反事实 benchmark：
+    ``如果[属性改变]？'' ``如果[施加干预]？''
+    \textbf{假设：}我们的模型在反事实问题上
+    达到标准 VLM 的 $>$2 倍准确率——
+    因为反事实需要因果模型，而非相关性。
+
+  \item \textbf{物理模拟对齐。}
+    测量模型预测与物理引擎模拟
+    在 1000+ 场景上的相关性。
+    \textbf{假设：}我们的模型达到 $\rho > 0.7$；
+    标准 VLM 达到 $\rho < 0.4$。
+
+  \item \textbf{迁移到未见过的物理现象。}
+    在刚体物理（积木、球、斜面）上训练；
+    在流体力学、软体物理和多体碰撞上评估。
+    \textbf{假设：}因果推理部分迁移——
+    模型正确地将力分析原理应用到
+    动力学不同的现象上，
+    显示出对物理推理的真正内化。
+
+  \item \textbf{结构反事实测试。}
+    ``如果重力强 10 倍？'' ``如果摩擦力不存在？''
+    这些测试模型是否内化了\textit{机制}
+    而非仅仅是\textit{参数范围}。
+    \textbf{假设：}我们的模型正确处理
+    （通过调整相关因果变量）；
+    标准 VLM 失败或产生幻觉。
+
+  \item \textbf{机器人规划迁移。}
+    用因果 VLM 作为简单机器人操作任务
+    （``将积木 A 移到位置 X''）的 zero-shot planner。
+    与标准 VLM planner 对比。
+    \textbf{假设：}因果推理使规划更优，
+    因为模型能预测失败模式
+    （``这条轨迹会与积木 B 碰撞''）。
+\end{enumerate}
+\end{expbox}
+
+\begin{riskbox}
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{因果脚手架质量。}
+    为复杂物理场景生成正确的因果分析
+    对 GPT-4o 也很难。训练数据中的错误会传播。
+    缓解：用物理模拟验证所有训练脚手架；
+    丢弃未验证的样本。
+  \item \textbf{物理引擎的适用范围。}
+    物理引擎建模理想化的刚体动力学。
+    真实世界涉及可变形物体、流体、
+    复杂材料——模拟器处理不好。
+    缓解：从刚体场景开始，
+    逐步扩展到更复杂的物理。
+  \item \textbf{从图像提取物理参数。}
+    运行模拟需要物理参数
+    （质量、摩擦系数、尺寸）——
+    必须从图像估算，估算有噪声。
+    缓解：使用参数范围和 Monte Carlo 模拟；
+    奖励对参数不确定性鲁棒的预测。
+  \item \textbf{过拟合到模拟器伪影。}
+    如果模型学会匹配特定模拟器的行为
+    而非真实世界物理，
+    在真实场景上可能失败。
+    缓解：使用多个物理引擎
+    + 对部分训练数据用真实世界视频验证。
+  \item \textbf{``真实物理很难''的天花板。}
+    即使有完美的因果推理，
+    很多物理预测在没有精确测量的情况下是不可解的
+    （如混沌系统、湍流）。
+    缓解：训练模型识别
+    \textit{何时因果推理不够用}
+    并输出适当的不确定性。
+\end{itemize}
+\end{riskbox}
+
+
+\newpage
+% ============================================================
+\section*{四个方向的统一图景}
+% ============================================================
+
+四个方向攻击一个自然递进的假设链：
+
+\begin{center}
+\begin{tikzpicture}[
+  node distance=0.7cm,
+  box/.style={rectangle, draw, rounded corners=3pt,
+    minimum width=11.5cm, minimum height=1.4cm,
+    text width=11cm, align=center, font=\small},
+  arrow/.style={-{Stealth[length=3mm]}, thick, gray!70},
+]
+\node[box, fill=propA!10, draw=propA!70] (pA)
+  {\textbf{方向 A：视觉承诺训练}\\
+   挑战：``RL reward 对模态中性''\\
+   修复：在梯度层面强制视觉优先的因果顺序};
+
+\node[box, fill=propB!10, draw=propB!70, below=of pA] (pB)
+  {\textbf{方向 B：潜在视觉推理链}\\
+   挑战：``推理链必须是语言形式''\\
+   修复：产出紧凑的潜在视觉 token 作为中间推理步骤};
+
+\node[box, fill=propC!10, draw=propC!70, below=of pB] (pC)
+  {\textbf{方向 C：对抗性自我对弈}\\
+   挑战：``VLM 提升需要外部监督''\\
+   修复：结果可验证的竞争性视觉游戏};
+
+\node[box, fill=propD!10, draw=propD!70, below=of pC] (pD)
+  {\textbf{方向 D：世界模型对齐}\\
+   挑战：``VLM 从观察中学到理解''\\
+   修复：因果脚手架 + 反事实验证 + 模拟 reward};
+
+\draw[arrow] (pA) -- node[right, font=\scriptsize, text=gray]
+  {grounding 已保障} (pB);
+\draw[arrow] (pB) -- node[right, font=\scriptsize, text=gray]
+  {推理模态已解放} (pC);
+\draw[arrow] (pC) -- node[right, font=\scriptsize, text=gray]
+  {监督已移除} (pD);
+\end{tikzpicture}
+\end{center}
+
+\noindent
+逻辑递进：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{A $\rightarrow$ B：}
+    一旦视觉承诺确保模型确实\textit{使用}了视觉证据，
+    下一个问题是文本是否是视觉推理的正确介质。
+    方向 B 说不——用潜在视觉 token。
+  \item \textbf{B $\rightarrow$ C：}
+    一旦模型能在文本和视觉潜在空间中推理，
+    瓶颈转移到训练数据。
+    方向 C 通过 self-play 消除这一瓶颈。
+  \item \textbf{C $\rightarrow$ D：}
+    一旦模型能在观察性任务上自我提升，
+    最终前沿是\textit{因果}推理——
+    仅靠观察无法涌现，
+    需要结构化的反事实训练。
+\end{itemize}
+
+\noindent
+每个方向也可以独立推进。
+逻辑递进提示了一条自然的研究路线图，
+但每个方向都处理一个独立、自洽的研究问题。
+
+\subsection*{优先排序}
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{最紧迫（解决一场危机）：}
+    方向 A——``越想越不看''危机
+    是每个正在应用 RLVR 的 VLM 实验室当前面临的实际问题。
+  \item \textbf{最深层的范式转变：}
+    方向 B——挑战推理必须是语言的，
+    是我们攻击的最基本假设。
+  \item \textbf{最大实用影响：}
+    方向 C——消除人工标注，
+    在规模上解锁 VLM 提升。
+  \item \textbf{最新颖的疆域：}
+    方向 D——从图像做因果推理，
+    开启当前没有 VLM 能实现的能力。
+\end{itemize}
+
+\end{document}
