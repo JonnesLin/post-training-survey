@@ -38,7 +38,7 @@ reward model 和 value model --- 四个大型模型的显存开销使得
 \crossref{2}{sec:t2}
 
 \paragraph{数据成本。}
-高质量 instruction-following 数据的人工标注成本高昂：
+高质量 instruction\hyp{}following 数据的人工标注成本高昂：
 InstructGPT \cite{ouyang2022instructgpt} 雇用了 40 名标注员，
 标注过程涉及复杂的质量控制流程。
 Preference 数据的标注则更为困难 ---
@@ -217,7 +217,7 @@ DoRA 将权重矩阵分解为 magnitude 和 direction 两个分量：$W = m \cdo
 在多种 NLP 和视觉任务上一致超越 LoRA
 （视觉语言模型的 post-training 方法见 \crossref{5}{sec:t5}）。
 
-\paragraph{PERL: Parameter Efficient RL from Human Feedback。}
+\paragraph{PERL: Parameter-Efficient RLHF。}
 Sidahmed et al.\ \cite{sidahmed2024perl} 将 LoRA 系统性地应用于 RLHF 的 PPO 阶段，
 证明了在 reward model 和 policy model 上都使用 LoRA 可以将
 RLHF 的显存需求降低 50\% 以上，且最终 alignment 性能与 full fine-tuning RLHF 相当。

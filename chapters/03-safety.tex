@@ -569,9 +569,9 @@ RepE 的核心技术是 \textbf{LAT} ---
 例如，将 honesty reading vector 加到 hidden state 上可以显著提升模型的 truthfulness
 （在 TruthfulQA 上达到 state-of-the-art）。
 
-Zou et al.\ 展示了 RepE 可以有效控制模型的多种高层行为，包括：
-honesty/truthfulness、utility、morality、power-seeking、emotion、
-harmlessness、fairness、knowledge editing 和 memorization。
+Zou et al.\ 展示了 RepE 可以有效控制模型的多种高层行为，
+包括 honesty、utility、morality、power-seeking、
+harmlessness、fairness 和 knowledge editing 等。
 
 \paragraph{相关工作的印证与扩展.}
 RepE 的核心思想与多项独立工作相互印证：
@@ -901,8 +901,8 @@ RepE & Control & No & Linear steering vectors in representation space & Safety e
 \end{tabularx}
 \end{table}
 
-Thread~3 的演化呈现出一条清晰的主线：
-从 HH-RLHF 暴露 helpfulness--harmlessness 张力，
+Thread~3 的演化呈现出清晰的主线：
+从 HH-RLHF 暴露 helpfulness--harm\-less\-ness 张力，
 到 CAI 和 Safe RLHF 提供系统化的训练方案，
 再到 jailbreaking 军备竞赛持续挑战这些方案的鲁棒性，
 RepE 开启了从行为层面到表示层面的范式转变，
