@@ -1835,6 +1835,26 @@ Qwen2.5-Omni 的 speech-text 性能匹配是一个里程碑，
 \label{fig:multimodal-evolution}
 \end{figure}
 
+\begin{table}[!ht]
+\centering
+\caption{Thread 5 核心方法对比。Vision-LLM Bridge 指视觉信息接入 LLM 的方式。}
+\label{tab:multimodal-comparison}
+\small
+\begin{tabularx}{\textwidth}{l >{\raggedright\arraybackslash}p{2.5cm} >{\raggedright\arraybackslash}p{2.5cm} >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Method} & \textbf{Vision-LLM Bridge} & \textbf{Post-training} & \textbf{Key Contribution} \\
+\midrule
+Flamingo & Gated cross-attention & Frozen LLM; visual SFT & Visual in-context learning (few-shot) \\
+LLaVA & Linear projection & Two-stage SFT (align + instruct) & Visual instruction tuning at $<$\$300 \\
+InstructBLIP & Instruction-aware Q-Former & Instruction-conditioned SFT & Task-specific visual feature extraction \\
+Kosmos-2 & Interleaved tokens & SFT with grounding data & Bounding box grounding in text \\
+LLaVA-RLHF & Linear projection & SFT + factuality-focused RLHF & First multimodal preference optimization \\
+RLHF-V / mDPO & Various & DPO on hallucination pairs & Fine-grained hallucination reduction \\
+LLaVA-OneVision & AnyRes encoding & Multi-stage SFT & Unified image / video / multi-image \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
 Thread~5 的演化轨迹展现了 VLM 从``看见''到``理解''再到``推理''的能力跃迁：
 
 \begin{enumerate}[leftmargin=2em]

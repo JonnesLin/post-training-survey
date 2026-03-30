@@ -758,6 +758,25 @@ synthetic data vs.\ human data、PPO vs.\ GRPO 等不同策略组合的 ROI。
 \label{fig:efficiency-evolution}
 \end{figure}
 
+\begin{table}[!ht]
+\centering
+\caption{Thread 7 核心方法对比。Efficiency Dimension 区分参数效率、数据效率和算法效率。}
+\label{tab:efficiency-comparison}
+\small
+\begin{tabularx}{\textwidth}{l >{\raggedright\arraybackslash}p{2.2cm} >{\raggedright\arraybackslash}p{2.2cm} >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Method} & \textbf{Efficiency Dim.} & \textbf{Resource Savings} & \textbf{Key Innovation} \\
+\midrule
+LoRA & Parameter & 0.1\% trainable params & Low-rank adapter matrices; frozen backbone \\
+QLoRA & Parameter & 4-bit base + LoRA & NF4 quantization; paged optimizers \\
+LIMA & Data & 1K samples suffice & Superficial Alignment Hypothesis \\
+Self-Instruct & Data & \$600 API cost & Bootstrap 52K instructions from 175 seeds \\
+Zephyr & Data + Algorithm & No human annotation & GPT-4 distillation + DPO; 7B $>$ 70B \\
+GRPO & Algorithm & No value network & Group-normalized advantage replaces critic \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
 Thread~7 的演化揭示了 post-training 从``大力出奇迹''走向``精打细算''的必然趋势：
 
 \begin{enumerate}[leftmargin=2em]

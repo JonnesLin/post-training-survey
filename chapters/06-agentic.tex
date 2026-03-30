@@ -874,6 +874,26 @@ Devin 的全自主模式 vs.\ Claude Code 的分层权限模型——
 \label{fig:agentic-evolution}
 \end{figure}
 
+\begin{table}[!ht]
+\centering
+\caption{Thread 6 核心方法对比。Action Space 区分 API 调用、代码执行和 GUI 操作。}
+\label{tab:agentic-comparison}
+\small
+\begin{tabularx}{\textwidth}{l >{\raggedright\arraybackslash}p{2.2cm} >{\raggedright\arraybackslash}p{2.2cm} >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Method} & \textbf{Action Space} & \textbf{Training Signal} & \textbf{Key Innovation} \\
+\midrule
+WebGPT & Browser commands & RLHF (human pref.) & First RL-trained tool-using LM \\
+Toolformer & API calls (5 tools) & Self-supervised (PPL) & Autonomous tool-use learning; no human labels \\
+ReAct & Text (Thought + Act) & Prompt-only (no train) & Interleaved reasoning and action in one sequence \\
+ToolLLM & 16K+ real APIs & SFT + DFSDT search & Industrial-scale function calling \\
+HuggingGPT & Multi-model dispatch & Prompt-only & LLM as controller orchestrating expert models \\
+SWE-Agent & Code + shell (ACI) & SFT on trajectories & Agent-Computer Interface; 12.47\% SWE-bench \\
+Computer Use & GUI (mouse + keyboard) & SFT + RL & Continuous GUI action space; screenshot grounding \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
 Thread~6 的演化轨迹清晰地展现了 LLM 从``被动文本生成器''
 到``主动世界交互者''的转变过程：
 
