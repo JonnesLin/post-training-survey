@@ -1793,6 +1793,48 @@ Qwen2.5-Omni 的 speech-text 性能匹配是一个里程碑，
 
 \subsection{小结}
 
+\begin{figure}[!ht]
+\centering
+\begin{tikzpicture}[
+  node distance=0.6cm and 1.2cm,
+  every node/.style={font=\small},
+  milestone/.style={rectangle, rounded corners, draw=thread5, fill=thread5!10,
+    text width=4.2cm, minimum height=0.8cm, align=center, font=\small\bfseries},
+  branch/.style={rectangle, rounded corners, draw=gray!60, fill=gray!5,
+    text width=3.2cm, minimum height=0.7cm, align=center, font=\small},
+  arrow/.style={-{Stealth[length=2.5mm]}, thick, thread5!70},
+  brancharrow/.style={-{Stealth[length=2mm]}, gray!60, thick},
+]
+% Main timeline
+\node[milestone] (flamingo) {Flamingo (2022)\\Visual In-Context Learning};
+\node[milestone, below=1.2cm of flamingo] (llava) {LLaVA (2023)\\Visual Instruction Tuning};
+\node[milestone, below=1.2cm of llava] (rlhf) {LLaVA-RLHF (2023)\\Multimodal Preference Opt.};
+
+% Branches
+\node[branch, below left=1.2cm and 0.5cm of rlhf] (brA) {Branch A: 架构创新\\InstructBLIP, Kosmos-2};
+\node[branch, below right=1.2cm and 0.5cm of rlhf] (brB) {Branch B: 幻觉治理\\POPE, RLHF-V, mDPO};
+
+% Convergence
+\node[milestone, below=2.8cm of rlhf] (onevision) {LLaVA-OneVision (2024)\\Unified Multi-task};
+\node[milestone, below=1.2cm of onevision] (mmreason) {Multimodal Reasoning\\(2025)};
+\node[branch, below=1.2cm of mmreason] (conv) {收敛：从``看见''到``推理''\\CoT + Vision 融合};
+
+% Arrows
+\draw[arrow] (flamingo) -- (llava);
+\draw[arrow] (llava) -- (rlhf);
+\draw[brancharrow] (rlhf) -- (brA);
+\draw[brancharrow] (rlhf) -- (brB);
+\draw[arrow] (rlhf) -- (onevision);
+\draw[arrow] (onevision) -- (mmreason);
+\draw[brancharrow] (brA) -- (onevision);
+\draw[brancharrow] (brB) -- (onevision);
+\draw[arrow] (mmreason) -- (conv);
+\end{tikzpicture}
+\caption{Thread 5 演化路径：从 visual in-context learning 到多模态推理融合。
+橙色节点为 landmark 工作，灰色节点为重要分支。}
+\label{fig:multimodal-evolution}
+\end{figure}
+
 Thread~5 的演化轨迹展现了 VLM 从``看见''到``理解''再到``推理''的能力跃迁：
 
 \begin{enumerate}[leftmargin=2em]

@@ -832,6 +832,48 @@ Devin 的全自主模式 vs.\ Claude Code 的分层权限模型——
 
 \subsection{小结}
 
+\begin{figure}[!ht]
+\centering
+\begin{tikzpicture}[
+  node distance=0.6cm and 1.2cm,
+  every node/.style={font=\small},
+  milestone/.style={rectangle, rounded corners, draw=thread6, fill=thread6!10,
+    text width=4.2cm, minimum height=0.8cm, align=center, font=\small\bfseries},
+  branch/.style={rectangle, rounded corners, draw=gray!60, fill=gray!5,
+    text width=3.2cm, minimum height=0.7cm, align=center, font=\small},
+  arrow/.style={-{Stealth[length=2.5mm]}, thick, thread6!70},
+  brancharrow/.style={-{Stealth[length=2mm]}, gray!60, thick},
+]
+% Main timeline
+\node[milestone] (webgpt) {WebGPT (2022)\\RL for Tool Use};
+\node[milestone, below=1.2cm of webgpt] (react) {ReAct (2023)\\Thought--Action--Observation};
+\node[milestone, below=1.2cm of react] (func) {Function Calling (2023)\\Large-scale API Integration};
+
+% Branches
+\node[branch, below left=1.2cm and 0.5cm of func] (brA) {Branch A: Code Agents\\CodeRL, SWE-Agent};
+\node[branch, below right=1.2cm and 0.5cm of func] (brB) {Branch B: Multi-tool\\HuggingGPT, AgentBench};
+
+% Convergence
+\node[milestone, below=2.8cm of func] (swebench) {SWE-bench (2024)\\Coding Agent Convergence};
+\node[milestone, below=1.2cm of swebench] (prod) {Computer Use / MCP\\(2025--2026)};
+\node[branch, below=1.2cm of prod] (conv) {收敛：Agent SFT + RL\\+ 环境优化 三阶段范式};
+
+% Arrows
+\draw[arrow] (webgpt) -- (react);
+\draw[arrow] (react) -- (func);
+\draw[brancharrow] (func) -- (brA);
+\draw[brancharrow] (func) -- (brB);
+\draw[arrow] (func) -- (swebench);
+\draw[arrow] (swebench) -- (prod);
+\draw[brancharrow] (brA) -- (swebench);
+\draw[brancharrow] (brB) -- (swebench);
+\draw[arrow] (prod) -- (conv);
+\end{tikzpicture}
+\caption{Thread 6 演化路径：从 RL-based tool use 到 coding agent 生产级部署。
+青色节点为 landmark 工作，灰色节点为重要分支。}
+\label{fig:agentic-evolution}
+\end{figure}
+
 Thread~6 的演化轨迹清晰地展现了 LLM 从``被动文本生成器''
 到``主动世界交互者''的转变过程：
 

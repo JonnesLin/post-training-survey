@@ -984,6 +984,48 @@ Qwen3 的四阶段流水线提供了一种显式的训练方案，
 
 \subsection{小结}
 
+\begin{figure}[!ht]
+\centering
+\begin{tikzpicture}[
+  node distance=0.6cm and 1.2cm,
+  every node/.style={font=\small},
+  milestone/.style={rectangle, rounded corners, draw=thread4, fill=thread4!10,
+    text width=4.2cm, minimum height=0.8cm, align=center, font=\small\bfseries},
+  branch/.style={rectangle, rounded corners, draw=gray!60, fill=gray!5,
+    text width=3.2cm, minimum height=0.7cm, align=center, font=\small},
+  arrow/.style={-{Stealth[length=2.5mm]}, thick, thread4!70},
+  brancharrow/.style={-{Stealth[length=2mm]}, gray!60, thick},
+]
+% Main timeline
+\node[milestone] (cot) {CoT (Wei 2022)\\Chain-of-Thought Prompting};
+\node[milestone, below=1.2cm of cot] (star) {STaR (Zelikman 2022)\\Self-Taught Reasoner};
+\node[milestone, below=1.2cm of star] (prm) {PRM (Lightman 2023)\\Process Reward Model};
+
+% Branches
+\node[branch, below left=1.2cm and 0.5cm of prm] (brA) {Branch A: 推理时扩展\\Self-Consistency, Best-of-N};
+\node[branch, below right=1.2cm and 0.5cm of prm] (brB) {Branch B: RL 训练\\GRPO, REINFORCE++};
+
+% Convergence
+\node[milestone, below=2.8cm of prm] (o1) {o1 (OpenAI 2024)\\Thinking Model Paradigm};
+\node[milestone, below=1.2cm of o1] (r1) {DeepSeek-R1 (2025)\\RL from Scratch};
+\node[branch, below=1.2cm of r1] (conv) {收敛：Thinking Models\\成为行业默认模式};
+
+% Arrows
+\draw[arrow] (cot) -- (star);
+\draw[arrow] (star) -- (prm);
+\draw[brancharrow] (prm) -- (brA);
+\draw[brancharrow] (prm) -- (brB);
+\draw[arrow] (prm) -- (o1);
+\draw[arrow] (o1) -- (r1);
+\draw[brancharrow] (brA) -- (o1);
+\draw[brancharrow] (brB) -- (o1);
+\draw[arrow] (r1) -- (conv);
+\end{tikzpicture}
+\caption{Thread 4 演化路径：从 chain-of-thought prompting 到 thinking models 成为默认模式。
+紫色节点为 landmark 工作，灰色节点为重要分支。}
+\label{fig:reasoning-evolution}
+\end{figure}
+
 Thread~4 的演化轨迹清晰地展现了 post-training 领域的一个核心范式转变：
 从 \textbf{inference-time prompting}（CoT、Self-Consistency）
 到 \textbf{training-time internalization}（STaR、GRPO、R1），

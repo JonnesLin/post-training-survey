@@ -840,6 +840,48 @@ Multimodal safety 的系统性解决方案仍然是一个开放问题
 
 \subsection{小结}
 
+\begin{figure}[!ht]
+\centering
+\begin{tikzpicture}[
+  node distance=0.6cm and 1.2cm,
+  every node/.style={font=\small},
+  milestone/.style={rectangle, rounded corners, draw=thread3, fill=thread3!10,
+    text width=4.2cm, minimum height=0.8cm, align=center, font=\small\bfseries},
+  branch/.style={rectangle, rounded corners, draw=gray!60, fill=gray!5,
+    text width=3.2cm, minimum height=0.7cm, align=center, font=\small},
+  arrow/.style={-{Stealth[length=2.5mm]}, thick, thread3!70},
+  brancharrow/.style={-{Stealth[length=2mm]}, gray!60, thick},
+]
+% Main timeline
+\node[milestone] (hh) {HH-RLHF (2022)\\Helpfulness--Harmlessness 张力};
+\node[milestone, below=1.2cm of hh] (cai) {Constitutional AI (2022)\\AI Self-Alignment};
+\node[milestone, below=1.2cm of cai] (redteam) {Red Teaming (2022)\\LLM-based Adversarial Testing};
+
+% Branches
+\node[branch, below left=1.2cm and 0.5cm of redteam] (brA) {Branch A: 训练方案\\Safe RLHF, Lagrangian};
+\node[branch, below right=1.2cm and 0.5cm of redteam] (brB) {Branch B: 攻击分析\\GCG, Jailbreak Taxonomy};
+
+% Convergence
+\node[milestone, below=2.8cm of redteam] (repe) {RepE (2023)\\Representation Engineering};
+\node[milestone, below=1.2cm of repe] (agent) {Reasoning Model Safety\\(2025--2026)};
+\node[branch, below=1.2cm of agent] (conv) {范式转变：从行为层面\\到表示层面 + Agent 安全};
+
+% Arrows
+\draw[arrow] (hh) -- (cai);
+\draw[arrow] (cai) -- (redteam);
+\draw[brancharrow] (redteam) -- (brA);
+\draw[brancharrow] (redteam) -- (brB);
+\draw[arrow] (redteam) -- (repe);
+\draw[arrow] (repe) -- (agent);
+\draw[brancharrow] (brA) -- (repe);
+\draw[brancharrow] (brB) -- (repe);
+\draw[arrow] (agent) -- (conv);
+\end{tikzpicture}
+\caption{Thread 3 演化路径：从 helpfulness--harmlessness 张力到表示工程与 agent 安全。
+红色节点为 landmark 工作，灰色节点为重要分支。}
+\label{fig:safety-evolution}
+\end{figure}
+
 Thread~3 的演化呈现出一条清晰的主线：
 从 HH-RLHF 暴露 helpfulness--harmlessness 张力，
 到 CAI 和 Safe RLHF 提供系统化的训练方案，

@@ -716,6 +716,48 @@ synthetic data vs.\ human data、PPO vs.\ GRPO 等不同策略组合的 ROI。
 
 \subsection{小结}
 
+\begin{figure}[!ht]
+\centering
+\begin{tikzpicture}[
+  node distance=0.6cm and 1.2cm,
+  every node/.style={font=\small},
+  milestone/.style={rectangle, rounded corners, draw=thread7, fill=thread7!10,
+    text width=4.2cm, minimum height=0.8cm, align=center, font=\small\bfseries},
+  branch/.style={rectangle, rounded corners, draw=gray!60, fill=gray!5,
+    text width=3.2cm, minimum height=0.7cm, align=center, font=\small},
+  arrow/.style={-{Stealth[length=2.5mm]}, thick, thread7!70},
+  brancharrow/.style={-{Stealth[length=2mm]}, gray!60, thick},
+]
+% Main timeline
+\node[milestone] (lora) {LoRA (2022)\\Parameter-Efficient Fine-Tuning};
+\node[milestone, below=1.2cm of lora] (lima) {LIMA (2023)\\1000 Samples Suffice};
+\node[milestone, below=1.2cm of lima] (qlora) {QLoRA (2023)\\4-bit Quantized Adaptation};
+
+% Branches
+\node[branch, below left=1.2cm and 0.5cm of qlora] (brA) {Branch A: 合成数据\\Self-Instruct, Alpaca};
+\node[branch, below right=1.2cm and 0.5cm of qlora] (brB) {Branch B: 数据策展\\phi-1, IFD, DEITA};
+
+% Convergence
+\node[milestone, below=2.8cm of qlora] (zephyr) {Zephyr (2023)\\Distillation Pipeline};
+\node[milestone, below=1.2cm of zephyr] (grpo) {GRPO (2024)\\Algorithmic Simplification};
+\node[branch, below=1.2cm of grpo] (conv) {收敛：数据 + 参数 + 算法\\三路效率融合};
+
+% Arrows
+\draw[arrow] (lora) -- (lima);
+\draw[arrow] (lima) -- (qlora);
+\draw[brancharrow] (qlora) -- (brA);
+\draw[brancharrow] (qlora) -- (brB);
+\draw[arrow] (qlora) -- (zephyr);
+\draw[arrow] (zephyr) -- (grpo);
+\draw[brancharrow] (brA) -- (zephyr);
+\draw[brancharrow] (brB) -- (zephyr);
+\draw[arrow] (grpo) -- (conv);
+\end{tikzpicture}
+\caption{Thread 7 演化路径：从参数效率突破到数据--参数--算法三路融合。
+棕色节点为 landmark 工作，灰色节点为重要分支。}
+\label{fig:efficiency-evolution}
+\end{figure}
+
 Thread~7 的演化揭示了 post-training 从``大力出奇迹''走向``精打细算''的必然趋势：
 
 \begin{enumerate}[leftmargin=2em]

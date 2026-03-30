@@ -957,6 +957,48 @@ PRM 的 process-level 监督是否从根本上缓解了 ORM 的泛化问题，
 
 \subsection{小结}
 
+\begin{figure}[!ht]
+\centering
+\begin{tikzpicture}[
+  node distance=0.6cm and 1.2cm,
+  every node/.style={font=\small},
+  milestone/.style={rectangle, rounded corners, draw=thread2, fill=thread2!10,
+    text width=4.2cm, minimum height=0.8cm, align=center, font=\small\bfseries},
+  branch/.style={rectangle, rounded corners, draw=gray!60, fill=gray!5,
+    text width=3.2cm, minimum height=0.7cm, align=center, font=\small},
+  arrow/.style={-{Stealth[length=2.5mm]}, thick, thread2!70},
+  brancharrow/.style={-{Stealth[length=2mm]}, gray!60, thick},
+]
+% Main timeline
+\node[milestone] (christiano) {Christiano et al.\ (2017)\\Comparison-based RL};
+\node[milestone, below=1.2cm of christiano] (instructgpt) {InstructGPT (2022)\\SFT$\rightarrow$RM$\rightarrow$PPO Pipeline};
+\node[milestone, below=1.2cm of instructgpt] (dpo) {DPO (2023)\\Implicit Reward Optimization};
+
+% Branches
+\node[branch, below left=1.2cm and 0.5cm of dpo] (brA) {Branch A: 信号增强\\Constitutional AI, PRM};
+\node[branch, below right=1.2cm and 0.5cm of dpo] (brB) {Branch B: Offline 变体\\IPO, KTO, SimPO};
+
+% Convergence
+\node[milestone, below=2.8cm of dpo] (grpo) {GRPO (2024)\\Group Relative Policy Opt.};
+\node[milestone, below=1.2cm of grpo] (dapo) {DAPO / RLVR (2025)\\Verifiable Reward Paradigm};
+\node[branch, below=1.2cm of dapo] (conv) {范式分化：可验证$\rightarrow$RLVR\\开放任务$\rightarrow$RLHF/DPO};
+
+% Arrows
+\draw[arrow] (christiano) -- (instructgpt);
+\draw[arrow] (instructgpt) -- (dpo);
+\draw[brancharrow] (dpo) -- (brA);
+\draw[brancharrow] (dpo) -- (brB);
+\draw[arrow] (dpo) -- (grpo);
+\draw[arrow] (grpo) -- (dapo);
+\draw[brancharrow] (brA) -- (grpo);
+\draw[brancharrow] (brB) -- (grpo);
+\draw[arrow] (dapo) -- (conv);
+\end{tikzpicture}
+\caption{Thread 2 演化路径：从 comparison-based reward learning 到 RLVR 范式分化。
+蓝色节点为 landmark 工作，灰色节点为重要分支。}
+\label{fig:pref-evolution}
+\end{figure}
+
 Preference optimization 领域的演化路径可以概括为：
 从 Christiano et al.\ 的 comparison-based reward learning 原型出发，
 经由 InstructGPT 的工业级三阶段 pipeline 确立标准范式，
