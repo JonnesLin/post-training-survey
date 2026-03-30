@@ -999,6 +999,26 @@ PRM 的 process-level 监督是否从根本上缓解了 ORM 的泛化问题，
 \label{fig:pref-evolution}
 \end{figure}
 
+\begin{table}[!ht]
+\centering
+\caption{Thread 2 核心方法对比。Needs RM 指是否需要独立的 learned reward model。}
+\label{tab:pref-comparison}
+\small
+\begin{tabularx}{\textwidth}{l c c >{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Method} & \textbf{Needs RM?} & \textbf{On/Offline} & \textbf{Core Mechanism} & \textbf{Limitation} \\
+\midrule
+RLHF/PPO & Yes & Online & PPO with KL penalty against $\pi_{\text{ref}}$; explicit reward model & 4 models; training instability \\
+DPO & No & Offline & Implicit reward via $\log \frac{\pi_\theta}{\pi_{\text{ref}}}$; supervised loss & Distribution shift; likelihood displacement \\
+IPO & No & Offline & MSE loss; relaxes Bradley-Terry assumption & Same offline issues as DPO \\
+KTO & No & Offline & Pointwise labels only (thumbs up/down) & Weaker signal than pairwise \\
+SimPO & No & Offline & Avg log-prob as reward; no $\pi_{\text{ref}}$ needed & No reference anchor \\
+GRPO & Optional & Online & Group-normalized advantage; no value network & Multiple samples per prompt \\
+DAPO & No (rule) & Online & RLVR: clip-higher + dynamic sampling & Verifiable tasks only \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
 Preference optimization 领域的演化路径可以概括为：
 从 Christiano et al.\ 的 comparison-based reward learning 原型出发，
 经由 InstructGPT 的工业级三阶段 pipeline 确立标准范式，
