@@ -882,6 +882,25 @@ Multimodal safety 的系统性解决方案仍然是一个开放问题
 \label{fig:safety-evolution}
 \end{figure}
 
+\begin{table}[!ht]
+\centering
+\caption{Thread 3 核心方法对比。Category 区分训练阶段方法、攻击方法和分析/控制方法。}
+\label{tab:safety-comparison}
+\small
+\begin{tabularx}{\textwidth}{l c c >{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Method} & \textbf{Category} & \textbf{Human Labels?} & \textbf{Key Mechanism} & \textbf{Limitation} \\
+\midrule
+HH-RLHF & Training & Yes (pairwise) & Single reward encoding helpfulness + harmlessness & Evasiveness from objective conflict \\
+CAI & Training & No (AI) & Constitution principles + RLAIF self-critique & Bounded by model's own judgment \\
+Safe RLHF & Training & Yes (decoupled) & CMDP: maximize $R$ s.t.\ $C \leq d$; Lagrangian $\lambda$ & Still requires human annotation \\
+Red Teaming & Evaluation & Minimal & LM generates attacks; RL-optimized for success rate & Coverage limited to known patterns \\
+GCG & Attack & None & Gradient-based adversarial suffix optimization & White-box; but cross-model transfer \\
+RepE & Control & No & Linear steering vectors in representation space & Safety encoded as fragile single direction \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
 Thread~3 的演化呈现出一条清晰的主线：
 从 HH-RLHF 暴露 helpfulness--harmlessness 张力，
 到 CAI 和 Safe RLHF 提供系统化的训练方案，
