@@ -940,6 +940,9 @@ Zheng et al.\ \cite{zheng2023secrets1} 和 Wang et al.\ \cite{wang2024secrets2}
 发现 reward model 的性能对这些因素高度敏感，
 且存在显著的 distribution shift 问题——
 在一组 prompt 类型上训练的 RM 在新类型上的表现可能严重退化。
+这一问题在多模态场景中尤为突出，
+因为视觉-语言偏好信号的标注成本更高且主观性更强
+（\crossref{5}{sec:t5-branch-a}）。
 
 更深层的问题是：当 policy 模型的能力超过 reward model 时，
 reward model 是否仍然是有效的训练信号？

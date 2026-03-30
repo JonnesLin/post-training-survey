@@ -214,7 +214,8 @@ magnitude 与 direction 变化模式上存在显著差异。
 DoRA 将权重矩阵分解为 magnitude 和 direction 两个分量：$W = m \cdot \frac{V}{\|V\|}$，
 其中 magnitude $m$ 单独学习，direction $V$ 通过 LoRA 的低秩更新进行调整。
 这种分解使得 DoRA 能够在不增加推理开销的前提下（部署时同样可合并权重），
-在多种 NLP 和视觉任务上一致超越 LoRA。
+在多种 NLP 和视觉任务上一致超越 LoRA
+（视觉语言模型的 post-training 方法见 \crossref{5}{sec:t5}）。
 
 \paragraph{PERL: Parameter Efficient RL from Human Feedback。}
 Sidahmed et al.\ \cite{sidahmed2024perl} 将 LoRA 系统性地应用于 RLHF 的 PPO 阶段，
