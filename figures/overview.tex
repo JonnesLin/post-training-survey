@@ -10,30 +10,37 @@
     node distance=0.6cm,
     paper/.style={
         rounded corners=2pt,
-        font=\scriptsize\bfseries,
-        inner sep=3pt,
-        minimum height=0.5cm,
+        font=\footnotesize\bfseries,
+        inner sep=4pt,
+        minimum height=0.65cm,
         text=white,
         drop shadow={shadow xshift=0.5pt, shadow yshift=-0.5pt, opacity=0.3},
     },
     crossarrow/.style={
         ->,
         dashed,
-        thick,
-        gray!70,
+        very thick,
         shorten >=2pt,
         shorten <=2pt,
+    },
+    arrowlabel/.style={
+        font=\tiny\itshape,
+        fill=white,
+        fill opacity=0.85,
+        text opacity=1,
+        inner sep=1pt,
+        rounded corners=1pt,
     },
     lanelabel/.style={
         font=\small\bfseries,
         anchor=east,
-        text width=3.8cm,
+        text width=4.2cm,
         align=right,
     },
 ]
 
 % --- Geometry ---
-\def\laneheight{1.4}   % vertical spacing between lanes
+\def\laneheight{1.7}   % vertical spacing between lanes
 \def\xmin{0}
 \def\xmax{20}          % total width
 % Year mapping: 2017 = 0, 2026 = 20  =>  1 year = 2 units
@@ -61,13 +68,13 @@
     {T1: Instruction\\Following \& SFT};
 
 \node[paper, fill=thread1] (flan)
-    at (\yearx{2022}-1.0, \laneA*\laneheight) {FLAN};
+    at (\yearx{2021}+0.5, \laneA*\laneheight) {FLAN};
 \node[paper, fill=thread1] (instructgpt-sft)
-    at (\yearx{2022}+0.8, \laneA*\laneheight) {InstructGPT-SFT};
+    at (\yearx{2022}+0.8, \laneA*\laneheight) {InstructGPT};
 \node[paper, fill=thread1] (selfinstruct)
-    at (\yearx{2023}-0.2, \laneA*\laneheight) {Self-Instruct};
+    at (\yearx{2023}+1.2, \laneA*\laneheight) {Self-Inst.};
 \node[paper, fill=thread1] (lima)
-    at (\yearx{2023}+1.2, \laneA*\laneheight) {LIMA};
+    at (\yearx{2024}+0.5, \laneA*\laneheight) {LIMA};
 
 % =====================================================================
 % Thread 2: Reward Modeling & Preference Optimization (lane y=-1)
@@ -95,11 +102,11 @@
     {T3: Safety \&\\Alignment};
 
 \node[paper, fill=thread3] (cai)
-    at (\yearx{2022}+1.5, \laneC*\laneheight) {Constitutional AI};
+    at (\yearx{2022}+0.8, \laneC*\laneheight) {Const.\ AI};
 \node[paper, fill=thread3] (saferlhf)
-    at (\yearx{2023}+1.0, \laneC*\laneheight) {Safe RLHF};
+    at (\yearx{2023}+1.2, \laneC*\laneheight) {Safe RLHF};
 \node[paper, fill=thread3] (jailbreak)
-    at (\yearx{2024}+0.5, \laneC*\laneheight) {Jailbreak Arms Race};
+    at (\yearx{2024}+1.2, \laneC*\laneheight) {Jailbreak};
 
 % =====================================================================
 % Thread 4: Reasoning & Verification (lane y=-3)
@@ -113,13 +120,13 @@
 \node[paper, fill=thread4] (prm)
     at (\yearx{2023}+0.5, \laneD*\laneheight) {PRM};
 \node[paper, fill=thread4] (oone)
-    at (\yearx{2024}+0.2, \laneD*\laneheight) {o1};
+    at (\yearx{2024}+0.0, \laneD*\laneheight) {o1};
 \node[paper, fill=thread4] (deepseekr1)
-    at (\yearx{2025}-0.5, \laneD*\laneheight) {DeepSeek-R1};
+    at (\yearx{2025}-0.3, \laneD*\laneheight) {R1};
 \node[paper, fill=thread4] (othree)
     at (\yearx{2025}+0.8, \laneD*\laneheight) {o3};
 \node[paper, fill=thread4] (v32)
-    at (\yearx{2026}-0.3, \laneD*\laneheight) {V3.2};
+    at (\yearx{2026}+0.0, \laneD*\laneheight) {V3.2};
 
 % =====================================================================
 % Thread 5: Multimodal Post-training (lane y=-4)
@@ -129,11 +136,11 @@
     {T5: Multimodal\\Post-training};
 
 \node[paper, fill=thread5] (llava)
-    at (\yearx{2023}+0.5, \laneE*\laneheight) {LLaVA};
+    at (\yearx{2023}-0.3, \laneE*\laneheight) {LLaVA};
 \node[paper, fill=thread5] (vlmrlhf)
-    at (\yearx{2024}-0.3, \laneE*\laneheight) {VLM-RLHF};
+    at (\yearx{2024}+0.0, \laneE*\laneheight) {VLM-RLHF};
 \node[paper, fill=thread5] (halluc)
-    at (\yearx{2024}+1.3, \laneE*\laneheight) {Halluc. Reduction};
+    at (\yearx{2025}+0.3, \laneE*\laneheight) {Anti-Halluc.};
 
 % =====================================================================
 % Thread 6: Tool Use & Agentic (lane y=-5)
@@ -143,13 +150,13 @@
     {T6: Tool Use \&\\Agentic};
 
 \node[paper, fill=thread6] (toolformer)
-    at (\yearx{2023}-0.2, \laneF*\laneheight) {Toolformer};
+    at (\yearx{2022}+1.5, \laneF*\laneheight) {Toolformer};
 \node[paper, fill=thread6] (funccall)
-    at (\yearx{2023}+1.5, \laneF*\laneheight) {Function Calling};
+    at (\yearx{2023}+1.5, \laneF*\laneheight) {Func.\ Call};
 \node[paper, fill=thread6] (agenttune)
-    at (\yearx{2024}+0.8, \laneF*\laneheight) {Agent Tuning};
+    at (\yearx{2024}+1.5, \laneF*\laneheight) {AgentTune};
 \node[paper, fill=thread6] (mcp)
-    at (\yearx{2025}+1.0, \laneF*\laneheight) {MCP/Agents};
+    at (\yearx{2025}+1.3, \laneF*\laneheight) {MCP/Agents};
 
 % =====================================================================
 % Thread 7: Efficiency & Data Engineering (lane y=-6)
@@ -170,57 +177,65 @@
 % =====================================================================
 
 % T1 -> T2: InstructGPT-SFT feeds into InstructGPT-RLHF
-\draw[crossarrow, thread1!70] (instructgpt-sft.south) -- (instructgpt-rlhf.north);
+\draw[crossarrow, thread1] (instructgpt-sft.south) -- (instructgpt-rlhf.north);
 
 % T2 -> T3: RLHF ideas feed into Constitutional AI
-\draw[crossarrow, thread2!70] (instructgpt-rlhf.south) -- (cai.north);
+\draw[crossarrow, thread2] (instructgpt-rlhf.south) -- (cai.north)
+    node[arrowlabel, midway, right=1pt] {reward};
 
 % T2 -> T4: Reward modeling feeds reasoning verification (PRM)
-\draw[crossarrow, thread2!70] (dpo.south)
+\draw[crossarrow, thread2] (dpo.south)
     to[out=-90, in=90] (prm.north);
 
 % T4 -> T2: Reasoning verification inspires GRPO
-\draw[crossarrow, thread4!70] (prm.east)
-    to[out=0, in=180] (grpo.south west);
+\draw[crossarrow, thread4] (prm.east)
+    to[out=0, in=180] (grpo.south west)
+    node[arrowlabel, midway, above=1pt] {verification};
 
 % T1 -> T5: SFT pipeline adopted by LLaVA
-\draw[crossarrow, thread1!70] (selfinstruct.south)
-    to[out=-90, in=90] (llava.north);
+\draw[crossarrow, thread1] (selfinstruct.south)
+    to[out=-90, in=90] (llava.north)
+    node[arrowlabel, near start, right=1pt] {SFT pipeline};
 
 % T2 -> T5: RLHF adopted for VLM alignment
-\draw[crossarrow, thread2!70] (dpo.south)
-    to[out=-100, in=90] (vlmrlhf.north);
+\draw[crossarrow, thread2] (dpo.south)
+    to[out=-100, in=90] (vlmrlhf.north)
+    node[arrowlabel, near end, left=1pt] {preference};
 
 % T1 -> T6: Instruction tuning enables tool use
-\draw[crossarrow, thread1!70] (selfinstruct.south)
+\draw[crossarrow, thread1] (selfinstruct.south)
     to[out=-90, in=90] (toolformer.north);
 
 % T7 -> T1: LoRA enables efficient SFT
-\draw[crossarrow, thread7!70] (lora.north)
-    to[out=90, in=-90] (flan.south);
+\draw[crossarrow, thread7] (lora.north)
+    to[out=90, in=-90] (flan.south)
+    node[arrowlabel, near start, right=1pt] {LoRA};
 
 % T7 -> T2: Efficient training enables broader RLHF
-\draw[crossarrow, thread7!70] (datasel.north)
+\draw[crossarrow, thread7] (datasel.north)
     to[out=90, in=-90] (grpo.south);
 
 % T3 -> T4: Safety constraints shape reasoning alignment
-\draw[crossarrow, thread3!70] (saferlhf.south)
-    to[out=-90, in=90] (oone.north);
+\draw[crossarrow, thread3] (saferlhf.south)
+    to[out=-90, in=90] (oone.north)
+    node[arrowlabel, midway, right=1pt] {safety};
 
 % T4 -> T6: Reasoning enables agent planning
-\draw[crossarrow, thread4!70] (oone.south)
-    to[out=-90, in=90] (agenttune.north);
+\draw[crossarrow, thread4] (oone.south)
+    to[out=-90, in=90] (agenttune.north)
+    node[arrowlabel, midway, right=1pt] {reasoning};
 
 % T2 -> T4: RLVR (DAPO) feeds reasoning training
-\draw[crossarrow, thread2!70] (dapo.south)
-    to[out=-90, in=90] (othree.north);
+\draw[crossarrow, thread2] (dapo.south)
+    to[out=-90, in=90] (othree.north)
+    node[arrowlabel, near start, right=1pt] {RLVR};
 
 % T4 -> T5: Reasoning RL migrates to multimodal (R1-VL, MM-Eureka)
-\draw[crossarrow, thread4!70] (deepseekr1.south)
+\draw[crossarrow, thread4] (deepseekr1.south)
     to[out=-90, in=90] (halluc.north east);
 
 % T4 -> T6: Thinking models empower agent planning
-\draw[crossarrow, thread4!70] (othree.south)
+\draw[crossarrow, thread4] (othree.south)
     to[out=-90, in=90] (mcp.north);
 
 \end{tikzpicture}%
