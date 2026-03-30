@@ -813,6 +813,27 @@ InstructGPT 的 alignment tax 和 Flan-v2 中 CoT 数据缺失导致推理能力
 \label{fig:sft-evolution}
 \end{figure}
 
+\begin{table}[!ht]
+\centering
+\caption{Thread 1 核心方法对比。Data Scale 列反映 instruction tuning 阶段的数据规模。}
+\label{tab:sft-comparison}
+\small
+\begin{tabularx}{\textwidth}{l c >{\raggedright\arraybackslash}p{2.2cm} >{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Method} & \textbf{Year} & \textbf{Data Scale} & \textbf{Key Insight} & \textbf{Limitation} \\
+\midrule
+FLAN & 2021 & 62 tasks, 10 templates each & Zero-shot generalization scales with task diversity & Human-crafted templates; NLP benchmarks only \\
+InstructGPT & 2022 & 13K demos & 1.3B SFT+RLHF $>$ 175B GPT-3 in human eval & 40 professional labelers; high cost \\
+Self-Instruct & 2022 & 52K from 175 seeds & LM can bootstrap its own instruction data & Style mimicry without substance \\
+LIMA & 2023 & 1K curated & Quality $\gg$ quantity (Superficial Alignment Hypothesis) & Single-turn QA only; 65B model \\
+Flan-v2 & 2022 & 1,836 tasks & 0.2\% pre-training compute; cross-architecture & Marginal returns after $\sim$282 tasks \\
+phi-1 & 2023 & $<$7B tokens (textbook quality) & Data quality can break scaling laws & Code domain only \\
+Zephyr & 2023 & GPT-4 distilled & 7B distilled surpasses 70B open models & Dependent on proprietary teacher \\
+PEAR & 2026 & Importance-weighted SFT & Best SFT $\neq$ best RL initialization & Early empirical finding \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
 Thread 1 的演化遵循一条清晰的路径：
 \begin{enumerate}[leftmargin=1.5em]
   \item \textbf{问题提出}（2021）：FLAN 和 T0 证明 multi-task instruction tuning
