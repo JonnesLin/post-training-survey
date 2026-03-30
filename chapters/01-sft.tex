@@ -604,16 +604,11 @@ SFT 不再仅是``教会模型遵循指令''的最终步骤，
 而成为多阶段 post-training 流水线中的\textbf{基础设施层}。
 
 \paragraph{Qwen3 的四阶段流水线。}
-Qwen3 \cite{yang2025qwen3} 的 post-training 流水线清晰地展示了 SFT 在现代训练范式中的多重角色：
-\begin{itemize}[leftmargin=2em]
-  \item \textbf{Stage 1: Long CoT cold start}（SFT 作为``推理格式初始化''）；
-  \item \textbf{Stage 2: Reasoning RL}（在 SFT 基础上进行 RLVR 训练）；
-  \item \textbf{Stage 3: Thinking mode fusion}（SFT 用于融合推理模式和非推理模式）；
-  \item \textbf{Stage 4: General RL}（混合 reward 的全场景 RL）。
-\end{itemize}
-SFT 出现在 Stage 1 和 Stage 3 中，
-分别承担``推理能力冷启动''和``多模式融合''的功能。
-这标志着 SFT 从``一次性训练步骤''演变为``可在流水线中多次使用的通用对齐工具''。
+Qwen3 \cite{yang2025qwen3} 的四阶段 post-training 流水线（详见 \crossref{4}{sec:t4-thinking-models}）
+清晰地展示了 SFT 在现代训练范式中的多重角色：
+SFT 同时出现在 Stage 1（long CoT cold start，推理格式初始化）
+和 Stage 3（thinking mode fusion，推理/非推理模式融合）中，
+标志着 SFT 从``一次性训练步骤''演变为``可在流水线中多次使用的通用对齐工具''。
 
 \paragraph{Llama 4 的原生多模态 SFT。}
 Meta 的 Llama 4 \cite{meta2025llama4} 将 SFT 的应用范围扩展到了原生多模态场景，
