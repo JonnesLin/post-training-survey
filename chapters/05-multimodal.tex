@@ -1791,8 +1791,28 @@ Qwen2.5-Omni 的 speech-text 性能匹配是一个里程碑，
 这是标准 SFT / DPO pipeline 完全未覆盖的训练场景。
 \end{openproblembox}
 
-\bigskip
-\noindent
+\subsection{小结}
+
+Thread~5 的演化轨迹展现了 VLM 从``看见''到``理解''再到``推理''的能力跃迁：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{视觉指令跟随}（2022--2023）：
+    Flamingo 建立了 visual in-context learning 的范式，
+    LLaVA 和 InstructBLIP 证明 visual instruction tuning
+    能以极低成本释放多模态能力，
+    开启了 VLM post-training 的研究热潮。
+
+  \item \textbf{对齐与幻觉治理}（2023--2024）：
+    LLaVA-RLHF 和 RLHF-V 将 preference optimization 引入多模态领域，
+    POPE、HallusionBench 等基准暴露了幻觉的系统性问题，
+    RLAIF-V 和 mDPO 等方法提供了可扩展的对齐方案。
+
+  \item \textbf{统一与推理}（2024--2025）：
+    LLaVA-OneVision 实现了图像、视频、多图的统一处理，
+    多模态推理将 Thread~4 的 chain-of-thought 能力扩展到视觉领域，
+    Omni model 开始追求跨模态的能力一致性。
+\end{enumerate}
+
 Multimodal post-training 赋予模型``看''和``理解''视觉世界的能力，
 但这一能力的真正价值在于为\textbf{行动}奠定基础。
 当 VLM 能够理解屏幕截图、定位 UI 元素、解读图表时，

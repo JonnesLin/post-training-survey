@@ -755,7 +755,7 @@ AM3Safety \cite{zhu2026am3safety} 则首次系统性地解决
 通过 cold-start refusal 与 GRPO fine-tuning 结合，
 使用 turn-aware dual-objective reward，
 在降低攻击成功率 10\% 的同时提升 harmless（+8\%）和 helpful（+13\%）维度
-（\crossref{5}{sec:t5-multimodal}）。
+（\crossref{5}{sec:t5}）。
 
 \evolution{行为级 safety training（RLHF/CAI） → 表示级理解（RepE, LAT）}{几何理论化（alignment tax 的 Pareto frontier）+ RL 双刃剑认知（GRP-Obliteration）}{安全对齐需要从经验调优走向有理论保证的工程学}
 
@@ -838,8 +838,8 @@ Multimodal safety 的系统性解决方案仍然是一个开放问题
 （\crossref{5}{sec:t5}）。
 \end{openproblembox}
 
-\vspace{1em}
-\noindent
+\subsection{小结}
+
 Thread~3 的演化呈现出一条清晰的主线：
 从 HH-RLHF 暴露 helpfulness--harmlessness 张力，
 到 CAI 和 Safe RLHF 提供系统化的训练方案，

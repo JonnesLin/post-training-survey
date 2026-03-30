@@ -713,3 +713,35 @@ final task performance，以及 data annotation cost，
 使研究者能在统一框架下比较 LoRA vs.\ full FT、
 synthetic data vs.\ human data、PPO vs.\ GRPO 等不同策略组合的 ROI。
 \end{openproblembox}
+
+\subsection{小结}
+
+Thread~7 的演化揭示了 post-training 从``大力出奇迹''走向``精打细算''的必然趋势：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{数据效率革命}（2023）：
+    LIMA 证明 1000 条精选样本可媲美万级数据的 SFT 效果，
+    AlpaGasus 和 IFD 建立了数据质量评估的方法论，
+    Phi-1 的``教科书级数据''路线将数据策展推向极致。
+
+  \item \textbf{参数效率突破}（2023--2024）：
+    LoRA 将可训练参数压缩至 0.1\% 以下，
+    QLoRA 实现 4-bit 量化下的高效微调，
+    DoRA 进一步分离方向与幅度的适配。
+
+  \item \textbf{算法效率优化}（2024--2025）：
+    GRPO 和 REINFORCE++ 将 PPO 的四模型架构简化为双模型或单模型，
+    ReMax 完全消除 critic network，
+    蒸馏技术使小模型获得大模型的推理能力。
+
+  \item \textbf{系统级整合}（2025--2026）：
+    数据、参数、算法三条效率路径开始融合——
+    高效算法 + PEFT + 精选数据的组合方案成为实践标配，
+    模型合并技术提供了无需额外训练的能力组合新范式。
+\end{enumerate}
+
+效率研究的核心洞察是：post-training 的瓶颈往往不是计算量，而是数据质量和算法设计。
+这条线程与 Thread~1（数据策展的基础方法，\crossref{1}{sec:sft}）、
+Thread~2（偏好优化算法的简化，\crossref{2}{sec:pref}）、
+Thread~4（推理能力的蒸馏，\crossref{4}{sec:thread4}）
+存在深度交织。
