@@ -432,7 +432,6 @@ ProbeLLM \cite{huang2026probellm} 通过层次化 MCTS
 ``对齐税''的量化研究进一步证实了这一问题：
 Lin et al.\ \cite{lin2024alignmenttax} 发现 RLHF 导致不同能力维度以不同速率退化，
 Huang et al.\ \cite{huang2025safetytax} 量化了 safety alignment 使推理能力下降 7--31\%，
-Chen et al.\ \cite{geometric2026alignmenttax} 给出了 alignment cost 的解析表达式，
 Du et al.\ \cite{du2025reshaping}
 从机械可解释性角度将 post-training 效果分解为四个维度。
 面向更高效的诊断，
@@ -500,11 +499,6 @@ Post-training 同时优化多个相互干扰的目标
 PAMA \cite{he2025pama} 给出了 $O(n)$ 的 closed-form Pareto 解，
 OrthAlign \cite{orthalign2025} 实现了单维度 34--51\% 的改进而不损害其他维度，
 NSPO \cite{nspo2025} 在 capability 的 null space 中执行 safety optimization。
-Chen et al.\ \cite{chen2026vat} 借鉴 Schwartz 价值理论
-揭示了 alignment 目标之间的共变结构——
-某些 values 天然协同，另一些天然冲突——
-为 multi-objective 优化提供了结构化的先验。
-
 这一方向的成熟将使 post-training 从``顾此失彼的权衡''
 演化为``在 Pareto frontier 上精确导航''的系统性工程。
 
