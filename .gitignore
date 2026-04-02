@@ -22,3 +22,7 @@ papers/
 claude-progress.txt
 feature_list.json
 init.sh
+
+# arXiv submission package (generated from source)
+arxiv/
+arxiv-submission.tar.gz
