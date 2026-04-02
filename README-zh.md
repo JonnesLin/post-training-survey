@@ -85,7 +85,7 @@ latexmk -xelatex main-en.tex   # 英文版
   title   = {LLM/VLM Post-Training: A Survey Through the Lens of Evolution},
   author  = {Jinhong Lin},
   year    = {2026},
-  note    = {\url{https://github.com/JonesLin/post-training-survey}}
+  note    = {\url{https://github.com/JonnesLin/post-training-survey}}
 }
 ```
 
