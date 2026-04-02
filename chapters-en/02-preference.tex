@@ -1,0 +1,1047 @@
+% === Chapter 2: Reward Modeling & Preference Optimization ===
+\section{Thread 2: Reward Modeling \& Preference Optimization}
+\label{sec:t2}
+
+\begin{quote}
+\textit{Core question: How can we transform vague, hard-to-formalize human preferences into training signals that can be optimized by gradient descent?}
+\end{quote}
+
+\noindent
+One of the central challenges of post-training is that human judgments of ``good responses'' are holistic and comparative in nature,
+rather than something that can be directly described by a simple loss function.
+Humans can easily judge that ``response A is better than response B,'' but find it difficult to provide a precise scoring function.
+This chapter traces the complete evolutionary path of this problem from formulation to (partial) resolution:
+from the foundational RLHF framework (\S\ref{sec:t2-foundation}),
+to the multiple branching research paths spawned by its core limitations (\S\ref{sec:t2-branches}),
+to the recent convergence trends seeking new balance points between efficiency and effectiveness (\S\ref{sec:t2-convergence}),
+and finally a discussion of open problems that remain unresolved (\S\ref{sec:t2-open}).
+
+% ============================================================
+\subsection{Problem Origin: Why Is SFT Not Enough?}
+\label{sec:t2-origin}
+% ============================================================
+
+Supervised Fine-Tuning (SFT) trains models via maximum likelihood estimation (MLE) to imitate
+human-annotated (instruction, response) pairs. While this paradigm is simple and effective (\crossref{1}{sec:t1}),
+it suffers from two fundamental limitations.
+
+\paragraph{Limitation 1: The mode-covering property of MLE and the absence of quality signals.}
+The MLE objective $\mathcal{L}_{\text{SFT}} = -\mathbb{E}_{(x,y)\sim\mathcal{D}}\left[\log \pi_\theta(y|x)\right]$
+treats all responses in the training set equally---regardless of quality, the model attempts to maximize their log-likelihood.
+This leads to two consequences:
+(1) the model learns the ``average level'' of the training data distribution rather than aligning with the best responses;
+(2) when annotators vary in skill level, low-quality annotations directly degrade model performance,
+and MLE has no intrinsic mechanism to distinguish and filter out such noise.
+
+\paragraph{Limitation 2: The asymmetry of human judgment (judging $\neq$ generating).}
+A deeper observation is that
+human capabilities in ``generating high-quality responses'' and ``judging which response is better'' are asymmetric.
+Generating an ideal response that satisfies all constraints (accurate, helpful, safe, fluent) is extremely difficult,
+whereas comparing two existing responses is relatively easy and yields higher consistency.
+Stiennon et al.\ \cite{stiennon2020summarize} found that inter-annotator agreement
+on preference comparison tasks was approximately 77\%, significantly higher than on direct scoring tasks.
+InstructGPT \cite{ouyang2022instructgpt} reported similar findings---
+pairwise agreement among annotators was approximately 73\%.
+
+\evolution{MLE can only imitate the ``average level''}{Leverage human comparison signals to distinguish quality}{Humans are better at ``judging'' than ``generating''}
+
+\noindent
+This observation forms the starting point for the entire field of preference optimization:
+since humans are better at comparative judgment, we should design a training paradigm
+that uses preference comparison signals (rather than direct demonstration signals) as the optimization objective.
+Christiano et al.\ \cite{christiano2017rlhf} first proposed this idea in the reinforcement learning domain.
+Ziegler et al.\ \cite{ziegler2020finetuning} were the first to transfer it to NLP---
+demonstrating the feasibility of reward learning from comparisons on text continuation, summarization, and style transfer tasks,
+and establishing a complete pipeline from human preferences to language model fine-tuning.
+This paradigm was subsequently developed into a mature technical framework.
+
+% ============================================================
+\subsection{Foundational Method: The Classic RLHF Framework}
+\label{sec:t2-foundation}
+% ============================================================
+
+The core idea of RLHF (Reinforcement Learning from Human Feedback) can be decomposed into two steps:
+(1) training a reward model to learn human quality judgment criteria from preference comparisons;
+(2) using this reward model as the optimization objective, adjusting the language model's policy through an RL algorithm (typically PPO).
+This section traces three landmark works that brought this framework from inception to maturity.
+
+% --- 2.2.1 ---
+\subsubsection{From Games to Language: Reward Learning from Comparisons}
+\label{sec:t2-christiano}
+
+\landmark{christiano2017rlhf} first demonstrated on Atari games and MuJoCo continuous control tasks that
+agents can learn complex behaviors solely from human preference comparisons over trajectory segments,
+without access to the environment's true reward function.
+
+\paragraph{Motivation and problem formalization.}
+Traditional RL assumes the existence of an explicit reward function $r: \mathcal{S} \times \mathcal{A} \to \mathbb{R}$,
+but in many practical scenarios (such as training a robot for dexterous manipulation, or training an agent to exhibit ``helpful'' behavior),
+designing such a reward function is either extremely difficult or leads to reward hacking.
+The core insight of Christiano et al.\ is that
+although humans do not know the exact reward function,
+they can judge which of two observed agent behaviors is better.
+
+Formally, given two trajectory segments $\sigma^1 = (s_0^1, a_0^1, \ldots, s_k^1)$ and
+$\sigma^2 = (s_0^2, a_0^2, \ldots, s_k^2)$,
+human annotators select a preference label $\mu \in \{(1,0),\; (0,1),\; (0.5, 0.5)\}$.
+
+\paragraph{Reward model training.}
+Assuming human preferences follow the Bradley-Terry (BT) model \cite{bradley1952bt},
+where preference probability is proportional to the exponential of the sum of rewards:
+\begin{equation}
+\label{eq:pref:bt-christiano}
+P[\sigma^1 \succ \sigma^2] = \frac{\exp\!\sum_t \hat{r}(s_t^1, a_t^1)}{\exp\!\sum_t \hat{r}(s_t^1, a_t^1) + \exp\!\sum_t \hat{r}(s_t^2, a_t^2)}
+\end{equation}
+where $\hat{r}_\psi$ is a reward model parameterized by $\psi$ (a deep neural network).
+The training objective is to minimize the cross-entropy loss:
+\begin{equation}
+\label{eq:pref:rm-loss-christiano}
+\mathcal{L}_{\text{RM}} = -\mathbb{E}_{(\sigma^1, \sigma^2, \mu)}\left[
+  \mu(1)\log P[\sigma^1 \succ \sigma^2] + \mu(2)\log P[\sigma^2 \succ \sigma^1]
+\right]
+\end{equation}
+
+\paragraph{Policy optimization.}
+After the reward model is trained, PPO \cite{schulman2017ppo} is used to optimize the policy $\pi_\theta$,
+maximizing the reward signal provided by $\hat{r}_\psi$.
+The entire system runs three processes asynchronously:
+(1) the policy $\pi_\theta$ interacts with the environment to generate trajectories;
+(2) human annotators provide preference judgments on trajectory segment pairs;
+(3) the reward model $\hat{r}_\psi$ is continuously updated on preference data.
+
+\paragraph{Key experimental results.}
+In Atari tasks, using only approximately 5,500 human comparisons (about 1 hour of annotation),
+the RLHF agent achieved performance comparable to reward shaping on some games;
+in MuJoCo tasks (such as Hopper and Walker),
+the RLHF agent successfully learned locomotion behaviors nearly identical to those of agents trained with the true reward.
+These results established a key proposition:
+\textbf{Human preference signals are sufficient to replace explicit reward functions for training RL agents.}
+
+\begin{solutionbox}
+\textbf{Core contribution}:
+Established the complete framework for \textit{comparison-based reward learning}---
+from the Bradley-Terry preference model to asynchronous reward model training to PPO policy optimization.
+This framework became the prototype for all subsequent RLHF work.
+\end{solutionbox}
+
+% --- 2.2.2 ---
+\subsubsection{From Games to Language: Learning to Summarize}
+\label{sec:t2-summarize}
+
+\landmark{stiennon2020summarize} applied the comparison-based reward learning framework of Christiano et al.\
+for the first time in its entirety to a natural language generation task---text summarization---
+and established the \textbf{SFT $\rightarrow$ RM $\rightarrow$ RL} three-stage pipeline that was subsequently widely adopted.
+
+\paragraph{Three-stage pipeline.}
+
+\textit{Stage 1: Supervised Fine-Tuning.}
+GPT-3 series models (1.3B and 6.7B) were fine-tuned via SFT on the TL;DR dataset,
+providing the models with basic summarization capability.
+
+\textit{Stage 2: Reward Model Training.}
+Human annotators provided preference judgments on pairs of model-generated summaries.
+Given a post $x$ and two summaries $y_0, y_1$,
+the reward model $r_\psi$ is trained with the following objective:
+\begin{equation}
+\label{eq:pref:rm-loss-summarize}
+\mathcal{L}_{\text{RM}}(\psi) = -\mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}} \left[
+  \log \sigma\!\left(r_\psi(x, y_w) - r_\psi(x, y_l)\right)
+\right]
+\end{equation}
+where $y_w$ and $y_l$ denote the preferred (winning) and dispreferred (losing) responses respectively,
+and $\sigma$ is the sigmoid function.
+Note that unlike \cref{eq:pref:bt-christiano}, where rewards are summed over trajectory timesteps,
+here the reward model directly scores complete $(x, y)$ pairs---
+a key simplification that accompanied the migration of reward modeling from the RL domain to NLP.
+
+\textit{Stage 3: RL Optimization.}
+PPO is used to optimize the policy $\pi_\theta$, with the following objective:
+\begin{equation}
+\label{eq:pref:rl-obj-summarize}
+\max_{\pi_\theta}\; \mathbb{E}_{x \sim \mathcal{D},\; y \sim \pi_\theta(\cdot|x)} \left[
+  r_\psi(x, y) - \beta \log \frac{\pi_\theta(y|x)}{\pi_{\text{ref}}(y|x)}
+\right]
+\end{equation}
+where $\pi_{\text{ref}}$ is the model obtained from the SFT stage (serving as the reference policy),
+and $\beta$ is the KL penalty coefficient, used to prevent $\pi_\theta$ from diverging too far from $\pi_{\text{ref}}$---
+a design that directly preempted the reward overoptimization problem that was later extensively studied (\S\ref{sec:t2-reward-hacking}).
+
+\paragraph{Key findings.}
+(1) A 6.7B model trained with human preference signals produced summaries of higher quality than a larger model trained with SFT alone,
+demonstrating that \textbf{preference signals can compensate for gaps in model scale}.
+(2) The reward model achieved an agreement rate of approximately 77\%, and reward model scores were highly correlated with human judgments,
+validating the effectiveness of the Bradley-Terry model as a tool for modeling human preferences.
+(3) A clear trade-off relationship exists between RM score and KL divergence:
+as the KL penalty decreases, RM scores continue to rise, but the quality as assessed by actual human evaluation begins to decline past a certain point---
+an early observation of the reward overoptimization phenomenon.
+
+% --- 2.2.3 ---
+\subsubsection{InstructGPT: Industrial-Scale Deployment of RLHF}
+\label{sec:t2-instructgpt}
+
+\landmark{ouyang2022instructgpt} scaled the three-stage pipeline described above to the general instruction-following setting,
+providing the first production-scale demonstration of RLHF's effectiveness,
+and establishing the standard paradigm for virtually all subsequent LLM post-training.
+
+\paragraph{Industrial improvements to the pipeline.}
+
+\textit{SFT stage}:
+GPT-3 (175B) was trained on human-annotated demonstration data,
+where annotators were asked to write ``ideal responses'' for user prompts.
+
+\textit{RM stage}:
+For each prompt, $K$ model outputs were sampled ($K \in \{4, 9\}$),
+and annotators ranked all $\binom{K}{2}$ pairs.
+The reward model training objective is:
+\begin{equation}
+\label{eq:pref:rm-loss-instructgpt}
+\mathcal{L}_{\text{RM}}(\theta) = -\frac{1}{\binom{K}{2}} \mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}} \left[
+  \log \sigma\!\left(r_\theta(x, y_w) - r_\theta(x, y_l)\right)
+\right]
+\end{equation}
+Compared with \cref{eq:pref:rm-loss-summarize}, the key improvement is that
+\textbf{all comparison pairs under the same prompt share a single forward pass},
+substantially reducing the computational cost of training.
+The RM was initialized from a 6B GPT-3 model (rather than 175B),
+a design choice reflecting an important engineering principle:
+\textbf{the reward model need not be the same scale as the policy model}.
+
+\textit{PPO stage}:
+The optimization objective adds pretraining loss mixing on top of \cref{eq:pref:rl-obj-summarize}:
+\begin{equation}
+\label{eq:pref:ppo-ptx}
+\max_{\pi_\theta}\; \mathbb{E}_{x \sim \mathcal{D}_{\text{pref}},\; y \sim \pi_\theta}
+  \left[r_\psi(x, y) - \beta \,\text{KL}\!\left[\pi_\theta \| \pi_{\text{ref}}\right]\right]
+  + \gamma\,\mathbb{E}_{x \sim \mathcal{D}_{\text{pretrain}}}\left[\log \pi_\theta(x)\right]
+\end{equation}
+where the second term (PPO-ptx) mixes a portion of pretraining data into PPO training,
+mitigating the alignment tax---the degradation in NLP benchmark performance caused by RLHF.
+
+\paragraph{Key experimental results.}
+(1) \textbf{The 1.3B InstructGPT outperformed the 175B GPT-3 in human evaluations}---
+one of the most compelling experimental results in the post-training literature,
+directly demonstrating that alignment can achieve qualitative leaps without increasing model scale.
+(2) PPO-ptx maintained RLHF alignment effectiveness while
+keeping NLP benchmark performance degradation to a minimal range,
+whereas pure PPO caused significant performance decline.
+(3) Pairwise agreement among annotators was approximately 73\%---
+a figure that both validates that human preference judgments are consistent enough to support RLHF,
+and suggests that reward model performance is upper-bounded by the human agreement ceiling.
+
+\begin{solutionbox}
+\textbf{The legacy of InstructGPT}:
+Established the ``SFT $\rightarrow$ RM $\rightarrow$ PPO'' three-stage pipeline as the default paradigm for LLM post-training.
+Subsequent models including Llama 2 \cite{touvron2023llama2}, Claude, and GPT-4 all adopted variants of this basic framework.
+It also exposed the core bottleneck of RLHF:
+the pipeline involves the coordinated training of four separate models
+(SFT model, reward model, policy model, reference model),
+resulting in extremely high engineering complexity and computational overhead.
+\end{solutionbox}
+
+\paragraph{Summary of the classic RLHF framework.}
+From the prototype of Christiano et al.\ to the industrial-scale implementation of InstructGPT,
+the RLHF framework underwent three key transitions:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{From trajectory segments to full responses}:
+    In NLP settings, reward is no longer summed over each timestep
+    but is instead assigned as a single scalar score to the complete $(x, y)$ pair.
+  \item \textbf{From real-time annotation to offline datasets}:
+    Christiano et al.\ required human annotators to provide feedback online,
+    whereas InstructGPT's RM was trained on pre-collected offline preference data.
+  \item \textbf{From single-objective optimization to multi-objective balancing}:
+    InstructGPT introduced KL penalty + pretraining loss mixing,
+    establishing a multi-objective trade-off framework among helpfulness, safety, and capability retention.
+\end{enumerate}
+
+% ============================================================
+\subsection{Limitations and Branches: Four Divergent Research Paths}
+\label{sec:t2-branches}
+% ============================================================
+
+Although the classic RLHF framework proved effective, it exposed multiple core bottlenecks in practice.
+These bottlenecks gave rise to four relatively independent research branches,
+each attempting to address specific RLHF limitations from a different angle.
+
+% --- 2.3.1 ---
+\subsubsection{Branch 1: Reward Hacking and Overoptimization}
+\label{sec:t2-reward-hacking}
+
+\begin{problembox}
+When the policy over-optimizes the reward model's output,
+the RM score continues to rise while actual human preference evaluations begin to decline.
+This is a direct manifestation of Goodhart's Law in RLHF:
+``When a measure becomes a target, it ceases to be a good measure.''
+\end{problembox}
+
+\paragraph{Gao et al.'s scaling laws.}
+\landmark{gao2022overoptimization} systematically studied the reward overoptimization phenomenon,
+proposing scaling laws that describe the relationship between proxy RM scores and gold RM scores.
+
+Let $d_{\text{KL}} = \text{KL}[\pi_\theta \| \pi_{\text{ref}}]$ measure the degree to which the policy deviates from the reference.
+Gao et al.\ define $d = \sqrt{d_{\text{KL}}}$ as the normalized KL distance.
+For Best-of-$N$ (BoN) sampling and RL (PPO) optimization, the gold reward (evaluated by a larger, more accurate RM) exhibits different functional forms with respect to $d$:
+
+\begin{align}
+\label{eq:pref:overopt-bon}
+R_{\text{BoN}}^{\text{gold}}(d) &= d\left(\alpha_{\text{BoN}} - \beta_{\text{BoN}} \cdot d\right) \\[4pt]
+\label{eq:pref:overopt-rl}
+R_{\text{RL}}^{\text{gold}}(d) &= d\left(\alpha_{\text{RL}} - \beta_{\text{RL}} \cdot \log d\right)
+\end{align}
+
+\noindent
+where the $\alpha$ term captures the signal correctly learned by the reward model (the initial reward growth rate),
+and the $\beta$ term captures the rate at which reward model errors are exploited (the overoptimization term).
+The key findings are as follows:
+
+\begin{itemize}[leftmargin=2em]
+  \item Both $\alpha$ and $\beta$ exhibit a \textbf{log-linear scaling} relationship with RM parameter count:
+    larger RMs have higher $\alpha$ (capturing more true signal) and lower $\beta$ (harder to exploit),
+    but overoptimization never completely vanishes.
+  \item BoN is more \textbf{KL-efficient} than RL:
+    under the same KL budget, BoN achieves higher gold reward.
+    This implies that RL more readily exploits reward model vulnerabilities.
+  \item KL penalty as a defense against overoptimization is necessary but insufficient:
+    it can limit the growth of $d$, but cannot change the magnitude of $\beta$---
+    that is, the intrinsic vulnerabilities of the reward model do not disappear due to KL constraints.
+\end{itemize}
+
+Gao et al.\ also systematically analyzed the four forms of Goodhart's Law as manifested in RLHF:
+\textit{regressional} (regression error between proxy and gold reward),
+\textit{extremal} (inconsistent ranking between proxy and gold in the distributional tails),
+\textit{causal} (optimizing the proxy disrupts its causal relationship with the gold),
+and \textit{adversarial} (the agent actively exploits vulnerabilities in the proxy).
+
+\paragraph{Reward ensemble methods.}
+To address overoptimization,
+Coste et al.\ \cite{coste2023ensemble} proposed using reward model ensembles,
+reducing single-RM bias through voting or averaging across multiple RMs.
+However, subsequent work by Eisenstein et al.\ \cite{eisenstein2023ensemble} found that
+while ensembles can mitigate overoptimization,
+they cannot eliminate it entirely---when policy optimization is sufficiently strong,
+shared vulnerabilities across all RMs in the ensemble can still be exploited.
+
+\paragraph{Process Reward Model (PRM).}
+The idea of process supervision did not originate with PRM.
+Cobbe et al.\ \cite{cobbe2021gsm8k} first proposed training \textbf{outcome-based verifiers}
+to judge whether the final answer of mathematical reasoning is correct, demonstrating on GSM8K that
+verifier-guided search (Best-of-$N$) significantly outperforms single-sample generation.
+Uesato et al.\ \cite{uesato2022process} then conducted the first systematic comparison of
+\textbf{process-based feedback} (step-by-step annotation) versus \textbf{outcome-based feedback} (annotating only the final answer),
+finding that process supervision achieves superior final-answer accuracy compared to outcome supervision,
+and exhibits stronger discriminative power against ``false positive'' solutions (those with incorrect reasoning but coincidentally correct final answers).
+
+Building on this foundation, \landmark{lightman2023prm} proposed a more systematic process reward model,
+advancing reward granularity from outcome-level to step-level:
+rather than assigning a single scalar reward to the entire response,
+\textbf{each step} of the reasoning process is independently evaluated.
+
+Specifically, in mathematical reasoning tasks,
+a solution is decomposed into multiple steps $s_1, s_2, \ldots, s_n$,
+and the PRM independently judges the correctness of each step:
+\begin{equation}
+\label{eq:pref:prm}
+r_{\text{PRM}}(x, s_1, \ldots, s_n) = \prod_{i=1}^{n} P(s_i \text{ is correct} \mid x, s_1, \ldots, s_{i-1})
+\end{equation}
+
+Compared with the Outcome Reward Model (ORM)---which provides reward based solely on final answer correctness---
+PRM offers finer-grained signals and can more precisely locate erroneous steps.
+On the MATH dataset, PRM-guided Best-of-$N$ sampling achieved \textbf{78.2\%} accuracy ($N=1860$),
+compared to 72.4\% for ORM, a significant improvement.
+
+\begin{solutionbox}
+\textbf{Key contributions of PRM}:
+(1) Released the PRM800K dataset---containing approximately 800K step-level human labels,
+covering 75K solutions and 12K mathematics problems;
+(2) demonstrated that active learning achieves a \textbf{2.6$\times$} data efficiency improvement in PRM training;
+(3) advanced reward modeling granularity from outcome-level to process-level,
+an idea that subsequently had profound influence on reasoning verification (\crossref{4}{sec:t4}) and
+process supervision in GRPO (\S\ref{sec:t2-grpo}).
+\end{solutionbox}
+
+% --- 2.3.2 ---
+\subsubsection{Branch 2: RL-Free Methods---From RLHF to Direct Alignment}
+\label{sec:t2-rlfree}
+
+\begin{problembox}
+The RLHF pipeline involves the coordinated training of four separate models (SFT model, reward model, policy, reference).
+PPO training on LLMs is highly unstable and sensitive to hyperparameters,
+and errors introduced by the reward model are amplified through RL optimization.
+Can we bypass the explicit reward model and RL algorithm entirely,
+and directly optimize the language model from preference data?
+\end{problembox}
+
+\paragraph{DPO: Direct Preference Optimization.}
+\landmark{rafailov2023dpo} demonstrated through a key mathematical derivation
+that the RL stage of RLHF can be completely eliminated---
+the reward model can be \textbf{implicitly parameterized} by the language model itself.
+
+The starting point of the \textit{derivation} is the standard RL objective of RLHF:
+\begin{equation}
+\label{eq:pref:rl-obj}
+\max_{\pi_\theta}\; \mathbb{E}_{x \sim \mathcal{D},\; y \sim \pi_\theta(\cdot|x)} \left[
+  r(x, y)
+\right] - \beta\, \text{KL}\!\left[\pi_\theta(y|x) \| \pi_{\text{ref}}(y|x)\right]
+\end{equation}
+
+The core insight of DPO is that this KL-constrained optimization problem admits a \textbf{closed-form solution}.
+For any reward function $r(x, y)$, the optimal policy is:
+\begin{equation}
+\label{eq:pref:optimal-policy}
+\pi_r^*(y|x) = \frac{1}{Z(x)}\, \pi_{\text{ref}}(y|x) \exp\!\left(\frac{r(x, y)}{\beta}\right),
+\quad Z(x) = \sum_y \pi_{\text{ref}}(y|x) \exp\!\left(\frac{r(x, y)}{\beta}\right)
+\end{equation}
+
+Taking the logarithm of \cref{eq:pref:optimal-policy} and rearranging, the reward can be expressed in terms of the policy and reference policy:
+\begin{equation}
+\label{eq:pref:reward-reparameterization}
+r(x, y) = \beta \log \frac{\pi_r^*(y|x)}{\pi_{\text{ref}}(y|x)} + \beta \log Z(x)
+\end{equation}
+
+Substituting \cref{eq:pref:reward-reparameterization} into the Bradley-Terry preference model,
+noting that the partition function $Z(x)$ cancels between the preferred and dispreferred responses,
+yields the final DPO loss function:
+\begin{equation}
+\label{eq:pref:dpo-loss}
+\boxed{
+\mathcal{L}_{\text{DPO}}(\theta) = -\mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}} \left[
+  \log \sigma\!\left(
+    \beta \log \frac{\pi_\theta(y_w|x)}{\pi_{\text{ref}}(y_w|x)}
+    - \beta \log \frac{\pi_\theta(y_l|x)}{\pi_{\text{ref}}(y_l|x)}
+  \right)
+\right]
+}
+\end{equation}
+
+\paragraph{Gradient analysis of DPO.}
+The gradient of the DPO loss carries deep intuitive meaning. Differentiating \cref{eq:pref:dpo-loss}:
+\begin{equation}
+\label{eq:pref:dpo-gradient}
+\nabla_\theta \mathcal{L}_{\text{DPO}} = -\beta\, \mathbb{E}\!\left[
+  \underbrace{\sigma\!\left(\hat{r}_\theta(x, y_l) - \hat{r}_\theta(x, y_w)\right)}_{\text{per-example weight}}
+  \left(
+    \nabla_\theta \log \pi_\theta(y_w|x) - \nabla_\theta \log \pi_\theta(y_l|x)
+  \right)
+\right]
+\end{equation}
+where $\hat{r}_\theta(x, y) \triangleq \beta \log \frac{\pi_\theta(y|x)}{\pi_{\text{ref}}(y|x)}$
+is the \textbf{implicit reward}.
+
+The weight term $\sigma(\hat{r}_\theta(x, y_l) - \hat{r}_\theta(x, y_w))$ in the gradient exhibits an adaptive property:
+when the implicit reward already ranks $y_w$ above $y_l$ (i.e., $\hat{r}_\theta(x, y_w) \gg \hat{r}_\theta(x, y_l)$),
+the sigmoid value approaches 0, reducing that sample's contribution to the gradient---
+the model has already ``learned'' this preference pair and needs no further optimization.
+Conversely, when the model still incorrectly prefers $y_l$, the sigmoid value approaches 1 and the gradient weight is maximal.
+This \textbf{dynamic per-example importance weighting} is one of the keys to DPO's effectiveness.
+
+\paragraph{Experimental validation.}
+On the Anthropic HH dataset and TL;DR summarization task,
+DPO achieved performance comparable to or better than PPO-based RLHF at lower computational cost.
+More importantly, DPO's implementation requires only standard supervised learning infrastructure---
+no value network, no online sampling, no PPO's complex clipping mechanism---
+lowering the barrier to preference optimization from specialized RL research teams to any practitioner with SFT experience.
+
+\paragraph{The DPO family tree.}
+The simplicity and effectiveness of DPO spawned a large number of variants, forming a rich algorithmic family tree.
+These variants primarily improve along the following dimensions:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Preference model assumptions}:
+    IPO \cite{azar2023ipo} relaxes the Bradley-Terry assumption,
+    using a general representation of pairwise preferences
+    $\Psi(r(x, y_w) - r(x, y_l)) \geq \Psi(0)$,
+    and derives an MSE-form loss,
+    avoiding DPO's overfitting problem under deterministic preferences.
+    f-DPO \cite{wang2023fdpo} generalizes DPO to arbitrary $f$-divergence constraints.
+
+  \item \textbf{Removing the reference model}:
+    ORPO \cite{hong2024orpo} integrates the preference loss directly into the SFT objective,
+    penalizing the generation probability of dispreferred responses via an odds ratio,
+    eliminating the need for $\pi_{\text{ref}}$.
+    SimPO \cite{meng2024simpo} uses average log-probability as the implicit reward:
+    $\hat{r}_{\text{SimPO}}(x, y) = \frac{\beta}{|y|} \log \pi_\theta(y|x)$,
+    likewise requiring no reference model.
+
+  \item \textbf{Relaxed data requirements}:
+    KTO \cite{ethayarajh2024kto}, based on Kahneman-Tversky prospect theory,
+    requires only pointwise ``thumbs up / thumbs down'' labels
+    rather than pairwise comparisons, substantially reducing data collection costs.
+
+  \item \textbf{Theoretical unification}:
+    GPO \cite{tang2024gpo} unifies DPO, IPO, SLiC-HF \cite{zhao2023slic}, and others
+    within a framework parameterized by a general loss function.
+    CPO \cite{xu2024cpo} and Smaug (DPO-Positive) \cite{pal2024smaug}
+    mitigate DPO's tendency to reduce preferred response probability through additional SFT loss terms.
+\end{itemize}
+
+\evolution{RLHF: 4 models, RL training}{DPO: 2 models, supervised loss}{The reward model can be implicitly parameterized}
+
+% --- 2.3.3 ---
+\subsubsection{Branch 3: Online vs.\ Offline Preference Optimization}
+\label{sec:t2-online-offline}
+
+\begin{problembox}
+DPO and its variants train on static, pre-collected preference data (offline),
+but a distribution mismatch exists between the preference data distribution and the current policy's generation distribution.
+As the policy is updated, the original preference data becomes increasingly off-policy,
+causing the optimization signal to gradually lose effectiveness.
+\end{problembox}
+
+\paragraph{The necessity of on-policy data.}
+The theoretical root of this problem lies in the classic on-policy vs.\ off-policy distinction in RL.
+Tajwar et al.\ \cite{tajwar2024onpolicy} rigorously demonstrated that
+even \textbf{suboptimal} on-policy data is superior to high-quality off-policy data.
+Their core argument concerns distribution coverage---
+off-policy data may fail to cover the response space that the current policy tends to generate,
+which is precisely the region where policy improvement needs signals the most.
+
+Song et al.\ \cite{song2024coverage} analyzed this problem from a more formal perspective,
+proving that the sample complexity of online methods is superior to that of offline methods,
+provided that online sampling offers sufficient coverage of the current policy distribution.
+
+\paragraph{Iterative and online methods.}
+Xiong et al.\ \cite{xiong2023iterative} proposed \textbf{Iterative DPO}:
+in each round, the current policy generates new responses,
+preferences are re-labeled via a reward model or AI judge,
+and DPO training is performed on the new data.
+This iterative approach approximates the effect of on-policy training
+while retaining DPO's simple implementation.
+
+Guo et al.\ \cite{guo2024oaif} proposed \textbf{OAIF} (Online AI Feedback),
+using LLM-as-a-Judge to replace human annotators and an independent reward model,
+achieving a fully online preference optimization pipeline---
+at each step, the policy generates a response pair,
+another LLM immediately judges preferences, and gradient updates are performed.
+
+\paragraph{Self-play methods.}
+Munos et al.\ \cite{munos2024nlhf} proposed
+\textbf{Nash Learning from Human Feedback (NLHF)} from a game-theoretic perspective,
+modeling preference optimization as a two-player constant-sum game
+and seeking a Nash equilibrium policy.
+Wu et al.\ \cite{wu2024sppo}'s \textbf{SPPO} (Self-Play Preference Optimization)
+continued this line of thinking, using a self-play mechanism where the policy competes against its own historical versions,
+progressively improving generation quality.
+
+% --- 2.3.4 ---
+\subsubsection{Branch 4: AI Feedback and Alternatives to Human Annotation}
+\label{sec:t2-ai-feedback}
+
+\begin{problembox}
+The fundamental bottleneck of RLHF lies not in the algorithm but in the data:
+high-quality human preference annotations are expensive, slow, and difficult to scale across all task types.
+When model capabilities exceed annotator skill levels, human annotations may even introduce erroneous preference signals.
+Can AI systems replace (or assist) human annotators?
+\end{problembox}
+
+\paragraph{Constitutional AI (CAI).}
+\landmark{bai2022constitutional} proposed a systematic method
+for AI systems to self-improve based on an explicit set of principles (a constitution).
+The process consists of two stages:
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Critique-Revision}:
+    The model first generates a potentially harmful response, then is asked to critique its own response
+    according to a principle from the constitution and generate a revised version.
+    Multiple rounds of critique-revision iteration produce progressively improved responses.
+  \item \textbf{RLAIF} (RL from AI Feedback):
+    An AI model (rather than humans) provides preference judgments on response pairs,
+    trains a reward model, and then performs RL optimization.
+\end{enumerate}
+
+\noindent
+The core contribution of CAI is transforming alignment objectives from vague preferences implicit in human annotations
+into an \textbf{explicit set of principles} that can be inspected and iterated upon.
+This not only improves the interpretability and controllability of the alignment process,
+but also provides a pathway toward scalable oversight
+(\crossref{3}{sec:t3}).
+
+\paragraph{Systematic comparison of RLAIF vs.\ RLHF.}
+Lee et al.\ \cite{lee2023rlaif} systematically compared
+the effectiveness of RLAIF and RLHF on summarization and helpful dialogue tasks,
+finding that RLAIF achieved performance comparable to or even better than RLHF on most tasks.
+This result suggests that when the AI annotator is sufficiently capable,
+the marginal value of human annotation may be lower than expected.
+
+\paragraph{Self-Rewarding Language Models.}
+Yuan et al.\ \cite{yuan2024selfrewarding} pushed this idea to its extreme:
+the language model simultaneously serves as both policy and reward model---
+it generates responses, then uses its own LLM-as-a-Judge capability to evaluate response quality,
+and performs iterative training based on self-assigned scores.
+Experiments showed that multiple rounds of self-rewarding training can simultaneously improve
+both the model's generation ability and its judgment ability,
+forming a positive feedback loop of ``capability bootstrapping.''
+However, this approach is upper-bounded by the model's own judgment capability---
+when the model's judgments exhibit systematic biases, self-rewarding may amplify rather than correct these biases.
+
+% ============================================================
+\subsection{Convergence and Frontiers: New Balance Between Efficiency and Effectiveness}
+\label{sec:t2-convergence}
+% ============================================================
+
+The four branching research paths described above have recently begun to exhibit convergence trends:
+researchers seek methods
+that possess both the on-policy characteristics and exploration capabilities of RL-based approaches,
+while maintaining the simplicity and stability of DPO-like methods.
+GRPO and RLOO are representative of this convergence trend.
+
+% --- 2.4.1 ---
+\subsubsection{GRPO: Group Relative Policy Optimization}
+\label{sec:t2-grpo}
+
+\landmark{shao2024grpo} proposed GRPO in DeepSeekMath,
+with a core idea of elegant simplicity:
+\textbf{no separate reward model or value network is needed---
+only relative comparisons within a group of outputs from the same prompt.}
+
+\paragraph{Algorithm details.}
+For each prompt $x$, $G$ outputs $\{y_1, y_2, \ldots, y_G\}$ are sampled from the current policy $\pi_{\theta_{\text{old}}}$,
+and each output receives a reward $r_i$ (which can come from an ORM, PRM, or rule-based verifiable reward).
+The key step is \textbf{group-level reward normalization}:
+\begin{equation}
+\label{eq:pref:grpo-advantage}
+\tilde{r}_i = \frac{r_i - \text{mean}(\{r_1, \ldots, r_G\})}{\text{std}(\{r_1, \ldots, r_G\})}
+\end{equation}
+
+A clipped objective similar to PPO is then used for optimization,
+but with the advantage replaced by the group-normalized reward:
+\begin{equation}
+\label{eq:pref:grpo-obj}
+\mathcal{L}_{\text{GRPO}}(\theta) = -\mathbb{E}_{x}\; \frac{1}{G} \sum_{i=1}^{G} \frac{1}{|y_i|} \sum_{t=1}^{|y_i|}
+\left[
+  \min\!\left(
+    \rho_{i,t}\, \tilde{r}_i,\;
+    \text{clip}(\rho_{i,t}, 1{-}\epsilon, 1{+}\epsilon)\, \tilde{r}_i
+  \right)
+  - \beta\, \text{KL}_t
+\right]
+\end{equation}
+where $\rho_{i,t} = \frac{\pi_\theta(y_{i,t} | x, y_{i,<t})}{\pi_{\theta_{\text{old}}}(y_{i,t} | x, y_{i,<t})}$
+is the token-level importance ratio,
+and $\text{KL}_t$ is the token-level KL divergence penalty:
+\begin{equation}
+\text{KL}_t = \frac{\pi_{\text{ref}}(y_{i,t} | x, y_{i,<t})}{\pi_\theta(y_{i,t} | x, y_{i,<t})} - \log \frac{\pi_{\text{ref}}(y_{i,t} | x, y_{i,<t})}{\pi_\theta(y_{i,t} | x, y_{i,<t})} - 1
+\end{equation}
+
+\paragraph{A unified perspective on GRPO.}
+Shao et al.\ proposed a highly illuminating \textbf{unified paradigm},
+viewing SFT, RFT, DPO, PPO, and GRPO as special cases of the same objective function.
+Specifically:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{SFT}: $G=1$, reward is always 1 (no selection).
+  \item \textbf{RFT} (Rejection Sampling Fine-Tuning):
+    $G>1$, only the sample with the highest reward is retained, equivalent to BoN + SFT.
+  \item \textbf{DPO}: $G=2$, using the comparison signal from implicit rewards.
+  \item \textbf{PPO}: $G=1$, advantage is estimated by a separate value network.
+  \item \textbf{GRPO}: $G>1$, advantage is computed via group-relative normalization instead of a value network.
+\end{itemize}
+
+\noindent
+This unified perspective reveals a profound connection:
+\textbf{the essential difference among all preference optimization methods lies solely in
+how the advantage function is estimated and how training data is sampled.}
+
+\paragraph{Experimental results.}
+In DeepSeekMath, GRPO combined with outcome reward + process reward
+achieved \textbf{88.2\%} on GSM8K and \textbf{51.7\%} on MATH,
+significantly outperforming SFT and RFT baselines.
+GRPO later became one of the core training algorithms of DeepSeek-R1 \cite{deepseek2025r1}
+(\crossref{4}{sec:t4}),
+demonstrating powerful scaling capabilities on large-scale reasoning tasks.
+
+\begin{solutionbox}
+\textbf{Practical value of GRPO}:
+Eliminates the additional memory overhead and training instability introduced by value networks,
+bringing the resource requirements of RL-based preference optimization close to DPO levels,
+while retaining the benefits of on-policy training and exploration.
+\end{solutionbox}
+
+% --- 2.4.2 ---
+\subsubsection{RLOO and Other PPO Alternatives}
+\label{sec:t2-rloo}
+
+\paragraph{RLOO: REINFORCE Leave-One-Out.}
+Ahmadian et al.\ \cite{ahmadian2024rloo} revisited the classic REINFORCE algorithm,
+proposing a minimalist yet effective baseline estimation strategy:
+for each prompt, $K$ responses $\{y_1, \ldots, y_K\}$ are sampled,
+and the baseline for the $i$-th response is the average reward of the remaining $K-1$ responses:
+\begin{equation}
+\label{eq:pref:rloo}
+b_i = \frac{1}{K-1} \sum_{j \neq i} r(x, y_j)
+\end{equation}
+
+This leave-one-out baseline provides a low-variance advantage estimate
+without the need to train an additional value network.
+Experiments showed that RLOO achieves performance comparable to PPO on RLHF tasks,
+but with significantly lower implementation complexity and memory overhead.
+
+\paragraph{Other PPO alternatives.}
+Liu et al.\ \cite{liu2023rso}'s RSO (Rejection Sampling Optimization)
+samples high-quality responses from the policy via rejection sampling,
+then trains with a DPO-like loss,
+occupying a conceptual middle ground between BoN and DPO.
+Dong et al.\ \cite{dong2023raft}'s RAFT (Reward Ranked Fine-Tuning)
+more directly combines rejection sampling with SFT:
+a large number of responses are sampled, the top-$k\%$ by reward are retained,
+and standard SFT training is performed on them.
+
+\paragraph{RTO: DPO Meets PPO.}
+Zhong et al.\ \cite{zhong2024rto} proposed a method that combines the strengths of both DPO and PPO:
+using the implicit reward obtained from DPO training as a replacement for an independent reward model,
+then performing PPO-style on-policy optimization,
+seeking to balance DPO's simplicity with PPO's on-policy characteristics.
+
+% --- 2.4.5 ---
+\subsubsection{RLVR: Reinforcement Learning with Verifiable Rewards}
+\label{sec:t2-rlvr}
+
+In 2025, an important paradigm branch emerged in the preference optimization field:
+\textbf{RLVR} (Reinforcement Learning with Verifiable Rewards),
+which completely bypasses learned reward models
+and directly uses rule-based automated verifiers as reward signals for RL training.
+Although the idea of RLVR was already foreshadowed in R1-Zero \cite{deepseek2025r1}
+(\crossref{4}{sec:t4-r1}),
+DAPO \cite{yu2025dapo} systematized it into a reproducible open-source methodology.
+
+\paragraph{The essence of the paradigm shift.}
+The core assumption of traditional RLHF is that
+human preferences need to be ``translated'' into optimizable signals through a reward model.
+RLVR challenges this assumption---
+\textbf{for tasks with automated verifiers (mathematics: answer correctness; programming: test pass rates),
+rule-based rewards are more reliable, cheaper, and free from reward hacking compared to learned reward models}.
+This insight deeply binds the methodology of Thread~2 to the reasoning tasks of Thread~4.
+
+\paragraph{Systematic improvements in DAPO.}
+\landmark{yu2025dapo} introduced four key improvements to GRPO:
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Clip-higher}: A larger clip upper bound is used for positive advantage samples
+    ($1 + \varepsilon_{\text{high}}$ instead of the standard $1 + \varepsilon$),
+    encouraging the policy to more aggressively explore high-reward solution paths
+    and addressing the excessive suppression of exploration caused by standard clipping;
+  \item \textbf{Dynamic sampling}:
+    Samples with identical rewards within a group (samples carrying no contrastive information) are dynamically filtered out,
+    ensuring that every training batch contains effective contrastive signals;
+  \item \textbf{Token-level loss}:
+    The sequence-level policy gradient loss is decomposed into a token-level loss,
+    providing finer-grained gradient signals and mitigating credit assignment issues in long sequences;
+  \item \textbf{Removal of KL constraint}:
+    The KL divergence penalty against the reference model is completely removed,
+    allowing the policy to freely diverge from the initial distribution.
+    For reasoning tasks, this ``unconstrained'' strategy yields significant gains,
+    since the base model's initial reasoning distribution is typically far from optimal.
+\end{enumerate}
+On 7B models, DAPO improved AIME performance from $\sim$30\% with GRPO to $\sim$50\%.
+
+\paragraph{Subsequent developments in RLVR.}
+After DAPO, the RLVR paradigm rapidly spawned multiple variants:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{GSPO} (Group Sequence Policy Optimization) \cite{zheng2025gspo}:
+    Further optimized the group-level sequence-wise policy update mechanism on top of DAPO,
+    improving training stability on long-sequence reasoning tasks;
+  \item \textbf{REINFORCE++} \cite{hu2025reinforcepp}:
+    Proposed a streamlined and efficient REINFORCE variant that,
+    through improved baseline estimation and gradient normalization strategies,
+    achieves performance comparable to GRPO while maintaining a minimal implementation.
+\end{itemize}
+
+\paragraph{Theoretical perspective: Rewards as Labels.}
+Zhai et al.\ \cite{zhai2026real} revisited RLVR from the perspective of classification learning,
+pointing out that when rewards are binary and verifiable,
+the RLVR training process can be understood as a special form of \textbf{classification with noisy labels}.
+This theoretical perspective provides new analytical tools for studying the generalization properties of RLVR.
+
+\begin{openproblembox}
+\textbf{Boundaries of RLVR applicability}:
+RLVR has achieved tremendous success on verifiable tasks such as mathematics and programming,
+but these tasks inherently possess ``perfect reward functions.''
+For open-ended tasks (dialogue, writing, reasoning-based QA),
+can the RLVR paradigm be generalized?
+One possible direction is to use LLM-as-judge as an ``approximate verifier,''
+but this brings us back to the old problem of learned rewards.
+Does RLVR's success imply that post-training methodology is splitting into two independent paradigms---
+RLVR for verifiable tasks and RLHF for open-ended tasks?
+\end{openproblembox}
+
+% --- 2.4.6 ---
+\subsubsection{2026: Theoretical Deepening and Methodological Breakthroughs}
+\label{sec:t2-2026}
+
+In early 2026, the field of preference optimization achieved important advances along three dimensions:
+\textbf{repairs and theoretical unification of the DPO family},
+\textbf{theoretical resolution of the online vs.\ offline debate},
+and \textbf{paradigmatic innovation in reward modeling}.
+
+\paragraph{Theoretical unification and key repairs of DPO.}
+Raheja \& Pochhi \cite{raheja2026unification} provided a
+\textbf{grand theoretical unification} of preference learning methods:
+the seemingly diverse variants---DPO, IPO, KTO, SimPO, etc.---
+can fundamentally be decomposed along three orthogonal axes:
+(I) preference model assumptions, (II) regularization mechanisms, and (III) data distribution (online vs.\ offline).
+This taxonomic framework provides practitioners with a systematic guide for method selection.
+
+Regarding specific improvements to DPO,
+HyPO \cite{hypo2026} identified a key failure mode of DPO---
+\textbf{premature satisfaction}:
+when the reference model favors the rejected response,
+DPO prematurely weakens the gradient signal.
+HyPO addresses this through \textbf{conditional reference regularization} (a one-line code modification),
+achieving a 41.2\% average relative improvement on AlpacaEval 2.0.
+PEPO \cite{barla2026pepo}, from a theoretical perspective,
+provided the first proof that
+\textbf{DPO's over-optimization can be provably avoided without knowing the data distribution}:
+through a policy ensemble trained on disjoint data subsets,
+it reduces sample complexity from dependence on all-policy concentrability
+to dependence on single-policy concentrability alone.
+
+\paragraph{Theoretical resolution of the on-policy question.}
+\landmark{kim2026coverage} Kim et al.\ provided the
+\textbf{first rigorous theoretical proof} that online preference learning is superior to offline.
+The core conclusion is the \textbf{coverage improvement principle}:
+with sufficient batch size,
+each on-policy update moves the policy to a region of strictly better coverage,
+thereby achieving exponential convergence.
+More importantly, this work established a
+\textbf{sharp sample complexity separation} between online and offline preference learning---
+not only explaining why Iterative DPO and OAIF
+consistently outperform vanilla DPO in practice,
+but theoretically establishing the \emph{irreplaceability} of on-policy training.
+
+\paragraph{Evolution of PPO alternatives.}
+OPO \cite{wang2026opo} revealed a structural problem shared by both PPO and DPO:
+\textbf{both confound sampling geometry and optimization geometry}.
+By performing optimization in the Hilbert function space $L^2(\pi_k)$,
+OPO decouples these two geometric structures,
+resolving the numerical instability and gradient saturation problems in KL-regularized objectives.
+R2VPO \cite{luo2026r2vpo} discovered that
+PPO/GRPO's hard clipping \textbf{truncates high-reward but high-divergence ``eureka moments''}---
+precisely those rare samples with the greatest learning value are cut off by gradient clipping.
+R2VPO replaces hard clipping with a \emph{variance constraint} on the policy ratio,
+achieving a 17\% relative gain with 50\% fewer rollouts.
+He et al.\ \cite{he2026unifiedrlhf}
+further revealed the implicit trade-off in RLHF between KL regularization (preventing reward hacking)
+and ratio clipping (training stability),
+proposing a unified regularization method---
+whose final form reduces to a \textbf{weighted SFT loss},
+yet consistently outperforms both RLHF and online preference learning.
+This finding reignited the debate over ``is RL truly necessary?''
+
+LLMdoctor \cite{llmdoctor2026} extended preference optimization
+from training-time to \textbf{inference-time alignment}:
+a small ``doctor'' model guides a frozen large ``patient'' model
+through token-level flow-guided preference optimization,
+achieving multi-dimensional preference alignment without retraining,
+with effectiveness surpassing full DPO fine-tuning.
+
+\paragraph{Paradigmatic innovation in reward modeling.}
+Two works in 2026 may fundamentally change the data requirements for reward modeling.
+\landmark{fan2026scalingrm} Fan et al.\ demonstrated that
+reward models can be trained entirely from \textbf{document prefixes/suffixes in web corpora},
+with \textbf{zero human annotation}.
+Using only 11M math web data tokens,
+they achieved up to 7.7 points of improvement on RewardBench v2,
+with gains transferable across model families and scales.
+If reward models can be trained without any preference annotations,
+RLHF's data bottleneck would be fundamentally broken.
+
+\landmark{young2026rlaif} Young proposed the \textbf{Latent Value Hypothesis}
+to explain a long-standing puzzle: why does RLAIF work?
+According to the data processing inequality, AI-generated preference signals should not be superior to human annotations,
+yet RLAIF performs impressively in practice.
+The hypothesis posits that the pretraining process encodes human values as \textbf{directions in representation space},
+and constitutional prompts \emph{elicit} these latent values as preference judgments.
+This theory unifies several scattered empirical findings:
+refusal directions, low-rank safety subspaces, and RLAIF scaling.
+
+Mix-GRM \cite{mixgrm2026} advanced the methodology of generative reward models:
+decomposing the reasoning process into \textbf{Breadth-CoT} (multi-dimensional principle coverage)
+and \textbf{Depth-CoT} (substantive judgment depth),
+jointly optimizing both dimensions through SFT + RLVR,
+and surpassing leading open-source RMs by 8.2\% across five benchmarks.
+ActiveUltraFeedback \cite{melikidze2026activeuf}
+introduced \textbf{uncertainty-based active learning} on the preference data collection side,
+achieving or surpassing static baselines with only 1/6 of the annotation data.
+
+\evolution{Preference data requires human annotation (RLHF) or AI annotation (RLAIF)}{Reward models can be trained unsupervised from web data (Fan et al.)}{Annotation cost is RLHF's core bottleneck}
+
+% ============================================================
+\subsection{Open Problems}
+\label{sec:t2-open}
+% ============================================================
+
+Despite the rapid progress in preference optimization over the past two years,
+the following key questions remain without satisfactory answers.
+
+% --- 2.5.1 ---
+\subsubsection{The Essential Difference Between DPO and RLHF}
+\label{sec:t2-dpo-vs-rlhf}
+
+DPO and RLHF should theoretically converge to the same optimal policy
+(since the DPO loss is a transformation of the RLHF RL objective),
+yet in practice their performance exhibits systematic differences.
+
+Xu et al.\ \cite{xu2024dposuperior} systematically compared DPO and PPO,
+finding that PPO generally outperforms DPO on large-scale models and complex tasks,
+especially in scenarios requiring creative generation and open-ended tasks.
+Ivison et al.\ \cite{ivison2024unpacking} analyzed the key factors
+influencing their relative performance at a finer granularity,
+including data quality, model scale, and training dynamics.
+
+Rafailov et al.\ \cite{rafailov2024rtoq} reinterpreted DPO from the perspective of Q-functions,
+pointing out that DPO's implicit reward $\hat{r}_\theta(x, y)$ can in fact
+be understood as the value of a token-level Q-function at specific token positions.
+However, DPO uniformly distributes the entire sequence's preference signal across all tokens,
+whereas RLHF, through PPO's temporal credit assignment, can allocate rewards more precisely.
+This may be the theoretical root cause of the performance gap between the two.
+
+\begin{openproblembox}
+\textbf{Core open problem}: Can the performance gap between DPO and RLHF be closed through better
+offline preference optimization algorithms?
+Or do on-policy training and explicit reward modeling possess irreplaceable advantages?
+Recent empirical studies \cite{performance2025gap} suggest
+that this gap may be jointly determined by credit assignment granularity and the degree of distribution shift.
+\end{openproblembox}
+
+% --- 2.5.2 ---
+\subsubsection{Likelihood Displacement}
+\label{sec:t2-displacement}
+
+Razin et al.\ \cite{razin2024displacement} discovered a noteworthy phenomenon in DPO training:
+\textbf{likelihood displacement}---during DPO training,
+not only does the probability of the dispreferred response decrease,
+but \textbf{the probability of the preferred response may also decrease},
+albeit by a smaller magnitude.
+
+This runs counter to intuitive expectations---
+we expect DPO to increase the probability of preferred responses,
+but in reality DPO's primary learning mechanism is
+reducing the probability of dispreferred responses (creating a ``likelihood gap'')
+rather than boosting the absolute probability of preferred responses.
+When the probability of preferred responses also declines significantly (excessive displacement),
+the model may lose useful generation capabilities.
+
+\begin{openproblembox}
+\textbf{Core open problem}: How can we design preference optimization algorithms
+that widen the likelihood gap between preferred and dispreferred responses
+while maintaining the absolute probability of preferred responses?
+Methods such as CPO \cite{xu2024cpo} and Smaug \cite{pal2024smaug}
+partially mitigate this issue by adding SFT loss terms,
+but more principled solutions are still being explored.
+\end{openproblembox}
+
+% --- 2.5.3 ---
+\subsubsection{Reward Model Generalization and Reliability}
+\label{sec:t2-rm-generalization}
+
+The generalization capability of reward models---whether they can still provide reliable preference signals
+on prompt-response pairs outside the training distribution---is a fundamental open problem.
+
+Zheng et al.\ \cite{zheng2023secrets1} and Wang et al.\ \cite{wang2024secrets2}
+systematically studied key factors in reward model training,
+including model architecture, data quality, and training objectives.
+They found that reward model performance is highly sensitive to these factors,
+and significant distribution shift problems exist---
+an RM trained on one set of prompt types may severely degrade on novel types.
+This problem is particularly acute in multimodal settings,
+where vision-language preference signal annotation is more expensive and more subjective
+(\crossref{5}{sec:t5-branch-a}).
+
+A deeper question is: when the policy model's capabilities exceed those of the reward model,
+does the reward model remain an effective training signal?
+This is closely related to the problem of scalable oversight
+(\crossref{3}{sec:t3})---
+how to construct an evaluation system that can reliably assess model outputs that exceed its own capability level.
+
+\begin{openproblembox}
+\textbf{Core open problem}:
+Are reward model generalization failure modes predictable?
+Does PRM's process-level supervision fundamentally alleviate ORM's generalization problems,
+or does it merely shift the problem to the reliability of step-level judgments?
+How can we construct a reward signal that remains effective even when facing a superhuman policy?
+\end{openproblembox}
+
+\subsection{Chapter Summary}
+
+\begin{figure}[!ht]
+\centering
+\begin{tikzpicture}[
+  node distance=0.6cm and 1.2cm,
+  every node/.style={font=\small},
+  milestone/.style={rectangle, rounded corners, draw=thread2, fill=thread2!10,
+    text width=4.2cm, minimum height=0.8cm, align=center, font=\small\bfseries},
+  branch/.style={rectangle, rounded corners, draw=gray!60, fill=gray!5,
+    text width=3.2cm, minimum height=0.7cm, align=center, font=\small},
+  arrow/.style={-{Stealth[length=2.5mm]}, thick, thread2!70},
+  brancharrow/.style={-{Stealth[length=2mm]}, gray!60, thick},
+]
+% Main timeline
+\node[milestone] (christiano) {Christiano et al.\ (2017)\\Comparison-based RL};
+\node[milestone, below=1.2cm of christiano] (instructgpt) {InstructGPT (2022)\\SFT$\rightarrow$RM$\rightarrow$PPO Pipeline};
+\node[milestone, below=1.2cm of instructgpt] (dpo) {DPO (2023)\\Implicit Reward Optimization};
+
+% Branches
+\node[branch, below left=1.2cm and 0.5cm of dpo] (brA) {Branch A: Signal Enhancement\\Constitutional AI, PRM};
+\node[branch, below right=1.2cm and 0.5cm of dpo] (brB) {Branch B: Offline Variants\\IPO, KTO, SimPO};
+
+% Convergence
+\node[milestone, below=2.8cm of dpo] (grpo) {GRPO (2024)\\Group Relative Policy Opt.};
+\node[milestone, below=1.2cm of grpo] (dapo) {DAPO / RLVR (2025)\\Verifiable Reward Paradigm};
+\node[branch, below=1.2cm of dapo] (conv) {Paradigm Divergence: Verifiable$\rightarrow$RLVR\\Open tasks$\rightarrow$RLHF/DPO};
+
+% Arrows
+\draw[arrow] (christiano) -- (instructgpt);
+\draw[arrow] (instructgpt) -- (dpo);
+\draw[brancharrow] (dpo) -- (brA);
+\draw[brancharrow] (dpo) -- (brB);
+\draw[arrow] (dpo) -- (grpo);
+\draw[arrow] (grpo) -- (dapo);
+\draw[brancharrow] (brA) -- (grpo);
+\draw[brancharrow] (brB) -- (grpo);
+\draw[arrow] (dapo) -- (conv);
+\end{tikzpicture}
+\caption{Thread 2 evolutionary path: from comparison-based reward learning to the RLVR paradigm divergence.
+Blue nodes represent landmark works; gray nodes represent important branches.}
+\label{fig:pref-evolution}
+\end{figure}
+
+\begin{table}[!ht]
+\centering
+\caption{Comparison of core methods in Thread 2. ``Needs RM'' indicates whether an independent learned reward model is required.}
+\label{tab:pref-comparison}
+\small
+\begin{tabularx}{\textwidth}{l c c >{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Method} & \textbf{Needs RM?} & \textbf{On/Offline} & \textbf{Core Mechanism} & \textbf{Limitation} \\
+\midrule
+RLHF/PPO & Yes & Online & PPO with KL penalty against $\pi_{\text{ref}}$; explicit reward model & 4 models; training instability \\
+DPO & No & Offline & Implicit reward via $\log \frac{\pi_\theta}{\pi_{\text{ref}}}$; supervised loss & Distribution shift; likelihood displacement \\
+IPO & No & Offline & MSE loss; relaxes Bradley-Terry assumption & Same offline issues as DPO \\
+KTO & No & Offline & Pointwise labels only (thumbs up/down) & Weaker signal than pairwise \\
+SimPO & No & Offline & Avg log-prob as reward; no $\pi_{\text{ref}}$ needed & No reference anchor \\
+GRPO & Optional & Online & Group-normalized advantage; no value network & Multiple samples per prompt \\
+DAPO & No (rule) & Online & RLVR: clip-higher + dynamic sampling & Verifiable tasks only \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The evolutionary path of preference optimization can be summarized as follows:
+starting from the comparison-based reward learning of Christiano et al.,
+through the establishment of the standard paradigm via InstructGPT's industrial-scale three-stage pipeline,
+and then continuously reducing method complexity and resource requirements through works such as DPO and GRPO,
+while maintaining or improving alignment effectiveness.
+The core tension along this evolutionary path lies in
+\textbf{the trade-off between the richness of alignment signals and the simplicity of the training pipeline}---
+RLHF provides the richest signals (on-policy + explicit reward + temporal credit assignment),
+but at the cost of maximal engineering complexity;
+DPO simplifies the pipeline to its extreme, but sacrifices on-policy characteristics and credit assignment precision;
+GRPO and RLOO attempt to find new Pareto optima between these two extremes.
+The emergence of the RLVR paradigm in 2025 further reshaped this landscape---
+for verifiable tasks, methods like DAPO demonstrated that completely bypassing learned reward models
+is not only feasible but superior,
+leading to an emerging paradigm divergence in preference optimization methodology:
+``RLVR for verifiable tasks, RLHF for open-ended tasks.''
+
+\paragraph{Preview of the next chapter.}
+Preference optimization makes model outputs better aligned with human preferences,
+but the tension between ``helpfulness'' and ``safety'' remains a fundamental challenge---
+a model that excessively pursues helpfulness may compromise on the safety dimension.
+Thread~3 will delve into the evolution of safety alignment,
+tracing the development path from HH-RLHF's exposure of this tension,
+through Constitutional AI, the jailbreaking arms race, to representation engineering.

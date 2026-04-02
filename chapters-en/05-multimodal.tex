@@ -1,0 +1,1130 @@
+% === Chapter 5: Thread 5 — Multimodal Post-Training ===
+\section{Thread 5: Multimodal Post-Training}
+\label{sec:t5}
+
+% ============================================================
+% 5.1 Problem Origin
+% ============================================================
+\subsection{Problem Origin: From Text-Only to Vision-Language}
+\label{sec:t5-origin}
+
+The core dilemma facing pre-trained vision-language models (VLMs) is highly similar to, yet more acute than, that of text-only LLMs:
+models trained solely through image-text contrastive learning (e.g., CLIP \cite{radford2021clip}) or
+image-text matching pre-training (e.g., BLIP-2 \cite{li2023blip2}),
+while possessing a foundational capability for vision-language alignment,
+can neither follow open-ended multimodal instructions nor generate structured long-form responses.
+In other words, the pre-training stage endows VLMs with the ability to \textbf{perceive},
+while the post-training stage must endow them with the ability to \textbf{reason, follow instructions, and stay faithful}.
+
+\begin{problembox}
+How can the mature SFT, RLHF/DPO, and other techniques developed in text-only post-training
+be transferred to the vision-language joint modeling setting?
+This transfer faces three major challenges:
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Modality Alignment}:
+    Visual features and text tokens reside in different embedding spaces.
+    How should projection or fusion mechanisms be designed to enable the LLM to ``understand'' visual information?
+  \item \textbf{Data Construction}:
+    The annotation cost of multimodal instruction-following data is far higher than that of pure text.
+    How can existing vision-language datasets be leveraged, or strong models be used to automatically generate high-quality training data?
+  \item \textbf{Multimodal Hallucination}:
+    VLMs generate descriptions inconsistent with image content (e.g., claiming the presence of objects that do not exist in the image).
+    While this problem exists in text-only LLMs, it is significantly more pronounced and easier to measure in multimodal settings.
+\end{enumerate}
+\end{problembox}
+
+\noindent
+From the perspective of technical evolution, multimodal post-training directly inherits and extends
+the core paradigm of instruction tuning from Thread~1
+\crossref{1}{sec:t1},
+while also introducing the methodology of preference optimization from Thread~2
+\crossref{2}{sec:t2}
+into the vision-language setting to address hallucination and alignment problems.
+The unique contribution of this thread is that
+it not only addresses alignment challenges in multimodal settings,
+but also provides new insights for text-only post-training in return ---
+for example, research on multimodal hallucination has driven the development of factual grounding techniques,
+and training methods for visual grounding have inspired citation generation in text-only LLMs.
+
+% ============================================================
+% 5.2 Foundation Methods
+% ============================================================
+\subsection{Foundation Methods: From Flamingo to Visual Instruction Tuning}
+\label{sec:t5-foundation}
+
+This section provides an in-depth analysis of three foundational works:
+Flamingo \cite{alayrac2022flamingo} established the architectural paradigm for VLMs,
+LLaVA \cite{liu2023llava} pioneered visual instruction tuning,
+and InstructBLIP \cite{dai2023instructblip} systematically advanced instruction-aware visual feature extraction.
+
+% --- Flamingo ---
+\subsubsection{Flamingo: Visual Language Model for Few-Shot Learning}
+\label{sec:t5-flamingo}
+
+\landmark{alayrac2022flamingo}
+Flamingo \cite{alayrac2022flamingo} is a vision-language model proposed by DeepMind in 2022.
+It was the first to demonstrate that by injecting visual information into a frozen LLM,
+powerful few-shot multimodal capabilities can be achieved without fine-tuning.
+Flamingo laid the architectural foundation for all subsequent VLM post-training work.
+
+\paragraph{Architecture.}
+Flamingo's architecture consists of three core components:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Vision Encoder}:
+    A pre-trained and frozen NFNet-F6 serves as the vision encoder,
+    trained through contrastive learning on image-text pairs,
+    encoding input images (or video frames) into spatial features.
+
+  \item \textbf{Perceiver Resampler}:
+    This is one of Flamingo's key innovations.
+    The vision encoder produces a \textit{variable number} of visual features for images/videos of different resolutions.
+    The Perceiver Resampler uses a fixed set of \textit{learned latent queries} (64 in total)
+    to perform cross-attention over these features,
+    mapping an arbitrary number of visual tokens to a fixed set of 64 visual output tokens.
+    The core advantages of this design are:
+    (1) it decouples the dependency between the number of visual features and the LLM input length;
+    (2) it provides a unified interface for handling multi-image and video inputs.
+
+  \item \textbf{Gated Cross-Attention Dense (XATTN-DENSE) Layers}:
+    Before each self-attention layer in the frozen LLM (Chinchilla),
+    a new cross-attention layer is inserted, allowing text tokens to attend to visual tokens.
+    The key design is \textbf{tanh gating}:
+    the output of each cross-attention layer is multiplied by a learnable scalar $\tanh(\alpha)$,
+    where $\alpha$ is initialized to 0.
+    This ensures that at the beginning of training, the newly inserted visual modules have zero influence on the LLM's output,
+    thereby protecting the language capabilities acquired during pre-training from being disrupted.
+    During training, the model gradually learns to leverage visual information.
+\end{enumerate}
+
+\paragraph{Training.}
+Flamingo's training strategy embodies the essence of pragmatic engineering:
+both the vision encoder and the LLM remain frozen,
+and only the Perceiver Resampler, gated cross-attention layers, and layer norms are trained.
+The training data comprises three sources:
+(1) M3W (MultiModal MassiveWeb) --- 43M web pages with interleaved image-text content crawled from the internet;
+(2) LTIP (Long Text \& Image Pairs) --- 312M image-text pairs;
+(3) VTP (Video \& Text Pairs) --- 27M video-text pairs.
+The unique value of the M3W data is that it naturally provides \textit{interleaved image-text sequences},
+enabling Flamingo to handle multiple images in in-context learning.
+
+\paragraph{Results.}
+The 80B-parameter Flamingo established new few-shot state-of-the-art results across 16 multimodal benchmarks.
+Even more strikingly, a 32-shot few-shot Flamingo surpassed prior fully fine-tuned SOTA models on 6 benchmarks.
+This result powerfully demonstrated the effectiveness of the frozen LLM + visual adapter paradigm.
+Flamingo's architectural vision quickly spawned open-source reproductions:
+IDEFICS \cite{laurencon2023idefics}, built on the publicly available OBELICS dataset,
+provided an open-source variant of Flamingo as a reproducible baseline for subsequent VLM research.
+Meanwhile, PaLM-E \cite{driess2023palme} extended the Flamingo-style frozen LLM + visual adapter paradigm
+to \textbf{embodied settings} --- unifying robot sensor inputs, scene images, and natural language instructions
+into the input space of PaLM 562B,
+demonstrating that multimodal LLMs can not only ``understand images'' but can also directly drive robots to execute tasks in the physical world
+(\crossref{6}{sec:t6}).
+
+\evolution{Separately trained vision model + language model}
+  {Unified VLM via Frozen LLM + Visual Adapters}
+  {Perceiver Resampler + Gated XATTN}
+
+% --- LLaVA ---
+\subsubsection{LLaVA: Visual Instruction Tuning}
+\label{sec:t5-llava}
+
+\landmark{liu2023llava}
+If Flamingo established the architectural paradigm for VLMs,
+then LLaVA (Large Language and Vision Assistant) \cite{liu2023llava} pioneered
+the \textbf{visual instruction tuning} training paradigm ---
+that is, by performing SFT on multimodal instruction-following data,
+it transformed a VLM from a visual question-answering tool into a general-purpose multimodal AI assistant.
+This work directly transferred the core idea of instruction tuning from Thread~1
+\crossref{1}{sec:t1}
+to the vision-language setting.
+
+\paragraph{Architecture.}
+LLaVA's architecture is renowned for its simplicity, consisting of three components:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Vision Encoder}:
+    A pre-trained CLIP ViT-L/14 (resolution 224$\times$224),
+    using the features from the layer before the last transformer layer as the visual representation.
+  \item \textbf{Projection Layer}:
+    A trainable linear projection matrix $\mathbf{W}$
+    that maps CLIP visual features into the LLM's word embedding space:
+    $\mathbf{H}_v = \mathbf{W} \cdot \mathbf{Z}_v$,
+    where $\mathbf{Z}_v$ is the visual feature sequence output by CLIP.
+    This is the sole bridge connecting the visual and language modalities in the entire architecture.
+  \item \textbf{LLM}:
+    Vicuna \cite{chiang2023vicuna} (an instruction-tuned model based on LLaMA),
+    which receives the concatenated sequence of visual tokens and text tokens as input.
+\end{itemize}
+
+\noindent
+Compared to Flamingo's Perceiver Resampler + gated cross-attention design,
+LLaVA's single linear projection layer appears extremely simple.
+Yet it is precisely this ``radical simplicity'' that made LLaVA the most easily reproducible VLM baseline,
+spawning an extensive body of follow-up work.
+
+\paragraph{Data Construction via GPT-4.}
+One of LLaVA's most influential contributions is its method for automatically generating multimodal instruction-following data using GPT-4.
+Specifically, the researchers fed captions and bounding box information from COCO \cite{lin2014coco} images
+into GPT-4 in pure text form (note: at that time, GPT-4 had no visual capabilities),
+and through carefully designed prompts, had GPT-4 generate three types of data:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Conversation} (58K samples):
+    Multi-turn question-answering dialogue data centered around image content.
+  \item \textbf{Detailed Description} (23K samples):
+    Data providing detailed, comprehensive descriptions of image content.
+  \item \textbf{Complex Reasoning} (77K samples):
+    Question-answering data requiring deep reasoning about image content.
+\end{itemize}
+
+\noindent
+This ``text-only GPT-4 + image metadata $\rightarrow$ multimodal training data'' paradigm
+completely bypassed the high cost of multimodal data annotation,
+laying the methodological foundation for data scaling in subsequent works such as
+ShareGPT4V \cite{chen2023sharegpt4v} and LLaVA-1.5 \cite{liu2023llava15}.
+
+\paragraph{Two-Stage Training.}
+LLaVA's training is divided into two stages:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Stage 1 --- Feature Alignment Pre-Training}:
+    Both the vision encoder and LLM remain frozen,
+    and only the projection matrix $\mathbf{W}$ is trained.
+    Using 595K image-text pairs filtered from CC3M,
+    the training objective is standard next-token prediction (loss computed only on text tokens).
+    The purpose of this stage is to enable the projection layer to learn to map visual features into the semantic space that the LLM can understand.
+
+  \item \textbf{Stage 2 --- End-to-End Visual Instruction Tuning}:
+    The vision encoder remains frozen,
+    while the projection matrix $\mathbf{W}$ and the LLM are both unfrozen and jointly trained.
+    Using 158K multimodal instruction-following data generated by GPT-4,
+    the training objective remains next-token prediction, but the input is now a complete multimodal instruction.
+    This stage enables the model to learn to follow multimodal instructions and generate structured responses.
+\end{enumerate}
+
+\paragraph{Results \& Impact.}
+On LLaVA-Bench (In-the-Wild),
+LLaVA achieved 85.1\% relative score as evaluated by GPT-4 (text-only + image caption input).
+More importantly, LLaVA established an extremely influential VLM training paradigm:
+\textit{CLIP encoder + simple projection + LLM + two-stage training}.
+The subsequent LLaVA-1.5 \cite{liu2023llava15} replaced the linear projection with an MLP,
+introduced higher resolution (336$\times$336), and incorporated academic-task-oriented VQA data,
+significantly improving performance across multiple benchmarks.
+This continuous evolution of the LLaVA family
+(LLaVA $\rightarrow$ LLaVA-1.5 $\rightarrow$ LLaVA-NeXT $\rightarrow$ LLaVA-OneVision)
+has become the most important baseline series in the multimodal post-training field.
+
+\evolution{Manually annotated multimodal instruction data}
+  {GPT-4 automated generation + Two-Stage SFT}
+  {LLaVA pipeline}
+
+% --- InstructBLIP ---
+\subsubsection{InstructBLIP: Instruction-Aware Visual Feature Extraction}
+\label{sec:t5-instructblip}
+
+\landmark{dai2023instructblip}
+InstructBLIP \cite{dai2023instructblip} builds upon BLIP-2 \cite{li2023blip2},
+and its core innovation is the \textbf{instruction-aware Q-Former} ---
+introducing instruction information at the visual feature extraction stage,
+enabling the Q-Former to extract \textit{task-relevant} visual features according to different task instructions.
+
+\paragraph{Architecture.}
+BLIP-2's Q-Former uses a fixed set of learned queries
+to extract visual information from the frozen vision encoder's output via cross-attention.
+InstructBLIP's key improvement is:
+feeding instruction text tokens as additional input alongside the learned queries into the Q-Former,
+so that the Q-Former's self-attention can simultaneously attend to both queries and instruction tokens,
+while the cross-attention extracts information from visual features based on these instruction-conditioned queries.
+Formally, let $\mathbf{Q}$ denote the learned queries, $\mathbf{I}$ the instruction tokens,
+and $\mathbf{V}$ the visual features. Then:
+\begin{equation}
+  \mathbf{Q}' = \text{Q-Former}(\mathbf{Q}, \mathbf{I}, \mathbf{V})
+\end{equation}
+where self-attention operates over $[\mathbf{Q}; \mathbf{I}]$,
+and cross-attention lets $\mathbf{Q}'$ attend to $\mathbf{V}$.
+This design ensures that for the same image, different instructions guide the Q-Former to focus on different visual regions and attributes.
+
+\paragraph{Training.}
+InstructBLIP conducted the most systematic vision-language instruction tuning study to date:
+constructing the training set from 26 public datasets covering 11 task categories
+(image captioning, VQA, visual reasoning, image classification, etc.).
+Each dataset is converted into instruction-following format using specially designed instruction templates.
+During training, both the vision encoder and LLM remain frozen, and only the Q-Former is trained.
+
+An important engineering detail is \textbf{balanced dataset sampling}:
+directly sampling in proportion to dataset size would cause smaller datasets to be overwhelmed by larger ones.
+InstructBLIP's strategy sets the sampling probability for each dataset to be proportional to the square root of its size:
+$p_i \propto \sqrt{|D_i|}$, effectively balancing coverage across datasets.
+
+\paragraph{Results.}
+InstructBLIP achieved zero-shot SOTA across all 13 held-out (not used in training) datasets,
+demonstrating the generalization capability of instruction-aware feature extraction.
+Even more remarkably, the 4B-parameter InstructBLIP (Vicuna-7B backbone)
+surpassed the 80B-parameter Flamingo on multiple benchmarks,
+fully illustrating the efficiency advantage of instruction tuning:
+\textit{high-quality post-training can compensate for an order-of-magnitude gap in parameter count}.
+
+\begin{solutionbox}
+\textbf{LLaVA vs InstructBLIP --- Two Visual Feature Extraction Paradigms:}
+\begin{itemize}[leftmargin=2em]
+  \item LLaVA: simple projection, feeding \textit{all} visual features directly into the LLM,
+    letting the LLM's attention mechanism decide which visual information to focus on.
+    Advantages: simple implementation, LLM receives complete visual information; Disadvantages: more visual tokens, higher computational cost.
+  \item InstructBLIP: instruction-aware Q-Former,
+    performing task-relevant filtering at the visual feature extraction stage.
+    Advantages: fixed and fewer visual tokens (32 queries), strong task adaptability;
+    Disadvantages: the Q-Former introduces additional training complexity and may discard visual information that is irrelevant to the current instruction but still valuable.
+\end{itemize}
+Subsequent developments show that LLaVA's simple projection approach (augmented with higher resolution and better projection designs)
+has gradually become the mainstream choice, owing to its \textbf{simplicity} and \textbf{scalability}.
+\end{solutionbox}
+
+% ============================================================
+% 5.3 Limitations & Branching
+% ============================================================
+\subsection{Limitations and Branching: Evolutionary Paths of Multimodal Alignment}
+\label{sec:t5-branches}
+
+Visual instruction tuning laid the foundational framework for multimodal post-training,
+but in practical deployment, it exposed multiple pressing issues that gave rise to four branching evolutionary paths.
+
+% --- Branch A: VLM Preference Optimization ---
+\subsubsection{Branch A: VLM Preference Optimization}
+\label{sec:t5-branch-a}
+
+\begin{problembox}
+SFT-trained VLMs exhibit alignment deficiencies similar to those of text-only LLMs:
+models tend to generate responses that appear plausible but are unfaithful to image content,
+and lack the ability to refuse uncertain questions.
+How can preference optimization techniques be transferred from the text-only setting to the multimodal setting?
+\end{problembox}
+
+\paragraph{LLaVA-RLHF: The First Multimodal RLHF.}
+\landmark{sun2023llava-rlhf}
+LLaVA-RLHF \cite{sun2023llava-rlhf} is the first work to apply the complete RLHF pipeline to a VLM,
+directly transferring the RLHF methodology from Thread~2
+\crossref{2}{sec:t2}
+to the multimodal setting.
+Its training consists of three stages:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Multimodal SFT}:
+    Building upon LLaVA, enhanced high-quality data
+    (VQA-v2 \cite{goyal2017vqav2}, A-OKVQA \cite{schwenk2022aokvqa}, Flickr30k \cite{plummer2015flickr30k})
+    is used for SFT, providing a better warm start.
+
+  \item \textbf{Hallucination-Aware Human Preference Collection}:
+    Approximately 10K human preference annotations are collected (costing approximately \$3,000).
+    The annotation process is specifically designed to focus on hallucination:
+    annotators are instructed to prioritize penalizing responses containing factual errors
+    when comparing two responses,
+    rather than judging solely based on fluency or level of detail.
+
+  \item \textbf{Factually Augmented RLHF (Fact-RLHF)}:
+    This is the most critical innovation of this work.
+    In standard RLHF, the reward model receives only (image, question, response) as input,
+    which is prone to \textbf{reward hacking} ---
+    the reward model may assign high scores to ``confident but incorrect'' responses.
+    Fact-RLHF's solution is to additionally append \textit{factual information}
+    (detailed image captions and/or ground truth answers) to the reward model's input,
+    enabling the reward model to verify the factual correctness of responses based on ground truth information.
+    Formally, the reward model's input is extended from $(x_v, x_q, y)$ to $(x_v, x_q, y, x_{\text{fact}})$,
+    where $x_{\text{fact}}$ is the factual augmentation.
+\end{enumerate}
+
+\noindent
+On MMHal-Bench (a hallucination evaluation benchmark containing 96 image-question pairs
+across 8 categories $\times$ 12 object topics),
+LLaVA-RLHF achieved a 60\% reduction in hallucination compared to the LLaVA baseline.
+On LLaVA-Bench, it attained 94\% of the GPT-4 evaluation score.
+
+\paragraph{RLHF-V: Fine-Grained Correctional Feedback.}
+RLHF-V \cite{yu2023rlhfv} proposes a more refined preference collection strategy:
+annotators not only label preferred/dispreferred response pairs,
+but also annotate, segment by segment, which specific portions of the dispreferred response contain hallucination,
+and provide corresponding corrective text.
+This \textit{fine-grained correctional feedback} enables preference learning
+to focus on the genuinely problematic parts of a response, rather than making coarse-grained judgments about the entire response.
+
+\paragraph{RLAIF-V: Open-Source AI Feedback.}
+RLAIF-V \cite{yu2024rlaifv} further addresses the cost problem of human annotation:
+it uses open-source VLMs (rather than GPT-4V) to automatically generate preference data,
+forming a fully open-source AI feedback pipeline.
+This work demonstrates the feasibility of AI feedback in VLM alignment,
+echoing the idea of RLAIF \cite{lee2023rlaif} from Thread~2
+\crossref{2}{sec:t2}.
+
+\paragraph{mDPO: Conditional Preference Optimization.}
+mDPO \cite{wang2024mdpo} modifies DPO for the multimodal setting.
+The implicit assumption of standard DPO is that the difference in the reference policy's probabilities
+for preferred and dispreferred responses primarily arises from textual preferences,
+but in the multimodal setting, image conditioning significantly affects this distribution.
+mDPO introduces an image-conditioned correction term,
+enabling DPO's preference learning to better accommodate the characteristics of multimodal inputs.
+
+\paragraph{LLaVA-Critic: Model as Evaluator.}
+LLaVA-Critic \cite{xiong2024llava-critic} proposes training the VLM itself as an evaluator of multimodal outputs,
+capable of scoring and ranking responses from itself or other models.
+This work is directly aligned with the reward modeling ideas from Thread~2
+\crossref{2}{sec:t2},
+while also providing infrastructure for self-improvement and iterative DPO in the multimodal setting.
+
+\paragraph{Other Works.}
+Silkie \cite{li2023silkie} uses GPT-4V to perform preference ranking of responses from multiple VLMs,
+constructing training data through preference distillation.
+HA-DPO \cite{zhao2023hadpo} specifically constructs preference pairs targeting hallucination,
+making DPO's optimization objective more focused on reducing hallucination.
+SeVa \cite{zhu2024seva} proposes self-supervised visual preference alignment,
+generating preference data by contrasting correct/incorrect visual inputs without requiring human annotation.
+DRESS \cite{chen2023dress} introduces natural language feedback as an alignment signal,
+going beyond simple preferred/dispreferred binary annotation.
+
+\evolution{SFT-only VLM training}
+  {Complete alignment pipeline with SFT $\rightarrow$ RLHF/DPO}
+  {Multimodal preference optimization}
+
+% --- Branch B: Hallucination Reduction ---
+\subsubsection{Branch B: Hallucination Reduction}
+\label{sec:t5-branch-b}
+
+\begin{problembox}
+VLMs frequently generate descriptions inconsistent with image content --- claiming the presence of objects that do not exist in the image (object hallucination),
+or incorrectly describing object attributes and relationships.
+How can multimodal hallucination be systematically evaluated and reduced?
+\end{problembox}
+
+\paragraph{Evaluation Benchmarks.}
+\landmark{rohrbach2018chair}
+CHAIR \cite{rohrbach2018chair} was the first to quantitatively evaluate object hallucination
+by checking whether objects mentioned in captions exist in ground truth annotations,
+but it covers only 80 COCO categories and is sensitive to prompts.
+\landmark{li2023pope}
+POPE \cite{li2023pope} transforms evaluation into a stable Yes/No binary classification,
+using Random/Popular/Adversarial negative sampling strategies to reveal
+the model's systematic hallucination tendency toward high-frequency and co-occurring objects,
+as well as a strong bias toward ``Yes'' answers (Yes-ratio far exceeding 50\%).
+MMBench \cite{liu2023mmbench} extends evaluation to 20+ fine-grained capability dimensions,
+and HallusionBench \cite{guan2023hallusionbench} covers attribute, relation, and visual illusion scenarios.
+
+\paragraph{Inference-Time Mitigation.}
+VCD \cite{leng2023vcd} (CVPR 2024 Highlight) proposes training-free \textbf{Visual Contrastive Decoding}:
+applying Gaussian noise perturbation to the input image to obtain a degraded input $v'$,
+and subtracting its output (which reflects pure language priors and statistical biases) from the original output,
+thereby amplifying the token probabilities that genuinely depend on visual signals.
+Woodpecker \cite{yin2023woodpecker} constructs a training-free five-stage factual verification pipeline,
+using Grounding DINO and BLIP-2 to perform claim-level verification of VLM outputs,
+improving the accuracy of weaker models (mPLUG-Owl) by up to 24\%.
+
+\paragraph{Training-Time Mitigation.}
+LURE \cite{zhou2023lure} (ICLR 2024) identifies three factors causing hallucination ---
+co-occurrence bias, decoding uncertainty, and position bias ---
+and designs a post-processing revisor that reduces CHAIR$_S$ by 73.6\%.
+HACL \cite{jiang2023hacl} uses contrastive learning
+to push apart hallucinated and faithful representations in feature space.
+HalluciDoctor \cite{yu2023hallucidoctor} eliminates hallucination from a data quality perspective, removing hallucination in the training data itself.
+These training-time methods complement the DPO methods in Branch A ---
+the former corrects data or representations, while the latter guides generation behavior through preference optimization.
+
+\evolution{VLM evaluation without hallucination metrics}
+  {Systematic evaluation (CHAIR/POPE) + dual-stage training/inference mitigation}
+  {VCD/Woodpecker + LURE/HACL + DPO}
+
+% --- Branch C: Grounding ---
+\subsubsection{Branch C: Grounding and Fine-Grained Understanding}
+\label{sec:t5-branch-c}
+
+\begin{problembox}
+Standard VLMs can only perform image-level understanding (``there is a cat in the image''),
+but cannot perform region-level localization (``the cat is in the upper-left corner of the image [x1, y1, x2, y2]'').
+How can VLMs be endowed with both grounding (text $\rightarrow$ location)
+and referring (location $\rightarrow$ text) capabilities?
+\end{problembox}
+
+\paragraph{Kosmos-2: Pioneering Location Tokens.}
+\landmark{peng2023kosmos2}
+Kosmos-2 \cite{peng2023kosmos2} integrates spatial localization into the token vocabulary:
+it introduces 1,024 location tokens and markup tokens,
+embedding bounding boxes in hyperlink format within text.
+This design unifies grounding and referring as standard next-token prediction,
+without requiring additional detection heads or regression losses.
+The accompanying GRIT dataset (91M images, 137M bounding boxes) provides the training foundation.
+
+\paragraph{Shikra: Plain-Text Coordinate Scheme.}
+Shikra \cite{chen2023shikra} (EMNLP 2024) demonstrates that spatial localization requires no architectural modifications ---
+simply encoding coordinates as normalized decimal numbers (to 3 decimal places),
+processed by the LLM's standard tokenizer, is sufficient to learn spatial reasoning through next-token prediction.
+Shikra defines the \textbf{Referential Dialogue} (RD) format,
+in which both users and models can embed coordinate references within natural language.
+It achieves 87.83\% on RefCOCO val, demonstrating the competitiveness of the plain-text coordinate scheme.
+
+\paragraph{Ferret: Arbitrary-Shape Regions.}
+Ferret \cite{you2023ferret} (Apple, ICLR 2024) breaks beyond rectangular bounding box limitations,
+using a \textbf{Spatial-Aware Visual Sampler} inspired by PointNet++
+to support arbitrary-shape region inputs such as points, boxes, scribbles, and segmentation masks.
+Combined with hybrid region representation and spatial hard negatives in training data,
+Ferret-13B achieves 89.48\% on RefCOCO val.
+LLaVA-Grounding \cite{zhang2023llava-grounding} jointly trains grounding with instruction tuning,
+and Osprey \cite{yuan2023osprey} focuses on pixel-level understanding.
+
+\evolution{Image-level understanding (whole-image QA)}
+  {Region-level understanding (grounding + referring)}
+  {Location tokens + Grounded data}
+
+% --- Branch D: Multi-Image and Video ---
+\subsubsection{Branch D: Multi-Image and Video Post-Training}
+\label{sec:t5-branch-d}
+
+\begin{problembox}
+Early VLM post-training (LLaVA, InstructBLIP) focused on single-image understanding,
+but real-world scenarios require understanding comparative relationships across multiple images or temporal dynamics in videos.
+How can visual instruction tuning be extended from single images to multi-image and video settings?
+\end{problembox}
+
+\paragraph{Early Video-Language Models.}
+\landmark{alayrac2022flamingo}
+Flamingo's native support for interleaved image-text sequences provided an architectural reference for multi-image understanding.
+VideoChat \cite{li2023videochat} explored two approaches: textualization (transcription via perception models) and end-to-end learning.
+Video-LLaMA \cite{zhang2023videollama} (EMNLP 2023) constructs a dual-branch architecture for visual and audio,
+using a Video Q-Former to aggregate temporal features and an Audio Q-Former to process audio via ImageBind cross-modal alignment.
+Video-ChatGPT \cite{maaz2023videochatgpt} proposes temporal-spatial dual-pooling
+and constructs a 100K video instruction tuning dataset.
+These early works validated the feasibility of video instruction tuning,
+but were limited in long video and deep temporal reasoning.
+
+\paragraph{LLaVA-OneVision: Unified Architecture Convergence.}
+LLaVA-OneVision \cite{li2024llava-onevision} is the first open-source model to
+simultaneously achieve SOTA across single-image, multi-image, and video tasks.
+Its \textbf{AnyRes} strategy segments high-resolution images into sub-image tiles that are independently encoded and then concatenated with a global overview.
+Three-stage training (alignment $\rightarrow$ knowledge learning $\rightarrow$ instruction tuning)
+enables video understanding capabilities to naturally emerge through joint training (image-to-video transfer), without requiring dedicated video pre-training.
+The 72B version achieves 91.3\% on DocVQA (vs.\ GPT-4V 88.4\%),
+77.6\% on multi-image Mantis (vs.\ GPT-4V 62.7\%), and 66.2\% on video VideoMME (vs.\ GPT-4V 59.9\%).
+LLaVA-NeXT-Interleave \cite{li2024llava-next-interleave}
+further extends to interleaved image-text inputs.
+
+\paragraph{LLaVA-Video: Synthetic Video Instruction Data.}
+LLaVA-Video \cite{zhang2024llava-video} constructs the LLaVA-Video-178K dataset (1.3M instruction samples)
+through GPT-4o hierarchical caption generation (1 FPS high sampling rate, three-level progressive summarization).
+It introduces \textbf{SlowFast} dual-path video encoding (Slow preserves spatial details, Fast processes more frames),
+with the 72B model achieving 70.5\%/76.9\% on VideoMME (without/with subtitles).
+LLaVA-Hound-DPO \cite{zhang2024llava-hound} is the first to apply DPO to video VLMs.
+
+\evolution{Single-image Visual Instruction Tuning}
+  {Unified training across single-image + multi-image + video}
+  {LLaVA-OneVision pipeline}
+
+% ============================================================
+\subsection{Convergence and Frontiers: Formation of the Standard Pipeline}
+\label{sec:t5-convergence}
+
+After the exploratory branching evolution phase, the multimodal post-training field exhibits clear convergence trends along several dimensions.
+
+\paragraph{Convergence Trend 1: SFT + DPO as the Standard Pipeline.}
+Similar to how text-only alignment converged from RLHF to DPO in Thread~2
+\crossref{2}{sec:t2},
+multimodal post-training has also progressively converged from complex PPO-based RLHF (such as LLaVA-RLHF)
+to the simpler SFT + DPO pipeline.
+The three-stage training of LLaVA-OneVision \cite{li2024llava-onevision}
+(Stage 1: alignment pre-training; Stage 2: multi-task SFT; Stage 3: DPO)
+represents the latest manifestation of this convergence.
+DPO's success in multimodal settings is attributable to its implementation simplicity
+and direct effectiveness for hallucination reduction.
+
+\paragraph{Convergence Trend 2: Diversity and Fusion of Vision Encoders.}
+Cambrian-1 \cite{tong2024cambrian} systematically investigated the impact of visual representation on VLM performance.
+Its core finding is that
+no single visual encoder is optimal across all tasks ---
+CLIP excels at semantic understanding, DINOv2 excels at spatial/geometric features,
+and SigLIP outperforms CLIP in certain scenarios.
+Cambrian-1 therefore proposes the \textbf{Spatial Vision Aggregator (SVA)},
+which aggregates features from multiple heterogeneous visual encoders through learnable spatial tokens,
+achieving multi-encoder fusion.
+This work reveals an important insight:
+\textit{the capability bottleneck of VLMs may not lie in the LLM or the post-training method,
+but in the visual representation itself}.
+
+\paragraph{Convergence Trend 3: Unification of Single-Image, Multi-Image, and Video.}
+Early works tended to build independent models and training pipelines for different modalities
+(LLaVA for single images, VideoChat for video),
+but the latest trend is to cover all modalities within a unified architecture and training framework.
+LLaVA-OneVision \cite{li2024llava-onevision} and
+Qwen-VL \cite{bai2023qwen-vl} both demonstrate the viability of this unified approach.
+
+\paragraph{Current Frontier.}
+Synthesizing the above convergence trends, the current frontier of multimodal post-training can be summarized as:
+\textit{Multi-encoder visual backbone $+$ high-resolution processing $+$
+multi-task SFT on diverse data $+$ DPO for hallucination reduction $+$
+unified single/multi-image/video support}.
+This paradigm is embodied in works such as Cambrian-1 and LLaVA-OneVision.
+
+\subsubsection{2025: Multimodal Reasoning via RL}
+\label{sec:t5-reasoning-rl}
+
+In 2025, the success of the RLVR paradigm in Thread~4 (\crossref{4}{sec:t4-thinking-models})
+rapidly spilled over into the multimodal domain,
+marking a paradigm shift from ``SFT + DPO'' to ``SFT + RL for reasoning.''
+
+\paragraph{Rule-Based RL for VLM.}
+R1-VL \cite{zhang2025r1vl} (ICCV 2025) extends step-wise GRPO to visual mathematical reasoning,
+validating the effectiveness of RLVR in multimodal settings.
+MM-Eureka \cite{meng2025mmeureka} and VLM-R1 \cite{shen2025vlmr1}
+advance R1-style VLMs in mathematical/scientific reasoning and training stability, respectively.
+MM-RLHF \cite{zhang2025mmrlhf} (ICML 2025) systematically extends RLHF to multimodal settings,
+constructing large-scale multimodal preference datasets and multi-dimensional reward models.
+TLDR \cite{fu2025tldr} refines rewards from sequence-level to token-level,
+and Multimodal RewardBench \cite{yasunaga2025mmrewardbench} provides a systematic evaluation benchmark.
+
+\paragraph{URSA: Process-Supervised RL for Multimodal Math.}
+Luo et al.\ \cite{luo2025ursa}'s \textbf{URSA} (NeurIPS 2025) constructs a three-stage pipeline:
+MMathCoT-1M (large-scale multimodal chain-of-thought data),
+DualMath-1.1M (process-level supervision covering both logical correctness and perceptual consistency),
+and \textbf{PS-GRPO} (Process-Supervised GRPO) ---
+the first method to apply PRM-guided online RL to multimodal reasoning.
+URSA-8B surpasses Gemma3-12B and GPT-4o on average across 6 mathematical benchmarks
+(by 8.4\% and 2.7\%, respectively),
+directly extending the process reward ideas from Thread~4
+\crossref{4}{sec:t4-thinking-models}
+to vision-language joint reasoning settings.
+
+\paragraph{VisualPRM: Multimodal Process Reward Model.}
+The InternVL team's \textbf{VisualPRM} \cite{wang2025visualprm} (8B parameters)
+scores \textit{each step} of vision-language chain-of-thought rather than evaluating only the final answer.
+Through an automated pipeline, it constructs the VisualPRM400K training dataset and releases the VisualProcessBench evaluation benchmark.
+Under best-of-N sampling, it improves InternVL2.5-78B by an average of 5.9 points and the 8B model by 8.4 points,
+providing open-source infrastructure for VLM test-time scaling.
+
+\paragraph{MVoT: Thinking in Images.}
+\textbf{MVoT} \cite{li2025mvot} (ICML 2025) proposes a qualitatively different reasoning paradigm:
+interleaving the generation of image tokens and text tokens within the chain-of-thought,
+allowing the model to ``think in images'' rather than ``think about images.''
+It surpasses text-only CoT in the most challenging dynamic spatial reasoning scenarios,
+demonstrating that certain reasoning tasks genuinely require visual intermediate representations.
+
+\paragraph{Paradigm Shift Summary.}
+o3/o4-mini \cite{openai2025o3} possesses native multimodal reasoning capabilities, further reinforcing this trend.
+In 2025, multimodal reasoning advances along three directions:
+\textit{refinement of training signals} (process-level reward),
+\textit{test-time compute scaling} (PRM-guided search),
+and \textit{expansion of reasoning modalities} (from text-only CoT to visual CoT).
+The frontier of multimodal post-training is evolving from
+\textit{SFT + DPO for hallucination reduction}
+to \textit{SFT + RL for reasoning-capable VLMs}.
+
+\subsubsection{2025: VLM Architecture Engineering and Open-Source Scaling}
+\label{sec:t5-scaling}
+
+In 2024--2025, open-source VLMs such as InternVL, Qwen-VL, and DeepSeek-VL have approached or even surpassed GPT-4o,
+systematically answering key engineering questions in VLM post-training.
+
+\paragraph{Dynamic Resolution: From Fixed to Native Resolution.}
+The shift from fixed resolution to native resolution is the consensus of 2024--2025:
+LLaVA-OneVision \cite{li2024llava-onevision}'s \textbf{AnyRes}
+segments images into tiles that are independently encoded and then compressed via spatial pooling,
+becoming the most widely adopted strategy.
+Qwen2-VL \cite{wang2024qwen2vl}'s Naive Dynamic Resolution
+directly processes original resolutions and introduces \textbf{M-RoPE}
+to unify temporal-spatial positional encoding.
+Qwen2.5-VL \cite{bai2025qwen25vl} introduces Window Attention within the ViT
+(with only 4 layers of full attention), significantly reducing computational overhead,
+while treating precise object localization and document parsing as first-class post-training objectives.
+
+\paragraph{Vision Encoder Scaling.}
+Cambrian-1 \cite{tong2024cambrian} systematically revealed the critical importance of visual representation
+(see \S\ref{sec:t5-convergence}).
+\textbf{InternVL2.5} \cite{chen2024internvl25}'s 6B InternViT significantly reduced the dependence on data volume ---
+achieving superior results with only one-tenth of Qwen2-VL-72B's training tokens,
+revealing an underappreciated empirical law:
+\textit{investing in the vision encoder can substitute for investing in data}.
+\textbf{InternVL3} \cite{zhu2025internvl3} proposes Native Multimodal Pre-Training ---
+interleaving multimodal data with text during the pre-training stage,
+challenging the fundamental assumption that ``multimodal capabilities come from the adaptation stage.''
+
+\paragraph{Efficient Architecture and Data Pipelines.}
+\textbf{DeepSeek-VL2} \cite{wu2024deepseekvl2} introduces MoE + MLA into VLMs,
+surpassing GPT-4o on OCRBench with fewer activated parameters (834 vs.\ 736).
+\textbf{Molmo} \cite{deitke2024molmo} (CVPR 2025) offers a unique perspective from the data side:
+the PixMo dataset is entirely constructed through human annotation (verbal descriptions + 2D pointing), without using VLM-synthesized data.
+Molmo-72B is second only to GPT-4o, demonstrating that
+\textit{eliminating the circular dependency on synthetic data} has a first-order impact on post-training quality.
+
+\begin{solutionbox}
+\textbf{Post-Training Insights from the Open-Source VLM Wave:}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Resolution}: Dynamic tiling + spatial pooling has become the de facto standard.
+  \item \textbf{Vision Encoder}: Large-scale ViTs and ViTs trained from scratch
+    both outperform directly reusing CLIP/SigLIP; the vision encoder is the true bottleneck.
+  \item \textbf{Data quality > scale}: Molmo's purely human-annotated data outperforms competitors using massive synthetic data,
+    and InternVL2.5 surpasses Qwen2-VL with one-tenth the tokens.
+\end{itemize}
+\end{solutionbox}
+
+\subsubsection{2025: Unified Multimodal Generation}
+\label{sec:t5-unified-generation}
+
+All the VLM works discussed above --- from LLaVA to InternVL3 ---
+share a fundamental assumption: \textbf{the model only performs understanding, not generation}.
+They receive images and output text, but cannot generate images or videos.
+In 2024--2025, a new paradigm shift is underway:
+\textbf{unifying visual understanding and visual generation within the same model and training framework}.
+This is not only an architectural challenge but also poses entirely new requirements for post-training ---
+how can understanding quality and generation quality be simultaneously optimized within the same alignment pipeline?
+
+\paragraph{Architectural Spectrum: From Early Fusion to Decoupled Encoding.}
+The architectural designs for unified multimodal generation form a clear spectrum:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Early Fusion --- Chameleon} \cite{team2024chameleon}:
+    A 7B/34B model proposed by Meta,
+    which from pre-training onward treats images and text as the same discrete token vocabulary,
+    trained on 4.4T mixed-modal tokens.
+    Chameleon is the first large-scale early-fusion token-based foundation model,
+    eliminating the ``late fusion'' mode of adding vision adapters onto a frozen LLM.
+    The stability challenges encountered during training (resolved through QK-Norm and z-loss)
+    provided important experience for subsequent unified model training.
+
+  \item \textbf{Pure Autoregressive --- Emu3} \cite{wang2024emu3}:
+    Tokenizes images, text, and video into a unified discrete space,
+    training a single transformer using only next-token prediction.
+    No diffusion, no separate encoder, no compound loss functions.
+    Emu3 simultaneously surpasses SDXL (text-to-image), LLaVA-1.6 (understanding),
+    and OpenSora-1.2 (video generation).
+    Published in Nature \cite{wang2024emu3},
+    this work represents the most extreme position on the unified architecture spectrum ---
+    if autoregressive prediction is sufficient,
+    then the entire suite of text LLM post-training techniques (SFT/RLHF) can be directly transferred.
+
+  \item \textbf{Hybrid AR + Diffusion --- Show-o / Transfusion}:
+    Show-o \cite{xie2024showo} (ICLR 2025) uses autoregressive modeling for text and discrete diffusion for images
+    within the same transformer,
+    handling mixed tasks such as VQA, text-to-image, and inpainting in a single forward pass.
+    Transfusion \cite{zhou2024transfusion} (Meta) goes further,
+    applying next-token prediction loss to text
+    and diffusion loss to \textit{continuous} image patches,
+    without needing to discretize images into tokens.
+    These two works represent a pragmatic middle ground ---
+    acknowledging that different modalities may require different training objectives, but still achieving this within a unified architecture.
+
+  \item \textbf{Decoupled Encoding --- Janus / Janus-Pro} \cite{chen2024janus,chen2025januspro}:
+    Janus (CVPR 2025), proposed by DeepSeek, identifies a fundamental tension:
+    the visual representation needed for understanding (rich semantic features, CLIP-style)
+    and the visual representation needed for generation (fine-grained spatial features for decoding)
+    are \textit{structurally different}.
+    Janus's solution is to use \textbf{two separate visual encoding paths} ---
+    one for understanding and one for generation ---
+    while sharing the same LLM backbone and autoregressive framework.
+    Janus-Pro scales this design to 1B and 7B parameters,
+    surpassing prior unified models in both understanding and generation.
+\end{itemize}
+
+\paragraph{New Challenges for Post-Training.}
+Unified generation models introduce fundamentally new problems for post-training:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Multi-Objective Alignment}:
+    How can understanding accuracy (faithfulness, reduced hallucination)
+    and generation quality (aesthetic quality, factual consistency, user intent matching)
+    be simultaneously optimized within the same RLHF/DPO pipeline?
+    The two objectives may conflict --- training signals beneficial for understanding may not be beneficial for generation.
+  \item \textbf{Tokenization Determines Post-Training Feasibility}:
+    Emu3's pure autoregressive approach means that the entire suite of text LLM post-training techniques
+    can be directly transferred;
+    whereas Transfusion's hybrid loss design requires designing different reward signals
+    and preference learning strategies for different modalities.
+  \item \textbf{Exponential Growth in Data Requirements}:
+    Understanding and generation each require high-quality data,
+    and joint training of both may require even more interleaved data
+    to prevent catastrophic forgetting between capabilities.
+\end{itemize}
+
+\evolution{Understanding-only VLMs (receive images, output text)}
+  {Unified Understanding + Generation (same model understands and generates images/video)}
+  {Decoupled / AR / Hybrid architectural paths}
+
+\subsubsection{2025: Omni-Modal Post-Training}
+\label{sec:t5-omni}
+
+Unified generation merges visual understanding and visual generation into the same model,
+while \textbf{omni-modal} models extend this unification to \textit{all modalities} ---
+end-to-end joint processing of text, vision, audio, and even speech.
+The core post-training challenge of this direction lies in the fact that
+different modalities have fundamentally different \textit{time scales} (audio in milliseconds, video in frames, text in tokens)
+and \textit{interaction modes} (speech requires real-time duplex, text can be asynchronous).
+How can these differences be coordinated within a single alignment pipeline?
+
+\paragraph{GPT-4o: Commercial Validation of the Omni Paradigm.}
+OpenAI's GPT-4o \cite{openai2024gpt4o} is the first end-to-end trained omni model,
+accepting any combination of text, audio, image, and video as input,
+and generating text, audio, and (since March 2025) image output.
+Audio response latency is approximately 320ms, approaching human conversational speed.
+GPT-4o eliminates the traditional cascade pipeline (ASR $\rightarrow$ LLM $\rightarrow$ TTS),
+demonstrating the feasibility of end-to-end omni training at industrial scale,
+and immediately triggering a competition in the open-source community.
+
+\paragraph{Qwen2.5-Omni: Thinker-Talker Architecture.}
+The Qwen team proposes \textbf{Qwen2.5-Omni} \cite{xu2025qwen25omni},
+introducing the \textbf{Thinker-Talker} dual-module architecture:
+the Thinker (LLM) is responsible for multimodal reasoning, and the Talker handles streaming speech generation.
+The key technical innovation is \textbf{TMRoPE} (Time-aligned Multimodal Rotary Position Embedding),
+which synchronizes time-sensitive audio and video inputs at the positional encoding level,
+solving the alignment problem for multi-stream temporal data.
+A sliding-window DiT decoder in the Talker module handles streaming audio token generation.
+On speech instruction following benchmarks (MMLU, GSM8K),
+Qwen2.5-Omni's speech input performance \textit{matches for the first time} its text input performance ---
+a significant milestone for omni models.
+
+\paragraph{VITA: Open-Source Omni with Duplex Interaction.}
+\textbf{VITA} \cite{fu2024vita} is the first open-source omni multimodal LLM,
+supporting simultaneous processing of video, image, text, and audio,
+and featuring \textbf{duplex interaction} capability --- the model can be interrupted by the user while generating a response.
+The subsequent VITA-1.5 (NeurIPS 2025) reduced end-to-end speech interaction latency
+from approximately 4 seconds to approximately 1.5 seconds, with multimodal benchmark average scores improving from 59.8 to 70.8.
+Duplex interaction introduces post-training challenges that standard instruction-following pipelines
+have never addressed:
+How to generate output while continuously receiving input?
+How to train the model to appropriately interrupt its own responses?
+
+\paragraph{Phi-4-Multimodal: Mixture-of-LoRAs.}
+Microsoft's \textbf{Phi-4-Multimodal} \cite{abouelenin2025phi4mini} (5.6B parameters)
+proposes a parameter-efficient omni adaptation scheme:
+\textbf{Mixture-of-LoRAs} --- training independent LoRA adapters for each modality (speech, vision, text),
+dynamically activated based on input type.
+This design minimizes cross-modal interference while sharing the LLM backbone.
+Phi-4-Multimodal is trained on 5T text tokens, 2.3M hours of speech, and 1.1T image-text tokens,
+surpassing larger specialized vision-language and speech-language models with only 5.6B parameters.
+Mixture-of-LoRAs is an efficient alternative to full fine-tuning,
+directly connected to the parameter-efficient post-training methodology in Thread~7
+\crossref{7}{sec:t7}.
+
+\begin{solutionbox}
+\textbf{Three Paradigms for Omni-Modal Architecture Design:}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{End-to-end monolithic} (GPT-4o):
+    All modalities are trained end-to-end within the same model; highest quality but greatest training cost.
+  \item \textbf{Modular decomposition} (Qwen2.5-Omni's Thinker-Talker):
+    Reasoning and real-time generation are decoupled into independent modules,
+    achieving a balance between quality and latency.
+  \item \textbf{Adapter-based} (Phi-4-Multimodal's MoE-LoRA):
+    The LLM backbone is kept unchanged, and capabilities are injected through modality-specific adapters;
+    most efficient but may limit the depth of cross-modal interaction.
+\end{itemize}
+\end{solutionbox}
+
+\evolution{Text + Vision bimodal VLM}
+  {Text + Vision + Audio omni-modal Omni Model}
+  {Thinker-Talker, Mixture-of-LoRAs, End-to-End Training}
+
+\subsubsection{2025--2026: Emerging Frontiers}
+\label{sec:t5-emerging}
+\label{sec:t5-self-evolving}
+
+The aforementioned RLVR and test-time scaling methods have opened multiple frontier directions.
+The latest works in 2025--2026 advance the boundaries of VLM post-training along six paths.
+
+\paragraph{Self-Evolving VLM Training.}
+Static datasets face the problem of training saturation --- when the model's pass rate approaches 0 or 1, the gradient signal vanishes.
+Jia et al.\ \cite{jia2026dpe}'s \textbf{DPE} (Diagnostic-driven Progressive Evolution)
+reformulates training as a Diagnose $\rightarrow$ Produce $\rightarrow$ Enhance closed loop:
+diagnosing the model's capability profile, automatically generating training data targeting weak dimensions, and reinforcing through GRPO.
+The key $p(1-p)$ analysis shows that difficulty-aware filtering has an information-theoretic foundation ---
+gradient signal variance is maximized at the model's decision boundary ($p=0.5$).
+Merely 3K DPE samples surpass the effectiveness of 47K static data samples.
+ProbeLLM \cite{huang2026probellm} uses MCTS to systematically probe model failure modes,
+complementing DPE's diagnostic step
+(see Chapter~\ref{sec:t8}, Directions 7--9).
+
+\paragraph{Test-Time Compute Scaling.}
+\label{sec:t5-test-time-compute}
+VLM test-time scaling is far less stable than LLM test-time scaling:
+visual perception errors are global --- once the model ``misreads'' an image, subsequent reasoning cannot self-correct.
+VisVM \cite{wang2024visvm} trains a dedicated vision value model to guide beam search away from hallucination paths.
+VL-PRM \cite{ong2025vlprm} transfers the process reward model to multimodal settings,
+introducing perception-level supervision that simultaneously checks the correctness of both logic and visual grounding,
+complementing URSA's PS-GRPO in \S\ref{sec:t5-reasoning-rl}.
+RD-VLA \cite{tur2026rdvla} proposes iterative reasoning in latent space rather than token-space search,
+achieving over 90\% success rate after 4 iterations on tasks with 0\% success in a single iteration, at 80$\times$ faster speed.
+Empirical analysis \cite{ahmadpour2025ttsvisonlanguage} confirms that VLM test-time scaling
+is nearly ineffective on perception-dominated tasks, with benefits highly dependent on task type.
+
+\paragraph{Multimodal Reward Models.}
+\label{sec:t5-reward-models}
+Multimodal reward modeling has exposed a disturbing reality:
+even the strongest VLMs serving as judges achieve only approximately 65--72\% accuracy
+\cite{li2024vlrewardbench,yasunaga2025mmrewardbench}.
+The bottleneck is not reasoning capability but perceptual reliability ---
+a judge that ``cannot see the image clearly'' cannot reliably assess the faithfulness of responses.
+MM-RLHF \cite{zhang2025mmrlhf} provides 120K fine-grained multimodal preference data;
+Skywork-VL Reward \cite{wang2025skyworkvlreward} validates that
+dedicated reward model training is more effective than using general VLMs as judges ---
+consistent with the evolution of text-only reward models in Thread~2
+(\crossref{2}{sec:t2}).
+Critic-V \cite{zhang2024criticv} and Judge-MCTS \cite{chen2026mjudgebench}
+advance the evolution from ``black-box scoring'' to ``structured critique.''
+
+\paragraph{Domain-Specialized VLM RL.}
+\label{sec:t5-domain-rl}
+GRPO is expanding into three high-value vertical domains:
+SCoPE VLM \cite{lim2025scopevlm} uses Episodic GRPO to train scroll-or-answer decisions in document navigation;
+BigCharts-R1 \cite{masry2025bigchartsr1} designs chart-specific rewards covering numerical estimation, computation, and visual reasoning;
+UI-TARS-2 \cite{wang2025uitars2} advances VLM RL from single-turn QA to multi-turn GUI interaction ---
+through a Data Flywheel (alternating continual SFT + RL iterations)
+and a stabilized multi-turn RL framework,
+achieving 47.5\% on OSWorld, significantly surpassing Claude and OpenAI agent baselines.
+
+\paragraph{Spatial \& 3D Reasoning.}
+\label{sec:t5-spatial-reasoning}
+Quantitative spatial reasoning (distance, size, direction) is a systematic blind spot of VLMs.
+SpatialVLM \cite{chen2024spatialvlm} (CVPR 2024) automatically generates 2 billion spatial VQA samples from 10 million images,
+revealing that ``capability deficiency is often data deficiency, not architectural deficiency.''
+MetaSpatial \cite{pan2025metaspatial} is the first to introduce RL to 3D spatial reasoning
+(3D Spatial Policy Optimization).
+Smooth Operator \cite{jiao2026smoothoperator} discovers that
+VLMs may already possess latent 3D reasoning capabilities,
+requiring only RL post-training on 50K verifiable data samples to ``activate'' them ---
+echoing DeepSeek-R1's finding in Thread~4 that ``RL awakens dormant capabilities''
+(\crossref{4}{sec:t4-thinking-models}).
+
+\paragraph{World Models as Data Engines.}
+\label{sec:t5-world-models}
+As video generation models mature,
+a new paradigm is emerging: using world models to generate synthetic data for VLM/VLA post-training.
+NVIDIA's Cosmos platform \cite{agarwal2025cosmoswfm,ali2025cosmospredict25} builds world model infrastructure,
+and Cosmos-Reason1 \cite{azzolini2025cosmosreason1} is the first to systematically treat physical common sense as a post-training objective.
+GigaBrain/GigaWorld \cite{ye2025gigabrain0,ye2025gigaworld0}
+demonstrate that VLAs post-trained entirely on synthetic data can achieve strong generalization on real robot tasks.
+VLAW \cite{guo2026vlaw} proposes iterative co-improvement between VLA policies and world models,
+upgrading the world model from a data generator to a virtual training environment.
+DPE generates questions from real images, while world models generate images from physical simulations ---
+the fusion of both is a direction that remains to be explored
+(see the future directions discussion in Chapter~\ref{sec:t8}).
+
+\begin{evolutionbox}
+\textbf{Six Frontier Directions in VLM Post-Training}
+
+Static RLVR $\;\xrightarrow{\text{diagnostic-driven}}\;$ Self-evolving training (DPE)
+\qquad
+General GRPO $\;\xrightarrow{\text{task-specific reward}}\;$ Domain-specialized RL (document/chart/GUI)
+\qquad
+2D understanding $\;\xrightarrow{\text{spatial data + RL}}\;$ 3D spatial reasoning post-training
+\qquad
+Real data $\;\xrightarrow{\text{world model}}\;$ Synthetic data-driven VLA training
+\end{evolutionbox}
+
+% ============================================================
+% 5.5 Open Problems
+% ============================================================
+\subsection{Open Problems}
+\label{sec:t5-open}
+
+Despite significant progress, multimodal post-training still faces several unresolved core problems.
+Note that some of the following problems have been partially mitigated by the works discussed above,
+but fundamental challenges remain unsolved.
+
+\begin{openproblembox}
+\textbf{Open Problem 1: Fine-Grained Visual Understanding.}
+
+Qwen2.5-VL's bounding box/point localization capabilities and Molmo's pointing dataset
+have advanced fine-grained understanding to a practical level.
+However, for tasks requiring \textit{pixel-level} precise understanding (such as medical image analysis, remote sensing image interpretation,
+and industrial defect detection), the granularity of existing methods remains insufficient.
+The core bottleneck is that
+the visual token granularity of current VLMs (typically 14$\times$14 pixels per token)
+exhibits an order-of-magnitude resolution gap relative to the requirements of pixel-level tasks.
+How to bridge this gap during the post-training stage ---
+whether by introducing segmentation-aware training data or designing multi-scale visual token mechanisms ---
+remains an open problem.
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 2: Long Video Understanding \& Temporal Alignment.}
+
+Multiple mitigation approaches have appeared in 2025:
+Video-XL \cite{shu2024videoxl} (CVPR 2025) proposes \textbf{Visual Summarization Tokens (VST)} ---
+periodically inserting special tokens into the video token sequence,
+where the model learns to compress interval information into these tokens, achieving a 16$\times$ compression ratio,
+enabling a single A100 GPU to process thousands of frames in long videos.
+VideoLLaMA 3 \cite{zhang2025videollama3} proposes an ``images first, video second'' training philosophy ---
+first building a strong visual foundation on high-quality image-text data, then extending to video,
+with similarity-based frame merging to reduce redundant tokens.
+MLVU \cite{zhou2024mlvu} (CVPR 2025) establishes the first standard evaluation benchmark
+covering 9 task categories for videos ranging from 3 minutes to 2 hours,
+revealing that even the strongest models (GPT-4o) achieve only 64.6\% on multiple-choice tasks.
+
+Nevertheless, \textbf{hour-scale temporal grounding} (localizing precise time intervals of events)
+and \textbf{streaming video understanding} (performing real-time reasoning while video input continues)
+remain unsolved challenges.
+InternLM-XComposer2.5-OmniLive \cite{chen2024omnilive}
+separates perception, long-term memory, and reasoning into three independent modules,
+representing an initial exploration in the streaming direction,
+but systematic methods for effectively training ``memory management'' capabilities during post-training are still lacking.
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 3: Omni-Modal Safety.}
+
+The visual modality opens new attack surfaces for jailbreaking attacks.
+Qi et al.\ \cite{qi2023visual} demonstrated that embedding adversarial perturbations into images
+can successfully bypass the text-based safety alignment of VLMs;
+FigStep \cite{gong2023figstep} showed that simply rendering harmful instructions into images
+can bypass text safety filters --- a simpler attack;
+MM-SafetyBench \cite{liu2023mm-safetybench} systematically evaluated the effectiveness of various attack methods;
+and VLGuard \cite{zong2024vlguard} proposed a method for safety fine-tuning at extremely low cost.
+
+With the emergence of omni-modal models (\S\ref{sec:t5-omni}),
+the attack surface for safety concerns expands further ---
+the audio modality provides yet another unguarded backdoor
+(e.g., bypassing safety filters through covert instructions embedded in speech).
+Current VLM safety alignment is primarily built for the text modality
+\crossref{3}{sec:t3},
+and how to construct \textbf{modality-agnostic} safety alignment methods,
+enabling models to possess robust refusal capabilities against harmful inputs from \textit{any} modality,
+is a problem of increasing urgency as the number of modalities grows.
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 4: Deep Multimodal Reasoning.}
+
+URSA's PS-GRPO and VisualPRM have introduced process-level rewards
+into multimodal reasoning training (\S\ref{sec:t5-reasoning-rl}),
+and MVoT has explored the new reasoning modality of ``thinking in images.''
+However, current multimodal reasoning remains heavily dependent on \textit{text-based chain-of-thought} ---
+even when addressing visual problems, the reasoning chain is purely textual,
+with visual information processed only once at the input stage and then ``forgotten'' in the depths of attention.
+
+Truly deep multimodal reasoning should be able to
+\textit{repeatedly consult and reinterpret visual information} during the reasoning process
+(similar to how humans repeatedly refer to diagrams when solving problems).
+How to train this ``visual look-back'' capability during the post-training stage ---
+whether through MVoT-style visual intermediate steps,
+or through a paradigm similar to agentic tool use (\crossref{6}{sec:t6})
+where the vision encoder is ``called as a tool'' ---
+remains an open research direction.
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 5: Post-Training for Unified Generation.}
+
+The unified models in \S\ref{sec:t5-unified-generation} (Janus, Emu3, Show-o, Transfusion)
+have demonstrated the architectural feasibility of simultaneously achieving understanding and generation.
+However, the \textbf{post-training methodology} severely lags behind architectural innovation ---
+these models currently rely primarily on SFT,
+and virtually no work has systematically studied how to perform preference optimization on unified models.
+The core difficulty lies in \textbf{multi-objective alignment}:
+the alignment objectives for understanding tasks (faithfulness, reduced hallucination)
+and the alignment objectives for generation tasks (aesthetic quality, user intent matching)
+may conflict.
+How to design reward models and preference learning strategies
+that can simultaneously optimize both types of objectives
+is a critical bottleneck for unified models to progress from ``capability demonstration'' to ``production-grade deployment.''
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 6: Cross-Modal Consistency in Omni-Modal Alignment.}
+
+Omni models (\S\ref{sec:t5-omni}) require the model to provide consistent responses
+to the same query across different input modalities ---
+asking ``What is the capital of Paris?'' via text and asking the same question via speech
+should not produce answers of different quality.
+Qwen2.5-Omni's speech-text performance matching is a milestone,
+but deeper consistency issues have yet to be addressed:
+when the model simultaneously receives conflicting multimodal signals
+(e.g., the image shows ``red'' but the speech says ``blue''),
+how can clear modality priority and conflict resolution mechanisms be established through post-training?
+Furthermore, duplex interaction (VITA) requires the model to
+continuously process new inputs while generating output and adjust its responses in a timely manner ---
+a training scenario entirely unaddressed by standard SFT / DPO pipelines.
+\end{openproblembox}
+
+\subsection{Chapter Summary}
+
+\begin{figure}[!ht]
+\centering
+\begin{tikzpicture}[
+  node distance=0.6cm and 1.2cm,
+  every node/.style={font=\small},
+  milestone/.style={rectangle, rounded corners, draw=thread5, fill=thread5!10,
+    text width=4.2cm, minimum height=0.8cm, align=center, font=\small\bfseries},
+  branch/.style={rectangle, rounded corners, draw=gray!60, fill=gray!5,
+    text width=3.2cm, minimum height=0.7cm, align=center, font=\small},
+  arrow/.style={-{Stealth[length=2.5mm]}, thick, thread5!70},
+  brancharrow/.style={-{Stealth[length=2mm]}, gray!60, thick},
+]
+% Main timeline
+\node[milestone] (flamingo) {Flamingo (2022)\\Visual In-Context Learning};
+\node[milestone, below=1.2cm of flamingo] (llava) {LLaVA (2023)\\Visual Instruction Tuning};
+\node[milestone, below=1.2cm of llava] (rlhf) {LLaVA-RLHF (2023)\\Multimodal Preference Opt.};
+
+% Branches
+\node[branch, below left=1.2cm and 0.5cm of rlhf] (brA) {Branch A: Architecture\\InstructBLIP, Kosmos-2};
+\node[branch, below right=1.2cm and 0.5cm of rlhf] (brB) {Branch B: Hallucination\\POPE, RLHF-V, mDPO};
+
+% Convergence
+\node[milestone, below=2.8cm of rlhf] (onevision) {LLaVA-OneVision (2024)\\Unified Multi-task};
+\node[milestone, below=1.2cm of onevision] (mmreason) {Multimodal Reasoning\\(2025)};
+\node[branch, below=1.2cm of mmreason] (conv) {Convergence: From ``seeing''\\to ``reasoning'' via CoT + Vision};
+
+% Arrows
+\draw[arrow] (flamingo) -- (llava);
+\draw[arrow] (llava) -- (rlhf);
+\draw[brancharrow] (rlhf) -- (brA);
+\draw[brancharrow] (rlhf) -- (brB);
+\draw[arrow] (rlhf) -- (onevision);
+\draw[arrow] (onevision) -- (mmreason);
+\draw[brancharrow] (brA) -- (onevision);
+\draw[brancharrow] (brB) -- (onevision);
+\draw[arrow] (mmreason) -- (conv);
+\end{tikzpicture}
+\caption{Thread 5 evolutionary path: from visual in-context learning to multimodal reasoning integration.
+Orange nodes represent landmark works; gray nodes represent important branches.}
+\label{fig:multimodal-evolution}
+\end{figure}
+
+\begin{table}[!ht]
+\centering
+\caption{Comparison of core methods in Thread 5. Vision-LLM Bridge refers to the mechanism for connecting visual information to the LLM.}
+\label{tab:multimodal-comparison}
+\small
+\begin{tabularx}{\textwidth}{l >{\raggedright\arraybackslash}p{2.5cm} >{\raggedright\arraybackslash}p{2.5cm} >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Method} & \textbf{Vision-LLM Bridge} & \textbf{Post-training} & \textbf{Key Contribution} \\
+\midrule
+Flamingo & Gated cross-attention & Frozen LLM; visual SFT & Visual in-context learning (few-shot) \\
+LLaVA & Linear projection & Two-stage SFT (align + instruct) & Visual instruction tuning at $<$\$300 \\
+InstructBLIP & Instruction-aware Q-Former & Instruction-conditioned SFT & Task-specific visual feature extraction \\
+Kosmos-2 & Interleaved tokens & SFT with grounding data & Bounding box grounding in text \\
+LLaVA-RLHF & Linear projection & SFT + factuality-focused RLHF & First multimodal preference optimization \\
+RLHF-V / mDPO & Various & DPO on hallucination pairs & Fine-grained hallucination reduction \\
+LLaVA-OneVision & AnyRes encoding & Multi-stage SFT & Unified image / video / multi-image \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The evolutionary trajectory of Thread~5 demonstrates the capability progression of VLMs from ``seeing'' to ``understanding'' to ``reasoning'':
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Visual Instruction Following} (2022--2023):
+    Flamingo established the paradigm of visual in-context learning,
+    LLaVA and InstructBLIP demonstrated that visual instruction tuning
+    can unlock multimodal capabilities at extremely low cost,
+    igniting the research wave of VLM post-training.
+
+  \item \textbf{Alignment and Hallucination Mitigation} (2023--2024):
+    LLaVA-RLHF and RLHF-V introduced preference optimization into the multimodal domain,
+    benchmarks such as POPE and HallusionBench exposed the systematic nature of hallucination,
+    and methods such as RLAIF-V and mDPO provided scalable alignment solutions.
+
+  \item \textbf{Unification and Reasoning} (2024--2025):
+    LLaVA-OneVision achieved unified processing of images, videos, and multi-image inputs,
+    multimodal reasoning extended Thread~4's chain-of-thought capabilities to the visual domain,
+    and omni models began pursuing cross-modal capability consistency.
+\end{enumerate}
+
+Multimodal post-training endows models with the ability to ``see'' and ``understand'' the visual world,
+but the true value of this capability lies in laying the foundation for \textbf{action}.
+When VLMs can understand screenshots, localize UI elements, and interpret charts,
+they are just one step away from ``autonomously operating in real environments.''
+
+\paragraph{Preview of the Next Chapter.}
+When VLMs can understand screenshots, localize UI elements, and interpret charts,
+they possess the perceptual prerequisites for autonomous operation in real environments.
+Thread~6 will trace the evolutionary path of agentic capabilities ---
+from RL-based tool use to coding agents to computer use,
+demonstrating how models transform from ``passive text generators'' into ``active world interactors.''

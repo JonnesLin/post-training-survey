@@ -1,0 +1,1086 @@
+% === Thread 4: Reasoning & Verification ===
+\section{Thread 4: Reasoning \& Verification}
+\label{sec:t4}
+
+\begin{quote}
+\textit{Core question: How can we enable models to perform reliable multi-step reasoning and verify intermediate steps?}
+\end{quote}
+
+\noindent
+Reasoning is one of the most exciting capabilities of large language models and the most rapidly evolving direction in the post-training landscape.
+A model that has undergone only pre-training, when confronted with mathematical or logical tasks requiring multi-step derivation,
+tends to directly output an answer without showing any intermediate process, resulting in extremely high error rates and an inability to trace the source of errors.
+The core challenge of the post-training stage is:
+\textbf{How can we teach models to ``show their work,''
+and enable them to self-verify each step while generating a reasoning chain?}
+
+The evolutionary trajectory of this thread can be summarized in four stages:
+\textbf{(1) Discovering the existence of reasoning capabilities} (CoT prompting demonstrates that few-shot examples can activate reasoning chains);
+\textbf{(2) Improving reasoning reliability} (Self-Consistency and verification mechanisms);
+\textbf{(3) Internalizing reasoning capabilities into model parameters} (bootstrapping methods such as STaR and ReST, as well as RL training with GRPO);
+\textbf{(4) Deep integration of reasoning and computation} (test-time compute scaling, the o1/R1 paradigm).
+
+The connections to other threads are especially close:
+the idea of reward modeling flows from Thread~2 into this thread, giving rise to the process reward model
+(\crossref{2}{sec:t2});
+the long-chain reasoning capabilities developed in this thread provide core support for agent planning in Thread~6
+(\crossref{6}{sec:t6});
+and the efficiency techniques from Thread~7 have dramatically reduced the training and deployment costs of reasoning models
+(\crossref{7}{sec:t7}).
+
+
+% ============================================================
+% 4.1 Problem Origin & Early Explorations
+% ============================================================
+\subsection{Problem Origin: The Discovery of Chain-of-Thought}
+\label{sec:t4-origin}
+
+\subsubsection{Scratchpads: The Earliest ``Scratch Paper''}
+
+Before the term Chain-of-Thought was formally coined,
+Nye et al.\ \cite{nye2021scratchpad} had already discovered a key phenomenon:
+when models are allowed to write down intermediate computation steps on a ``scratchpad'' before producing the final answer,
+their accuracy on tasks such as arithmetic and program execution tracing improves significantly.
+Although simple, this work revealed a profound insight:
+\textbf{the computational complexity achievable in a single forward pass of a Transformer is inherently limited},
+and by generating intermediate tokens to ``extend'' the computation chain,
+the model effectively increases its computation depth dynamically at inference time.
+
+\subsubsection{Chain-of-Thought Prompting}
+\label{sec:t4-cot}
+
+\landmark{wei2022cot} systematized this discovery.
+Wei et al.\ proposed \textbf{Chain-of-Thought (CoT) prompting}:
+by including human-written reasoning processes in each few-shot prompt example
+(rather than providing only input-output pairs),
+model performance on multi-step reasoning tasks improves dramatically.
+
+\begin{problembox}
+Standard prompting provides only (question, answer) pairs:\\
+\texttt{Q: Roger has 5 tennis balls...} $\rightarrow$ \texttt{A: 11}\\
+The model is forced to complete all computation in a single forward pass, with no room for intermediate reasoning.
+\end{problembox}
+
+\begin{solutionbox}
+CoT prompting inserts a reasoning chain before the answer:\\
+\texttt{Q: Roger has 5 tennis balls...} $\rightarrow$
+\texttt{A: Roger started with 5 balls. 2 cans of 3 = 6. 5 + 6 = 11. The answer is 11.}\\
+The model progressively unfolds intermediate reasoning through autoregressive generation.
+\end{solutionbox}
+
+\paragraph{Key experimental results.}
+The effectiveness of CoT prompting exhibits a pronounced \textbf{scale-dependent emergent} characteristic:
+\begin{itemize}[leftmargin=2em]
+  \item On small models ($<$10B parameters), CoT provides almost no benefit and may even degrade performance;
+  \item On large models, the effect increases sharply with scale: PaLM-540B on GSM8K jumps from 17.9\% with standard prompting to 58.1\% with CoT prompting;
+  \item On simpler arithmetic benchmarks such as MultiArith, PaLM-540B + CoT even reaches the level of prior task-specific fine-tuned models.
+\end{itemize}
+
+\noindent
+The theoretical significance of this discovery is that
+CoT does not ``teach'' the model to reason, but rather \textbf{activates} reasoning capabilities that were already acquired during pre-training but left unutilized.
+This forms an interesting echo with the ``Superficial Alignment Hypothesis'' proposed by LIMA \cite{zhou2023lima} in Thread~1
+(\crossref{1}{sec:t1})---
+the core role of post-training may not be to inject new knowledge, but to activate the correct output patterns.
+
+\subsubsection{Zero-Shot CoT}
+
+While few-shot CoT requires humans to carefully design reasoning examples,
+\landmark{kojima2022zeroshotcot} demonstrated a striking fact:
+simply appending the phrase ``\textbf{Let's think step by step}'' to the end of a prompt
+can activate the model's reasoning chain generation capability \textbf{without any examples}.
+
+Kojima et al.\ termed this strategy \textbf{Zero-Shot CoT}.
+On MultiArith, Zero-Shot CoT raised the accuracy of InstructGPT-175B from 17.7\% to 78.7\%;
+its average performance across multiple reasoning benchmarks also surpasses standard zero-shot prompting.
+This result indicates that large language models already possess the capability pattern for ``step-by-step thinking'' internally,
+and only an extremely brief instruction is needed to ``unlock'' it.
+
+\subsubsection{Least-to-Most Prompting}
+
+Unlike CoT's ``all-at-once'' reasoning approach,
+\citet{zhou2022least} proposed \textbf{Least-to-Most Prompting}---
+\textbf{first decomposing complex problems into a sequence of simpler sub-problems},
+then solving them progressively starting from the simplest, with each sub-problem's answer serving as context for subsequent sub-problems.
+This compositional decomposition strategy performs particularly well on problems that require generalization beyond the complexity of the provided examples
+(e.g., the SCAN compositional generalization benchmark),
+with accuracy jumping from 16\% with CoT to 99.7\%.
+Least-to-Most reveals an important design principle:
+\textbf{the key to reasoning lies not only in ``thinking step by step,'' but also in ``decomposing the problem correctly''}.
+
+\subsubsection{Tree of Thoughts}
+
+The linear reasoning chain of CoT has inherent limitations when facing problems that require search and backtracking.
+Yao et al.\ \cite{yao2023tot} proposed \textbf{Tree of Thoughts (ToT)},
+which extends the reasoning process from a linear chain to a tree-structured search.
+ToT generates multiple candidate ``thoughts'' at each step,
+selects the most promising branches through an evaluation function (which can be the model's own self-evaluation),
+and supports classic search strategies such as breadth-first search and depth-first search.
+On tasks requiring creative search such as the Game of 24,
+ToT achieves a success rate of 74\%, far surpassing CoT prompting at 4\%.
+
+\paragraph{RAP: MCTS-driven reasoning.}
+Hao et al.\ \cite{hao2023rap} proposed \textbf{Reasoning via Planning (RAP)},
+which uses the LLM simultaneously as a \textbf{world model} (predicting the consequences of each reasoning step) and a \textbf{reasoning agent},
+employing \textbf{Monte Carlo Tree Search (MCTS)} to replace the simpler BFS/DFS search in ToT.
+The UCB exploration-exploitation balance of MCTS allows RAP to allocate search resources more efficiently under a limited computation budget.
+This work combines classical planning algorithms with LLM reasoning,
+and the application of MCTS was further developed in OmegaPRM \cite{luo2024omegaprm}'s automated process supervision
+and rStar \cite{qi2024rstar}'s mutual reasoning.
+
+\evolution{Chain-of-Thought: linear reasoning chains}{Tree of Thoughts / RAP: tree-structured search and planning}{need for backtracking and exploration}
+
+\paragraph{PAL: Outsourcing computation to a code interpreter.}
+Unlike the above methods that have the LLM perform all reasoning in natural language,
+Gao et al.\ \cite{gao2022pal} proposed \textbf{Program-Aided Language models (PAL)}---
+having the LLM generate the reasoning process as \textbf{executable programs} (rather than natural language reasoning chains),
+which are then executed by a Python interpreter.
+This division of labor---``reasoning for the language model, computation for the interpreter''---
+raised PaLM-540B's accuracy on GSM8K from 56.5\% with CoT to \textbf{72.0\%},
+with particularly notable advantages on problems requiring precise numerical computation.
+PAL pioneered the \textbf{program-of-thought (PoT)} paradigm,
+which was later absorbed as a core component of the hybrid CoT+PoT training strategy in works such as MAmmoTH \cite{yue2023mammoth},
+and resonates with the tool-use ideas in Thread~6 (\crossref{6}{sec:t6}).
+
+\subsubsection{CoT Distillation: Transferring Reasoning Capabilities to Smaller Models}
+
+A key limitation of CoT is its scale-dependent nature---
+small models cannot benefit from CoT prompting.
+To address this, two parallel lines of research explored \textbf{CoT distillation}:
+
+\begin{itemize}[leftmargin=2em]
+  \item Magister et al.\ \cite{magister2023cotdistill} proposed using CoT reasoning chains generated by large models
+    as SFT data to train smaller models,
+    enabling a 0.3B model to approach the CoT prompting performance of a 540B model on arithmetic tasks.
+
+  \item Hsieh et al.\ \cite{hsieh2023distillstep} proposed \textbf{Distilling Step-by-Step},
+    which not only uses the large model's reasoning chains as labels,
+    but also treats each step in the reasoning chain as an additional rationale supervision signal,
+    achieving superior data efficiency compared to standard distillation.
+    This method enabled a 770M T5 model to surpass the few-shot performance of the 540B PaLM on certain tasks using only 12.5\% of the training data.
+\end{itemize}
+
+\noindent
+These distillation works laid the foundation for a core theme of Thread~4:
+\textbf{how to internalize reasoning capabilities from inference-time prompt tricks into model parameters through post-training.}
+
+
+% ============================================================
+% 4.2 Foundation: Verification & Reward Modeling for Reasoning
+% ============================================================
+\subsection{Foundational Methods: Reasoning Verification and Reward Modeling}
+\label{sec:t4-foundation}
+
+Although CoT prompting activated reasoning chain generation capabilities,
+the reliability of a single reasoning chain is far from sufficient to support high-stakes application scenarios.
+A seemingly fluent reasoning chain may contain a subtle logical error at some intermediate step,
+and this error propagates to all subsequent steps, leading to an incorrect final answer.
+How to \textbf{verify} the correctness of reasoning chains became the second core problem of this thread.
+
+\subsubsection{Self-Consistency: Multi-Path Voting}
+\label{sec:t4-self-consistency}
+
+\landmark{wang2023selfconsistency} proposed an intuitive and effective strategy:
+rather than relying on a single greedy decoding reasoning chain,
+generate multiple \textbf{diverse} reasoning paths through temperature sampling,
+then perform \textbf{majority voting} on the final answers obtained from all paths.
+
+\paragraph{Core method.}
+Given a question $\mathbf{x}$, the decoding process of Self-Consistency is:
+\begin{enumerate}[leftmargin=2em]
+  \item Sample $m$ reasoning paths $(\mathbf{r}_1, a_1), \ldots, (\mathbf{r}_m, a_m)$ from the language model,
+    where $\mathbf{r}_i$ is the reasoning chain and $a_i$ is the corresponding final answer;
+  \item Select the answer with the highest frequency as the final prediction:
+\end{enumerate}
+\begin{equation}
+\label{eq:self-consistency}
+\hat{a} = \arg\max_{a} \sum_{i=1}^{m} \mathbf{1}(a_i = a)
+\end{equation}
+
+\noindent
+This strategy can be understood as \textbf{marginalization} over the CoT reasoning process:
+Wang et al.\ noted that Self-Consistency approximately implements
+$\hat{a} = \arg\max_a \sum_{\mathbf{r}} P(\mathbf{r}, a \mid \mathbf{x})$,
+i.e., selecting the answer with the highest posterior probability after summing over all reasoning paths.
+Compared to greedy decoding or beam search, which only consider high-probability paths,
+this ``sample-and-marginalize'' strategy better leverages the complementary information across diverse reasoning paths.
+
+\paragraph{Key experimental results.}
+Self-Consistency yields significant and consistent improvements across virtually all reasoning benchmarks:
+\begin{itemize}[leftmargin=2em]
+  \item GSM8K: GPT-3 code-davinci-002 improves from 60.1\% with CoT to 78.0\% (\textbf{+17.9\%});
+  \item SVAMP: \textbf{+11.0\%}; AQuA: \textbf{+12.2\%};
+  \item The method exhibits good robustness to sampling strategies (temperature, top-$k$);
+  \item It is equally effective when combined with Zero-Shot CoT: GSM8K +26.2\%.
+\end{itemize}
+
+\noindent
+The importance of Self-Consistency lies in revealing a key principle:
+\textbf{investing more computational resources at inference time (generating more reasoning paths) can systematically improve reasoning accuracy}.
+This principle became the direct precursor to subsequent research on test-time compute scaling (see \S\ref{sec:t4-convergence}).
+
+\subsubsection{Self-Refine \& Reflexion: Iterative Self-Improvement}
+
+Beyond the ``generate multiple paths + vote'' paradigm of Self-Consistency,
+another line of research explored enabling models to \textbf{iteratively self-improve} their reasoning processes.
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Self-Refine} \cite{madaan2023selfrefine}:
+    After generating an initial output, the model self-evaluates (critiques) the quality of its output,
+    then modifies (refines) it based on the evaluation, iterating until a stopping condition is met.
+    This approach demonstrated continuous improvement on tasks such as code optimization and dialogue response generation.
+
+  \item \textbf{Reflexion} \cite{shinn2023reflexion}:
+    Models the self-reflection process as a form of ``verbal reinforcement learning.''
+    After completing a task, the agent generates a natural language reflection
+    summarizing the causes of failure and strategies for improvement, storing it as episodic memory,
+    which is then leveraged in subsequent trials to avoid repeating the same mistakes.
+    Achieves 91\% pass@1 on HumanEval.
+\end{itemize}
+
+\paragraph{Limitations of self-correction.}
+However, a systematic study by Huang et al.\ \cite{huang2024selfcorrect} showed that
+\textbf{LLMs are actually unable to reliably self-correct their reasoning without external feedback}.
+Across multiple reasoning benchmarks, self-correction even led to performance degradation.
+Only when models receive external feedback signals (such as ground truth, tool outputs, or evaluations from stronger models)
+can iterative improvement truly work.
+This finding underscores the \textbf{irreplaceability of external verification mechanisms}.
+
+\subsubsection{Outcome Reward Model (ORM) \& GSM8K}
+\label{sec:t4-orm}
+
+If Self-Consistency implicitly leverages the diversity of reasoning paths through majority voting,
+then \textbf{training a dedicated verifier} to explicitly evaluate the quality of reasoning chains
+represents a more refined verification strategy.
+
+\landmark{cobbe2021gsm8k} made pioneering contributions in this direction.
+Cobbe et al.\ presented two interrelated contributions:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{The GSM8K dataset}: 8.5K high-quality grade school math word problems,
+    each requiring 2--8 reasoning steps, with integer answers.
+    This dataset became one of the most widely used benchmarks in subsequent reasoning research.
+
+  \item \textbf{Outcome-based Verifier} (later termed Outcome Reward Model, ORM):
+    Training a verifier model to judge whether the final answer of a reasoning chain is correct.
+    At inference time, $N$ candidate reasoning chains are generated,
+    the verifier scores each chain, and the highest-scoring answer is selected.
+    Compared to majority voting, verifier-guided selection achieves higher accuracy for the same number of samples.
+\end{enumerate}
+
+\noindent
+The idea behind ORM directly inherits the reward modeling framework from Thread~2
+(\crossref{2}{sec:t2})---
+training human judgments of reasoning quality into an automated scoring model.
+However, a fundamental limitation of ORM is that
+\textbf{it only evaluates the correctness of the final answer and cannot localize errors in intermediate reasoning steps}.
+A chain that arrives at the correct answer through flawed reasoning (``right answer for wrong reasons'')
+would be rated as correct by the ORM, which is unacceptable in scenarios requiring reliable reasoning.
+
+\subsubsection{Process Reward Model (PRM): Let's Verify Step by Step}
+\label{sec:t4-prm}
+
+\landmark{lightman2023prm} directly addressed the above limitations of ORM.
+Lightman et al.\ proposed the \textbf{Process Reward Model (PRM)}:
+rather than evaluating only the final answer, it provides an independent correctness judgment for \textbf{each step} in the reasoning chain.
+
+\paragraph{Core method.}
+The PRM scores a reasoning chain $(s_1, s_2, \ldots, s_K)$ as follows:
+\begin{equation}
+\label{eq:prm-score}
+\text{PRM-score}(\mathbf{s}) = \prod_{k=1}^{K} P(\text{correct} \mid s_1, \ldots, s_k)
+\end{equation}
+where each step $s_k$ is labeled as one of three categories: positive, negative, or neutral.
+The training data for the PRM comes from step-by-step human annotations.
+
+\paragraph{The PRM800K dataset.}
+To train a high-quality PRM, Lightman et al.\ constructed the \textbf{PRM800K} dataset:
+\begin{itemize}[leftmargin=2em]
+  \item Approximately 800,000 step-level annotations covering 75,000 solution traces corresponding to 12,000 problems from the MATH dataset;
+  \item Each step is labeled as positive (correct), negative (incorrect), or neutral (ambiguous);
+  \item An \textbf{active learning} strategy was used to select the most informative samples for annotation,
+    achieving a \textbf{2.6$\times$} improvement in annotation efficiency
+    (i.e., the number of samples required to achieve equivalent performance under a fixed annotation budget was reduced to 1/2.6).
+\end{itemize}
+
+\paragraph{Key experimental results: PRM substantially outperforms ORM.}
+In the best-of-$N$ evaluation on the MATH dataset ($N = 1860$):
+\begin{itemize}[leftmargin=2em]
+  \item PRM (best-of-$N$): \textbf{78.2\%}
+  \item ORM (best-of-$N$): 72.4\%
+  \item Majority Voting: 69.6\%
+\end{itemize}
+
+\noindent
+PRM exceeds ORM by \textbf{5.8 percentage points} and majority voting by \textbf{8.6 percentage points}.
+This result strongly demonstrates that \textbf{process-level supervision is superior to outcome-level supervision}.
+
+\begin{openproblembox}
+The annotation cost of PRM800K is extremely high (requiring domain experts in mathematics to check each step).
+How to automate the annotation process for process supervision became a core open problem for subsequent research.
+\end{openproblembox}
+
+\subsubsection{Automating Process Supervision}
+
+The tension between PRM's strong performance and its prohibitive annotation costs gave rise to a series of works on automating process supervision.
+
+\paragraph{Math-Shepherd.}
+Wang et al.\ \cite{wang2024mathshepherd} proposed \textbf{Math-Shepherd},
+which uses an automatic annotation method based on a \textbf{completer model} to replace human annotation.
+For each step $s_k$ in a reasoning chain,
+Math-Shepherd has a model ``complete'' the remaining reasoning steps multiple times starting from $s_k$;
+if the majority of completion paths reach the correct answer, the step is labeled as correct.
+Without any human step-level annotations,
+the PRM trained using this method matches or even surpasses the performance of human-annotated PRMs across multiple mathematical reasoning benchmarks.
+
+\paragraph{OmegaPRM.}
+Luo et al.\ \cite{luo2024omegaprm} proposed \textbf{OmegaPRM},
+which employs Monte Carlo tree search (MCTS) to efficiently auto-annotate the correctness of reasoning steps.
+Unlike Math-Shepherd's ``flat completion'' approach,
+OmegaPRM uses tree search strategies to allocate computational resources more efficiently,
+investing more sampling effort on critical steps that require fine-grained judgment
+and quickly passing through simple steps, significantly improving annotation efficiency.
+
+\paragraph{GenRM: Generative verification.}
+Zhang et al.\ \cite{zhang2024genrm} proposed a different verification paradigm, \textbf{GenRM}
+(Generative Reward Model):
+rather than modeling verification as a discriminative classification problem (``this step is correct vs.\ incorrect''),
+the verification model outputs its verification process and judgment through \textbf{natural language generation}.
+GenRM leverages the language model's strengths in CoT reasoning,
+unfolding a reasoning chain during the verification process to judge the correctness of each step,
+and achieves superior out-of-distribution generalization compared to traditional discriminative PRMs.
+
+\evolution{Human-annotated PRM (PRM800K)}{Automated PRM (Math-Shepherd, OmegaPRM)}{annotation cost bottleneck}
+
+
+% ============================================================
+% 4.3 RL for Reasoning: Bootstrapping & Policy Optimization
+% ============================================================
+\subsection{RL for Reasoning: Self-Improvement and Policy Optimization}
+\label{sec:t4-rl}
+
+The methods discussed in the previous two sections---CoT prompting, Self-Consistency, PRM---
+primarily improve reasoning capabilities \textbf{at inference time} through prompt design or verifier-guided search.
+This section turns to a more ambitious goal:
+\textbf{internalizing reasoning capabilities into the model through post-training (modifying model parameters)},
+so that the model can exhibit strong reasoning capabilities without relying on elaborate prompts or extensive sampling.
+
+\subsubsection{STaR: Self-Taught Reasoner}
+\label{sec:t4-star}
+
+\landmark{zelikman2022star} proposed \textbf{STaR} (Self-Taught Reasoner),
+a method for improving reasoning capabilities through \textbf{iterative self-training}.
+The core idea of STaR is simple yet profound:
+let the model generate its own reasoning chains, retain only those that arrive at the correct final answer as training data,
+then fine-tune on these ``success cases,'' and iterate.
+
+\paragraph{Algorithm procedure.}
+Each iteration of STaR consists of the following steps:
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Generate}: For each training problem $(x_i, y_i)$,
+    have the current model $M_t$ generate a reasoning chain $\hat{r}_i$ and answer $\hat{y}_i$;
+  \item \textbf{Filter}: Retain only samples where $\hat{y}_i = y_i$ (correct answers);
+  \item \textbf{Rationalization}: For problems the model fails to answer correctly,
+    provide the correct answer $y_i$ as a hint to the model,
+    and have it ``reverse-engineer'' a reasoning chain that leads to the correct answer.
+    These rationalized samples are also added to the training set;
+  \item \textbf{Train}: Fine-tune the model on the collected (reasoning chain, correct answer) pairs
+    to obtain $M_{t+1}$;
+  \item Return to step 1 and repeat.
+\end{enumerate}
+
+\paragraph{The elegance of rationalization.}
+The most critical innovation in STaR is the \textbf{rationalization} mechanism.
+If only problems the model can already answer correctly are retained,
+the training distribution becomes biased toward ``easy problems,'' preventing the model from making progress on harder ones.
+Rationalization, by providing the correct answer as a hint,
+enables the model to generate plausible reasoning chains even for problems it originally could not solve,
+thereby pushing the ``learning frontier'' toward higher difficulty levels.
+
+\paragraph{Deep connections to RL.}
+Zelikman et al.\ proved that STaR can be understood as a special form of the REINFORCE algorithm.
+Define the training objective as:
+\begin{equation}
+\label{eq:star-rl}
+J(M, X, Y) = \sum_{(x,y) \in (X,Y)} \mathbb{E}_{\hat{r} \sim M(\cdot|x)}
+\left[ \mathbf{1}(\hat{y} = y) \right]
+\end{equation}
+where $\hat{y}$ is the answer extracted from the reasoning chain $\hat{r}$.
+Through the log-derivative trick, the gradient of this objective becomes:
+\begin{equation}
+\label{eq:star-gradient}
+\nabla J = \sum_{(x,y)} \mathbb{E}_{\hat{r} \sim M}
+\left[ \mathbf{1}(\hat{y} = y) \cdot \nabla \log P_M(\hat{r} \mid x) \right]
+\end{equation}
+This is identical in form to the REINFORCE gradient
+(with reward $\mathbf{1}(\hat{y} = y)$ and policy $P_M(\hat{r} \mid x)$).
+STaR's ``filter correct samples + SFT'' operation is effectively an approximate implementation of the REINFORCE gradient.
+
+\paragraph{Key results.}
+On CommonsenseQA,
+STaR improves GPT-J 6B from an initial 36.6\% to 72.5\% through iterative self-training,
+approaching the 73.0\% of GPT-3 175B few-shot fine-tuned (using only \textbf{1/30} of the parameters).
+On GSM8K it reaches 10.7\%, which, although modest in absolute terms, demonstrates the viability of bootstrapping.
+
+\subsubsection{V-STaR \& Quiet-STaR: Extensions}
+
+\paragraph{V-STaR.}
+Hosseini et al.\ \cite{hosseini2024vstar} proposed \textbf{V-STaR},
+which introduces a \textbf{verifier} on top of the STaR framework.
+The key innovation is that the incorrect reasoning chains discarded by STaR are not waste,
+but valuable negative samples for training the verifier.
+V-STaR simultaneously trains a generator (using correct samples for SFT) and a verifier (using correct/incorrect sample pairs) in each iteration,
+with the two reinforcing each other: the generator produces more diverse reasoning chains,
+while the verifier learns to more accurately distinguish correct from incorrect reasoning paths.
+
+\paragraph{Quiet-STaR.}
+Zelikman et al.\ \cite{zelikman2024quietstar} generalized the idea of STaR to
+\textbf{the generation of all tokens}, not just explicit reasoning tasks.
+Quiet-STaR has the model perform ``internal thinking'' before generating each token
+(generating thought tokens that are not output),
+then uses the hidden states of the thought tokens to improve the prediction of the next token.
+The ambition of this work is to make reasoning the \textbf{default behavioral mode} of the language model,
+rather than a special mode activated only when prompted.
+
+\subsubsection{\texorpdfstring{ReST \& ReST\textsuperscript{EM}: Reinforced Self-Training}{ReST \& ReST-EM: Reinforced Self-Training}}
+
+\paragraph{ReST.}
+Gulcehre et al.\ \cite{gulcehre2023rest} proposed \textbf{ReST} (Reinforced Self-Training),
+which is essentially a more systematic version of STaR.
+ReST consists of two alternating steps:
+\textbf{Grow} (generate samples using the current policy and filter them with a reward model) and
+\textbf{Improve} (perform SFT on the filtered high-quality samples).
+This framework can use more general reward signals than STaR, not limited to binary correctness.
+
+\paragraph{ReST\textsuperscript{EM}.}
+Singh et al.\ \cite{singh2024restem} reinterpreted ReST as an
+\textbf{Expectation-Maximization (EM)} algorithm:
+the E-step corresponds to ``generate and filter,'' and the M-step corresponds to ``train on filtered samples.''
+ReST\textsuperscript{EM} systematically studied the scaling properties of this framework on reasoning tasks,
+finding that on benchmarks such as MATH and HumanEval,
+multiple iterations yield continued but diminishing performance gains (benefits drop significantly after 2--3 rounds),
+and that using more generated samples (a larger candidate pool) and higher-quality filtering criteria lead to better final results.
+
+\subsubsection{GRPO: Group Relative Policy Optimization}
+\label{sec:t4-grpo}
+
+\landmark{shao2024grpo} introduced
+\textbf{Group Relative Policy Optimization (GRPO)} in DeepSeekMath,
+representing a key simplification of the PPO framework from Thread~2.
+The algorithmic details and unified perspective of GRPO have been derived in detail in \S\ref{sec:t2-grpo};
+here we focus on its particular significance for reasoning tasks.
+
+\paragraph{Why do reasoning tasks especially need GRPO?}
+PPO faces two challenges on reasoning tasks that are more severe than in general dialogue scenarios:
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{The estimation dilemma of the value model}:
+    The reward for mathematical reasoning is sparse and binary (the answer is either correct or incorrect),
+    value signals for intermediate steps are extremely sparse,
+    making value function estimation far more difficult than in general RLHF scenarios;
+  \item \textbf{The necessity of large-scale sampling}:
+    The accuracy on reasoning tasks is typically much lower than on general dialogue tasks,
+    requiring a larger group size $G$ to ensure the existence of positive examples within the group,
+    which strains the memory budget of PPO's four-model architecture.
+\end{enumerate}
+
+\noindent
+GRPO addresses both problems by completely removing the value model
+and replacing advantage estimation with group-relative reward normalization
+(formulas in Eq.~\ref{eq:pref:grpo-advantage}--\ref{eq:pref:grpo-obj}).
+On DeepSeekMath 7B, GRPO achieves 51.7\% on MATH (PPO: 50.1\%, SFT: 46.8\%)
+and 88.2\% on GSM8K (PPO: 84.0\%),
+delivering not only the best performance but also significantly reduced computational overhead by eliminating the value model.
+This method later became the core algorithmic component in DeepSeek-R1's training.
+
+
+% ============================================================
+% 4.4 Convergence: Reasoning-Native Models
+% ============================================================
+\subsection{Convergence and Frontier: Reasoning-Native Models}
+\label{sec:t4-convergence}
+
+In the second half of 2024, all the preceding research threads---CoT, verification, RL for reasoning, test-time compute---
+converged into an entirely new model paradigm: \textbf{reasoning-native models}.
+These models acquire the ability to autonomously unfold long-chain reasoning at inference time
+through large-scale RL training during the post-training stage,
+no longer relying on manually designed CoT prompts or few-shot examples.
+
+\subsubsection{OpenAI o1: The Turning Point}
+\label{sec:t4-o1}
+
+The release of \landmark{openai2024o1} marked the formal establishment of this paradigm.
+Although OpenAI did not disclose the complete technical details,
+its system card and subsequent technical reports revealed the following core elements:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Large-scale RL training}:
+    Using reinforcement learning in the post-training stage to teach the model
+    to autonomously generate a long and detailed ``hidden chain of thought'' at inference time;
+  \item \textbf{Hidden CoT}:
+    Before answering, the model first generates an internal reasoning process that is not shown to the user,
+    which can span thousands or even tens of thousands of tokens;
+  \item \textbf{Test-time compute scaling}:
+    o1's reasoning capability improves continuously with the computational resources
+    (thinking time) invested at inference, exhibiting a novel type of scaling law.
+\end{itemize}
+
+\paragraph{Key results.}
+\begin{itemize}[leftmargin=2em]
+  \item AIME 2024 (American Invitational Mathematics Examination): 83.3\% (o1) vs 13.4\% (GPT-4o)
+  \item Codeforces competition rating: 89\textsuperscript{th} percentile
+  \item GPQA Diamond (graduate-level science questions): 78.0\%, surpassing domain experts
+\end{itemize}
+
+\noindent
+The significance of o1 extends beyond specific benchmark scores.
+It demonstrated a core proposition:
+\textbf{post-training can teach a model not only ``how to answer'' (instruction following),
+but also ``how to think'' (reasoning)}.
+This opened an entirely new dimension for post-training research.
+
+\subsubsection{DeepSeek-R1: The Emergence of Reasoning Capabilities}
+\label{sec:t4-r1}
+
+\landmark{deepseek2025r1} represents an important open-source replication and deepening of the o1 paradigm.
+The greatest contribution of DeepSeek-R1 lies in revealing a striking phenomenon:
+\textbf{reasoning capabilities can spontaneously emerge from pure RL training}.
+
+\paragraph{R1-Zero: Pure RL reasoning without SFT.}
+DeepSeek first conducted a bold experiment:
+on DeepSeek-V3-Base (a model that had undergone only pre-training),
+\textbf{without any SFT}, they directly applied GRPO for RL training.
+The reward signal was extremely simple---consisting of only two rule-based components:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Accuracy reward}: Whether the final answer matches the ground truth (binary, 0 or 1);
+  \item \textbf{Format reward}: Whether the output follows the specified format
+    (wrapping the reasoning process in \texttt{<think>...</think>} tags,
+    placing the final answer in \texttt{<answer>...</answer>} tags).
+\end{itemize}
+
+\noindent
+The results were striking. As training progressed, R1-Zero exhibited the following emergent behaviors:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Automatic lengthening of reasoning chains}:
+    The model's average response length gradually grew from a few hundred tokens initially to several thousand tokens,
+    indicating that the model autonomously learned to ``spend more time thinking'';
+
+  \item \textbf{Emergence of self-reflection}:
+    The model spontaneously produced self-reflective and backtracking behaviors in its reasoning chains,
+    such as ``Wait, let me reconsider...'' and ``Hmm, that doesn't seem right...,''
+    \textbf{none of which were explicitly encoded in the training data or reward};
+
+  \item \textbf{``Aha moment''}:
+    The DeepSeek team observed that the model suddenly ``had an epiphany'' at certain training stages---
+    expressions like ``I found an interesting trick'' appeared in the reasoning chains,
+    followed by a sudden leap in reasoning accuracy.
+\end{enumerate}
+
+\noindent
+These emergent phenomena carry profound implications for AI research.
+They suggest that \textbf{reasoning is not a skill that needs to be explicitly taught,
+but rather a capability that can ``crystallize'' from pre-training through the right RL signals}.
+
+\paragraph{Limitations of R1-Zero.}
+Despite its impressive reasoning capabilities
+(AIME 2024: 71.0\% pass@1, 86.7\% majority voting),
+R1-Zero suffers from three main issues:
+(1) poor readability---reasoning chains are a mixture of multiple languages with irregular formatting;
+(2) divergence---reasoning chains sometimes extend indefinitely without converging to an answer;
+(3) insufficient generality---suboptimal performance on non-mathematical/logical tasks.
+
+\paragraph{The four-stage training pipeline of R1.}
+To overcome the limitations of R1-Zero, DeepSeek designed a complete four-stage training pipeline for R1:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Stage 1: Cold-start SFT}\\
+    Collecting several thousand high-quality long CoT examples (via few-shot prompting + human annotation)
+    and performing SFT on the base model.
+    The purpose is to provide the model with a good ``thinking format'' starting point,
+    avoiding the formatting chaos observed in R1-Zero.
+
+  \item \textbf{Stage 2: Reasoning-oriented RL}\\
+    Conducting large-scale GRPO training on the cold-start SFT model,
+    using rule-based rewards (accuracy + format),
+    focusing on automatically verifiable tasks such as mathematics, coding, and logical reasoning.
+    This stage involves massive training volume and is the core stage for the major improvement in reasoning capabilities.
+
+  \item \textbf{Stage 3: Rejection sampling + SFT}\\
+    Using the Stage 2 RL model to generate large quantities of reasoning chains,
+    filtering high-quality samples through rejection sampling.
+    Simultaneously mixing in high-quality SFT data for general tasks (writing, translation, question answering, etc.),
+    and performing SFT on the combined dataset,
+    enabling the model to maintain general capabilities while preserving reasoning ability.
+
+  \item \textbf{Stage 4: All-scenario RL}\\
+    The final stage of RL training uses \textbf{mixed rewards}:
+    continuing to use rule-based rewards (accuracy) for reasoning tasks,
+    and preference-based reward models for general tasks
+    (\crossref{2}{sec:t2}),
+    to simultaneously optimize helpfulness and harmlessness.
+\end{enumerate}
+
+\paragraph{Key results of R1.}
+After the complete four-stage training, DeepSeek-R1 achieved the following performance:
+\begin{itemize}[leftmargin=2em]
+  \item AIME 2024: \textbf{79.8\%} pass@1, on par with OpenAI-o1-0912
+  \item MATH-500: \textbf{97.3\%}
+  \item Codeforces: 2029 Elo rating (surpassing 96.3\% of human contestants)
+  \item GPQA Diamond: \textbf{71.5\%}
+  \item Maintained strong general capabilities on open-ended dialogue and writing tasks
+\end{itemize}
+
+\paragraph{Distillation experiments.}
+R1 also confirmed the distillability of reasoning capabilities:
+using long CoT data generated by R1 to perform SFT on 1.5B--70B models from the Qwen-2.5 and Llama-3 families,
+the distilled smaller models significantly outperformed standard models of equivalent size on reasoning benchmarks.
+For example, DeepSeek-R1-Distill-Qwen-32B achieved 72.6\% on AIME 2024,
+even surpassing OpenAI o1-mini (63.6\%).
+This demonstrates that \textbf{reasoning capabilities acquired through large-model RL training
+can be transferred to smaller models via straightforward SFT distillation},
+echoing the CoT distillation work discussed in \S\ref{sec:t4-origin}.
+
+\subsubsection{Kimi k1.5}
+
+Moonshot AI's Kimi k1.5 \cite{moonshot2025kimi} validated the effectiveness of
+the reasoning-native model paradigm from a different angle.
+The unique contribution of k1.5 lies in its proposed \textbf{long2short} strategy:
+first training a ``long thinking'' model (allowing extremely long reasoning chains),
+then compressing reasoning efficiency through distillation and RL,
+drastically shortening reasoning chain length while maintaining reasoning quality.
+This strategy directly relates to the efficiency optimization of test-time compute.
+
+\subsubsection{2025--2026: The Proliferation of Thinking Models}
+\label{sec:t4-thinking-models}
+
+2025 marked the transition of reasoning-native models from ``frontier experiments'' to ``industry default paradigm.''
+After o1 and R1 demonstrated that reasoning capabilities can be acquired through RL,
+the following year and a half of development proceeded along three main lines:
+\textbf{(1) continued advances at the closed-source frontier} (o3 series),
+\textbf{(2) explosive growth of open-source reasoning models} (DeepSeek's continued evolution, Qwen3),
+\textbf{(3) systematic breakthroughs in RLVR training methodology} (DAPO and its successors).
+
+\paragraph{The OpenAI o3 series.}
+OpenAI released the successor series to o1 in 2025 \cite{openai2025o3}:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{o3} (April 2025): Achieved \textbf{88.9\%} on AIME 2025,
+    a significant improvement over o1's 83.3\%;
+    performance on the ARC-AGI benchmark was more than $3\times$ that of o1;
+  \item \textbf{o4-mini} (April 2025): A lightweight reasoning model
+    that dramatically reduces inference costs while maintaining strong reasoning capabilities;
+  \item \textbf{o3-pro} (June 2025): A high-performance variant targeting complex scientific and engineering problems.
+\end{itemize}
+A key shift in the o3 series was the introduction of \textbf{native multimodal reasoning} and \textbf{agentic capabilities}---
+the model is no longer just a text reasoner, but can also invoke tools, browse the web, and analyze images during the reasoning process
+(\crossref{6}{sec:t6}; multimodal reasoning training in \crossref{5}{sec:t5-reasoning-rl}).
+This marks the first deep convergence of the reasoning and agentic threads.
+
+\paragraph{DeepSeek's post-R1 evolution.}
+DeepSeek continued to iterate after R1:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{R1-0528} (May 2025): An enhanced version of R1
+    that further scaled up RL training on the original architecture,
+    achieving significant improvements across multiple reasoning benchmarks;
+  \item \textbf{V3.1} (August 2025) \cite{deepseek2024v3}:
+    Introduced a \textbf{thinking/non-thinking hybrid mode},
+    where a single model supports both fast direct answering and deep reasoning modes,
+    with users able to control whether reasoning chain generation is enabled via API parameters.
+    This design philosophy later became an industry standard;
+  \item \textbf{V3.2} (December 2025) \cite{deepseek2025v32}:
+    Reasoning capability reached \textbf{IMO gold medal level},
+    demonstrating performance on mathematical Olympiad-level problems approaching that of top human contestants.
+\end{itemize}
+
+\noindent
+The evolution from R1 to V3.2 reveals an important trend:
+\textbf{reasoning no longer exists as a separate model category},
+but rather as a switchable mode within general-purpose models.
+``Thinking models'' are becoming the default paradigm.
+
+\paragraph{Qwen3 and QwQ.}
+Alibaba's Qwen3 \cite{yang2025qwen3} contributed a systematic methodology for training reasoning models.
+Its post-training adopts a \textbf{four-stage pipeline}:
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Long CoT cold start}: SFT using curated long reasoning chain data;
+  \item \textbf{Reasoning RL}: Large-scale GRPO/DAPO training on verifiable tasks;
+  \item \textbf{Thinking mode fusion}: Fusing reasoning and non-reasoning modes within a single model,
+    enabling the model to adaptively choose whether to activate reasoning chains based on problem complexity;
+  \item \textbf{General RL}: All-scenario RL training with mixed rewards.
+\end{enumerate}
+The third stage, thinking mode fusion, is Qwen3's unique contribution---
+it goes beyond DeepSeek V3.1's ``dual mode'' concept
+by making reasoning mode switching an explicit training stage in the post-training pipeline.
+QwQ-32B \cite{qwen2025qwq}, as the first reasoning model in the Qwen3 series,
+achieved 79.5\% on AIME 2024, validating the effectiveness of this training methodology.
+
+\paragraph{DAPO and the RLVR paradigm.}
+\landmark{yu2025dapo} systematically improved upon GRPO,
+boosting its performance on AIME from \textbf{30\% to 50\%} (7B model),
+while providing a reproducible open-source practice for the
+RLVR (Reinforcement Learning with Verifiable Rewards) paradigm.
+DAPO's core technical contributions include four improvements:
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Clip-higher}: In the clipping mechanism of PPO/GRPO,
+    using a more relaxed upper bound clip ($1 + \varepsilon_{\text{high}}$) for positive advantage samples,
+    encouraging the model to more boldly explore high-reward reasoning paths;
+  \item \textbf{Dynamic sampling}: Dynamically adjusting the sampling strategy based on training progress,
+    using higher temperature in early training to increase exploration, and gradually cooling down for exploitation later;
+  \item \textbf{Token-level loss}: Decomposing GRPO's sequence-level loss
+    into token-level loss, providing more fine-grained gradient signals;
+  \item \textbf{KL constraint removal}: Completely removing the KL divergence penalty term,
+    allowing the policy to diverge more freely from the reference model;
+    on reasoning tasks, this ``unconstrained'' strategy yields significant gains.
+\end{enumerate}
+DAPO's success validates the core insight of the RLVR paradigm:
+\textbf{for tasks with automated verifiers (mathematics, coding),
+rule-based rewards are far more reliable and efficient than learned reward models}.
+This conclusion has profoundly influenced the research direction of Thread~2 (\crossref{2}{sec:t2}).
+
+\paragraph{The explosion of open-source reasoning models.}
+2025 witnessed a Cambrian explosion of open-source reasoning models:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Marco-o1 v2} \cite{yin2025marcoo1v2}:
+    Explored the bottleneck problem of reasoning capability distillation
+    and proposed methodologies for extending the distillation ceiling;
+  \item \textbf{OpenR} \cite{wang2024openr}:
+    Provided an open-source advanced reasoning framework
+    integrating PRM, MCTS, and multiple RL algorithms;
+  \item A large number of small reasoning models trained on R1 distillation data emerged,
+    making reasoning capabilities no longer the exclusive province of large models.
+\end{itemize}
+
+\paragraph{``Thinking Models'' as the default paradigm.}
+By early 2026, a clear industry consensus had formed:
+\textbf{reasoning is no longer a separate model category, but a switchable model capability}.
+The latest models from major providers including OpenAI, DeepSeek, Qwen, and Anthropic
+all incorporate reasoning as a default or optional mode built into general-purpose models.
+The significance of this shift is that
+the goal of post-training has evolved from ``training a specialized model that can reason''
+to ``training a reasoning mode that can be activated on demand within a general-purpose model.''
+
+\subsubsection{Benchmarks and Methods for Mathematical Reasoning}
+\label{sec:t4-math}
+
+Mathematical reasoning is the most rigorous testing ground for verifying reasoning capabilities.
+This section provides an overview of the key benchmarks and methods in this area.
+
+\paragraph{Benchmark datasets.}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{MATH} \landmark{hendrycks2021math}:
+    12,500 competition-level mathematics problems spanning 7 topics and 5 difficulty levels,
+    each accompanied by a step-by-step solution.
+    When released in 2021, the strongest model achieved only 6.9\% accuracy;
+    by 2025, DeepSeek-R1 had reached 97.3\% (on the MATH-500 subset).
+
+  \item \textbf{GSM8K} \cite{cobbe2021gsm8k}:
+    8.5K grade school-level word problems requiring 2--8 reasoning steps.
+    As an introductory benchmark, progress on GSM8K clearly reflects the evolution of reasoning methodologies.
+\end{itemize}
+
+\paragraph{SFT methods for mathematical reasoning.}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{WizardMath} \cite{luo2023wizardmath}:
+    Used the Evol-Instruct strategy to generate diverse instruction data in the mathematics domain,
+    performing SFT + RLHF on Llama-2 70B to achieve 81.6\% on GSM8K.
+
+  \item \textbf{Llemma} \cite{azerbayev2023llemma}:
+    Performed continued pre-training on Code Llama using a large-scale mathematical corpus (Proof-Pile-2, 55B tokens)
+    to build a mathematics-oriented open language model.
+    Llemma surpasses general-purpose models on multiple mathematical benchmarks even in the few-shot setting.
+
+  \item \textbf{MAmmoTH} \cite{yue2023mammoth}:
+    Constructed the MathInstruct dataset, mixing CoT and program-of-thought (PoT) reasoning approaches,
+    using PoT for problems requiring precise computation and CoT for problems requiring conceptual reasoning.
+
+  \item \textbf{OpenMathInstruct-1} \cite{toshniwal2024openmath}:
+    Used Mixtral to generate mathematical reasoning data at scale, with rigorous answer-based filtering to ensure quality,
+    constructing an open-source mathematical instruction dataset of 1.8M samples.
+
+  \item \textbf{DART-Math} \cite{tong2024dartmath}:
+    Proposed \textbf{Difficulty-Aware Rejection Tuning},
+    which allocates a higher sampling budget to difficult problems during rejection sampling,
+    addressing the issue of insufficient samples for hard problems in standard rejection sampling.
+\end{itemize}
+
+\subsubsection{Open-Source Reasoning Models}
+
+The success of o1 and R1 sparked a wave of enthusiasm in the open-source community for replicating and innovating on reasoning models.
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Qwen2.5} \cite{qwen2024qwen25}:
+    Alibaba's Qwen series substantially strengthened reasoning capabilities in version 2.5,
+    achieving leading open-source model performance on mathematics and coding tasks through a carefully designed SFT + RL pipeline.
+
+  \item \textbf{Sky-T1} \cite{novasky2025skyt1}:
+    NovaSky-AI demonstrated that o1-level reasoning capabilities can be replicated
+    with only \textbf{\$450} in training costs
+    (approaching o1-preview on MATH-500 and AIME).
+    This work dramatically lowered the barrier to entry for reasoning model research.
+
+  \item \textbf{rStar} \cite{qi2024rstar}:
+    Proposed \textbf{Mutual Reasoning}, having two smaller LLMs verify each other's reasoning processes through MCTS,
+    improving small model reasoning capabilities without relying on large models.
+    On GSM8K, this raised the accuracy of Phi3-mini 3.8B from 86.4\% to \textbf{90.0\%}.
+\end{itemize}
+
+
+% ============================================================
+% 4.5 Test-Time Compute Scaling & Open Problems
+% ============================================================
+\subsection{Test-Time Compute Scaling and Open Problems}
+\label{sec:t4-open}
+
+\subsubsection{Test-Time Compute Scaling: A New Type of Scaling Law}
+\label{sec:t4-ttc}
+
+Traditional LLM scaling laws \cite{kaplan2020scaling,hoffmann2022chinchilla}
+focus on \textbf{training-time} resource allocation:
+given a fixed training compute budget, how to optimally allocate between model size and training data volume.
+In 2024, a complementary scaling paradigm emerged:
+\textbf{test-time compute scaling}, which continuously improves performance by investing more computation during the inference stage.
+
+\paragraph{Snell et al.'s compute-optimal framework.}
+\landmark{snell2024testtimescaling} was the first to systematically study
+the optimal allocation strategy for test-time compute.
+
+Snell et al.\ considered two mechanisms for leveraging additional computation at inference time:
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Search against a verifier}:
+    Generating multiple candidate responses and using a PRM for search and ranking.
+    This includes strategies such as best-of-$N$ sampling and beam search.
+
+  \item \textbf{Revising proposals}:
+    Having the model iteratively revise its response based on previous attempts.
+    By providing previous (incorrect) responses as context,
+    the model generates improved versions.
+\end{enumerate}
+
+\paragraph{Core finding: Difficulty-dependent optimal strategies.}
+The most critical finding is that \textbf{the optimal allocation strategy for test-time compute depends on the difficulty of the problem}.
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Easy problems}:
+    Revision-based strategies (iterative modification) are more effective,
+    as the model only needs to make minor corrections on an already decent answer;
+  \item \textbf{Hard problems}:
+    Search-based strategies (parallel sampling + PRM verification) are more effective,
+    as hard problems require exploring a broader space of solution paths.
+\end{itemize}
+
+\noindent
+Based on this finding, Snell et al.\ proposed a \textbf{compute-optimal} strategy:
+dynamically selecting the best test-time compute allocation method based on problem difficulty.
+Under the same test-time compute budget,
+the compute-optimal strategy saves \textbf{4$\times$} computational resources compared to best-of-$N$.
+
+\paragraph{Smaller model + more thinking time $\approx$ larger model.}
+The most practically significant finding is that
+on the MATH benchmark,
+\textbf{a smaller model with sufficient test-time compute
+can match or even exceed the performance of a model 14$\times$ larger in parameters}.
+This means that in certain deployment scenarios,
+a small and flexible model with a dynamic reasoning budget can replace a large and cumbersome model,
+achieving a better cost-performance tradeoff.
+
+\paragraph{Inference Scaling Laws.}
+Wu et al.\ \cite{wu2024inferencescaling} studied inference scaling from a more theoretical perspective.
+They found that the gains from test-time compute follow a \textbf{log-linear} pattern:
+each doubling of test-time compute yields roughly constant but diminishing performance improvement,
+similar to the power law observed in training-time scaling.
+
+\paragraph{s1: Simple budget forcing.}
+Muennighoff et al.\ \cite{muennighoff2025s1} proposed
+an extremely concise test-time scaling method called \textbf{s1}:
+during reasoning, special tokens are inserted to ``force'' the model to continue thinking (budget forcing),
+or an end-of-thinking token is inserted early to shorten reasoning.
+Using only 1,000 curated examples + budget forcing,
+s1 achieved performance on AIME 2024 \textbf{comparable to o1-preview},
+demonstrating the simplicity and effectiveness of test-time compute scaling methods.
+
+\subsubsection{Unified Framework: Train-Time vs Test-Time Compute}
+
+Viewing train-time and test-time compute scaling in a unified manner,
+Zeng et al.\ \cite{zeng2024roadmapo1} provided a systematic roadmap:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Train-time scaling} (larger models, more data)
+    $\rightarrow$ stronger base capability;
+  \item \textbf{Test-time scaling} (more sampling, deeper search, longer reasoning chains)
+    $\rightarrow$ more thorough utilization of existing capabilities;
+  \item \textbf{Post-training} (RL, PRM, GRPO)
+    $\rightarrow$ the bridge connecting the two---the reasoning strategies acquired through post-training
+    determine the efficiency with which test-time compute is utilized.
+\end{itemize}
+
+\subsubsection{Open Problems}
+
+\begin{openproblembox}
+\textbf{Open Problem 1: Automation and Generalization of Process Supervision}\\
+PRM has demonstrated its value in mathematical reasoning,
+but how to extend process supervision to \textbf{domains where formal verification is not possible}
+(such as scientific reasoning, legal reasoning, and logical consistency in creative writing)
+remains a fundamental open problem.
+When there is no ground truth answer for a completer model to verify,
+how can reliable step-level rewards be automatically generated?
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 2: The Scaling Ceiling of Reasoning}\\
+DeepSeek-V3.2 \cite{deepseek2025v32} achieved gold medal level in IMO-level mathematics competitions,
+and o3 reached 88.9\% on AIME 2025 \cite{openai2025o3},
+indicating that traditional competition benchmarks are rapidly saturating.
+But does this mean reasoning capabilities have been ``solved''?
+On open-ended mathematical problems requiring creative insight (rather than standard solution techniques),
+multi-step scientific derivations, and cross-domain reasoning,
+where is the ceiling of current models?
+More critically, there is a debate in the RLVR paradigm about whether it ``makes models faster not smarter''---
+methods like DAPO significantly improve pass rates on known task types,
+but do they truly expand the frontier of model reasoning capabilities?
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 3: The Efficiency Frontier of Test-Time Compute}\\
+Current test-time compute scaling methods
+(whether parallel sampling or sequential revision)
+exhibit logarithmically diminishing efficiency gains.
+Is there a fundamentally more efficient way to utilize test-time compute?
+For example, can models learn to \textbf{adaptively} allocate their reasoning budget---
+answering easy problems quickly while investing substantial thought in hard problems---
+without requiring an external difficulty estimator?
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 4: Theoretical Understanding of RL for Reasoning}\\
+The emergent reasoning phenomena observed in DeepSeek-R1-Zero
+(self-reflection, aha moments, automatic lengthening of reasoning chains)
+lack a theoretical explanation.
+Why can simple binary rewards + GRPO give rise to such complex reasoning behaviors?
+Does this emergence require specific pre-training conditions (e.g., the training data containing sufficient reasoning corpora)?
+Can it be reliably reproduced on smaller models?
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 5: Reasoning Reliability and Safety}\\
+Long-chain reasoning introduces new safety challenges:
+hidden CoT may contain inappropriate content (e.g., ``reasoning'' about harmful topics),
+the opacity of reasoning chains makes auditing difficult
+(\crossref{3}{sec:t3}),
+and unbounded expansion of test-time compute could enable denial-of-service (DoS) attacks.
+How can the safety and auditability of the reasoning process be ensured while maintaining reasoning capabilities?
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 6: Optimal Strategies for Thinking Mode Fusion}\\
+Models such as DeepSeek V3.1 and Qwen3 \cite{yang2025qwen3} have implemented
+the fusion of reasoning and non-reasoning modes within a single model.
+However, current fusion strategies remain coarse---
+the decision boundary for when the model should ``think deeply'' versus ``answer quickly'' is still unclear.
+The more fundamental question is:
+how to optimize this mode-switching strategy during the post-training stage
+so that the model achieves Pareto optimality between reasoning depth and response latency?
+Qwen3's four-stage pipeline provides one explicit training approach,
+but the optimal mixing ratios and training strategies for the third-stage thinking mode fusion
+still lack systematic investigation.
+\end{openproblembox}
+
+\subsection{Chapter Summary}
+
+\begin{figure}[!ht]
+\centering
+\begin{tikzpicture}[
+  node distance=0.6cm and 1.2cm,
+  every node/.style={font=\small},
+  milestone/.style={rectangle, rounded corners, draw=thread4, fill=thread4!10,
+    text width=4.2cm, minimum height=0.8cm, align=center, font=\small\bfseries},
+  branch/.style={rectangle, rounded corners, draw=gray!60, fill=gray!5,
+    text width=3.2cm, minimum height=0.7cm, align=center, font=\small},
+  arrow/.style={-{Stealth[length=2.5mm]}, thick, thread4!70},
+  brancharrow/.style={-{Stealth[length=2mm]}, gray!60, thick},
+]
+% Main timeline
+\node[milestone] (cot) {CoT (Wei 2022)\\Chain-of-Thought Prompting};
+\node[milestone, below=1.2cm of cot] (star) {STaR (Zelikman 2022)\\Self-Taught Reasoner};
+\node[milestone, below=1.2cm of star] (prm) {PRM (Lightman 2023)\\Process Reward Model};
+
+% Branches
+\node[branch, below left=1.2cm and 0.5cm of prm] (brA) {Branch A: Inference-Time\\Scaling: Self-Consistency,\\Best-of-N};
+\node[branch, below right=1.2cm and 0.5cm of prm] (brB) {Branch B: RL Training\\GRPO, REINFORCE++};
+
+% Convergence
+\node[milestone, below=2.8cm of prm] (o1) {o1 (OpenAI 2024)\\Thinking Model Paradigm};
+\node[milestone, below=1.2cm of o1] (r1) {DeepSeek-R1 (2025)\\RL from Scratch};
+\node[branch, below=1.2cm of r1] (conv) {Convergence: Thinking\\Models as Industry Default};
+
+% Arrows
+\draw[arrow] (cot) -- (star);
+\draw[arrow] (star) -- (prm);
+\draw[brancharrow] (prm) -- (brA);
+\draw[brancharrow] (prm) -- (brB);
+\draw[arrow] (prm) -- (o1);
+\draw[arrow] (o1) -- (r1);
+\draw[brancharrow] (brA) -- (o1);
+\draw[brancharrow] (brB) -- (o1);
+\draw[arrow] (r1) -- (conv);
+\end{tikzpicture}
+\caption{Evolutionary path of Thread 4: from chain-of-thought prompting to thinking models as the default paradigm.
+Purple nodes represent landmark works; gray nodes represent important branches.}
+\label{fig:reasoning-evolution}
+\end{figure}
+
+\begin{table}[!ht]
+\centering
+\caption{Comparison of core methods in Thread 4. Training Signal distinguishes prompt-time, inference-time, and training-time methods.}
+\label{tab:reasoning-comparison}
+\small
+\begin{tabularx}{\textwidth}{l >{\raggedright\arraybackslash}p{2.8cm} >{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Method} & \textbf{Training Signal} & \textbf{Verification} & \textbf{Key Result} \\
+\midrule
+CoT Prompting & None (prompt-time) & N/A & $+$15\% on GSM8K (540B PaLM) \\
+Self-Consistency & None (inference-time) & Majority vote over $K$ samples & $+$17.9\% on GSM8K over greedy CoT \\
+STaR & Self-generated rationales & Answer correctness filter & Bootstraps reasoning from few examples \\
+PRM & 800K step-level labels & Per-step human correctness & 78.2\% MATH (vs 72.4\% ORM) \\
+GRPO & Group-normalized advantage & Rule-based (accuracy) & 88.2\% GSM8K, 51.7\% MATH \\
+o1 & Large-scale RL & Hidden CoT + test-time scaling & 83.3\% AIME (vs 13.4\% GPT-4o) \\
+R1-Zero & GRPO, binary reward only & Accuracy only; no SFT & 71.0\% AIME; emergent self-reflection \\
+R1 & {\scriptsize SFT$\to$RL$\to$RS$\to$RL} & Rule + preference RM & 79.8\% AIME; distillable \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The evolutionary trajectory of Thread~4 clearly demonstrates a core paradigm shift in the post-training landscape:
+from \textbf{inference-time prompting} (CoT, Self-Consistency)
+to \textbf{training-time internalization} (STaR, GRPO, R1),
+to \textbf{deep integration of both} (test-time compute scaling with RL-trained models),
+and finally to \textbf{reasoning as the default mode} (thinking models becoming the industry standard, 2025--2026).
+
+\evolution{CoT Prompting (2022): reasoning as a prompt technique}%
+{Thinking Models (2025--2026): reasoning as the model's default mode}%
+{RLVR + Thinking Mode Fusion}
+
+\noindent
+Several core insights:
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Data structures determine everything}:
+    The transition from ORM to PRM is essentially an upgrade of the ``data structure'' for reasoning verification---
+    from sequence-level labels to step-level labels.
+    As Linus observed, good programmers focus on data structures, not code.
+
+  \item \textbf{Simple methods + sufficient compute $>$ complex methods}:
+    GRPO removes the value model from PPO,
+    R1-Zero uses the simplest binary reward,
+    and s1 uses only 1,000 examples + budget forcing.
+    In the reasoning domain, \textbf{simple designs + sufficient train/test-time compute}
+    have repeatedly outperformed complex engineering solutions.
+
+  \item \textbf{A paradigmatic example of cross-thread idea flow}:
+    Thread~4 is perhaps the thread with the most intensive interactions with other threads:
+    reward modeling flows from Thread~2, safety considerations from Thread~3,
+    downstream applications flow to Thread~6, and efficiency requirements come from Thread~7.
+    The improvement of reasoning capabilities is the result of co-evolution across the entire post-training ecosystem.
+\end{enumerate}
+
+\paragraph{Preview of the next chapter.}
+The reasoning capabilities of thinking models are currently demonstrated primarily in the text domain.
+When reasoning extends to the visual domain, models need to first ``see'' before they can ``reason.''
+Thread~5 will trace the evolution of multimodal post-training,
+from the proposal of visual instruction tuning to hallucination mitigation,
+and then to the integration of multimodal reasoning---showing how the post-training methodology for LLMs transfers to and evolves within VLMs.

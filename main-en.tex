@@ -1,0 +1,68 @@
+\documentclass[12pt,a4paper]{article}
+
+\input{preamble-en}
+
+\title{\textbf{LLM/VLM Post-Training: A Survey Through the Lens of Evolution}}
+
+\author{Jinhong Lin}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This book systematically traces the evolution of post-training for Large Language Models (LLMs) and Vision-Language Models (VLMs) from an evolutionary perspective.
+Unlike traditional surveys that organize content by method categories, this book divides the field into seven problem-driven evolutionary threads,
+tracing the ``problem $\rightarrow$ solution $\rightarrow$ new problem $\rightarrow$ improved solution'' development chain within each thread,
+and revealing the flow of ideas across different research directions through cross-thread references.
+The seven threads are:
+(1) Instruction Following \& SFT,
+(2) Reward Modeling \& Preference Optimization,
+(3) Safety \& Alignment,
+(4) Reasoning \& Verification,
+(5) Multimodal Post-training,
+(6) Tool Use \& Agentic Capabilities,
+(7) Efficiency \& Data Engineering.
+This book provides in-depth analysis of landmark papers within each thread while revealing the overall evolutionary direction of the post-training field through macro-level trend analysis.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% === Preface ===
+\input{chapters-en/00-preface}
+\newpage
+
+% === Chapter 0: Introduction ===
+\input{chapters-en/00-introduction}
+
+% === Thread 1: Instruction Following & SFT ===
+\input{chapters-en/01-sft}
+
+% === Thread 2: Reward Modeling & Preference Optimization ===
+\input{chapters-en/02-preference}
+
+% === Thread 3: Safety & Alignment ===
+\input{chapters-en/03-safety}
+
+% === Thread 4: Reasoning & Verification ===
+\input{chapters-en/04-reasoning}
+
+% === Thread 5: Multimodal Post-training ===
+\input{chapters-en/05-multimodal}
+
+% === Thread 6: Tool Use & Agentic Capabilities ===
+\input{chapters-en/06-agentic}
+
+% === Thread 7: Efficiency & Data Engineering ===
+\input{chapters-en/07-efficiency}
+
+% === Conclusion ===
+\input{chapters-en/08-conclusion}
+
+% === Bibliography ===
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

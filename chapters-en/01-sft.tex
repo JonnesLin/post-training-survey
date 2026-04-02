@@ -1,0 +1,869 @@
+% === Thread 1: Instruction Following & SFT ===
+\section{Thread 1: Instruction Following \& SFT}
+\label{sec:t1}
+
+\begin{quote}
+\textit{Core Question: How can we teach a pre-trained language model to understand and follow human instructions?}
+\end{quote}
+
+Instruction following is the earliest and most fundamental objective of post-training.
+A language model that has only undergone pre-training is essentially a next-token predictor:
+given the prompt ``What is the capital of France?'', it may continue with ``What is the capital of Germany?''
+rather than answering ``Paris''.
+Supervised Fine-Tuning (SFT) trains the model on (instruction, response) data pairs in a supervised manner,
+teaching it to understand the intent behind instructions and generate outputs that conform to the expected format.
+
+This chapter traces the complete evolutionary chain of the SFT field from problem formulation to current open problems.
+We will see how this field has progressed along two core axes:
+\textbf{the data dimension} (from human annotation to synthetic generation, from pursuing quantity to emphasizing quality)
+and \textbf{the task dimension} (from single-task to multi-task scaling, from general capabilities to domain-specific specialization).
+
+\evolution{Pre-trained LM can only continue text, not answer questions}{Instruction-tuned LM understands instructional intent}{SFT on (instruction, response) pairs}
+
+
+% ========================================================
+\subsection{Problem Origins: Why Is Pre-Training Not Enough?}
+\label{sec:t1-origin}
+
+The objective function of pre-training---whether autoregressive language modeling or masked language modeling---exhibits
+a fundamental misalignment with how users actually interact with the model.
+This problem can be understood from three perspectives:
+
+\begin{problembox}
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Objective function mismatch}:
+    Pre-training optimizes $\mathcal{L}_{\text{PT}} = -\sum_t \log P(x_t \mid x_{<t})$,
+    i.e., the log-likelihood of predicting every token in the training corpus.
+    This objective treats all tokens equally, without distinguishing between instruction comprehension, knowledge recall, and format adherence.
+    However, what users need is: given an instruction $x$, the model should generate a response $y$ that is helpful, accurate, and safe.
+
+  \item \textbf{Behavioral mode mismatch}:
+    A pre-trained model learns the most common text distribution in web-scale corpora.
+    This means it mimics various styles found in the training data---news articles, social media posts, code comments---rather
+    than focusing on the conversational mode of an AI assistant.
+    In other words, a pre-trained model knows a great deal, but does not know how to express it in the capacity of an assistant.
+
+  \item \textbf{Format mismatch}:
+    A pre-trained model lacks awareness of output formatting.
+    When a user asks ``List 5 benefits of exercise'', the model may generate a prose paragraph rather than a numbered list;
+    when a user asks ``Is X true?'', the model may continue generating more questions rather than providing an answer.
+\end{enumerate}
+\end{problembox}
+
+\noindent
+The core idea of instruction tuning is to perform supervised fine-tuning on a small but high-quality set of (instruction, response) data,
+teaching the model to:
+(1) extract user intent from the instruction,
+(2) invoke the knowledge acquired during pre-training to respond, and
+(3) organize the output in the expected format and style.
+
+\begin{solutionbox}
+Given an instruction-response dataset $\mathcal{D} = \{(x_i, y_i)\}_{i=1}^N$,
+the SFT training objective is:
+\[
+  \mathcal{L}_{\text{SFT}} = -\sum_{i=1}^{N} \sum_{t=1}^{|y_i|}
+    \log P_\theta(y_{i,t} \mid x_i, y_{i,<t})
+\]
+Note that the loss is computed only over the response tokens $y$ (the instruction tokens $x$ are masked),
+ensuring that the model learns ``how to respond to instructions'' rather than ``how to generate instructions''.
+\end{solutionbox}
+
+
+It is worth noting that instruction tuning is not the only pathway for adapting pre-trained LMs.
+Prompt tuning \citep{lester2021prompt} and Prefix-Tuning \citep{li2021prefix}
+adopt an alternative approach---freezing the model parameters and optimizing only continuous prompt embeddings at the input.
+These parameter-efficient methods perform well on specific tasks
+but struggle to endow the model with general-purpose instruction following capabilities.
+Subsequent experiments in FLAN (Fig.~10) even demonstrated that instruction tuning can \emph{facilitate}
+the effectiveness of subsequent prompt tuning, suggesting that the two approaches are complementary rather than competing.
+
+% ========================================================
+\subsection{Foundational Methods: Early Explorations and Paradigm Establishment}
+\label{sec:t1-foundation}
+
+Between 2021 and 2022, three independent and nearly simultaneous works demonstrated
+the effectiveness of instruction tuning from different angles, establishing the foundational paradigm for this field.
+
+
+% --- FLAN ---
+\subsubsection{FLAN: Instruction Tuning for Zero-Shot Generalization}
+\label{sec:t1-flan}
+
+\landmark{wei2022flan}
+FLAN (Finetuned Language Net) was one of the earliest works to systematically validate
+that instruction tuning can improve the zero-shot generalization capabilities of models.
+
+\paragraph{Core design.}
+FLAN's experiments were based on LaMDA-PT (a 137B-parameter decoder-only Transformer),
+using 62 NLP datasets organized into 10 clusters by task type
+(e.g., Natural Language Inference, Sentiment Analysis, Reading Comprehension, etc.).
+For each dataset, the authors manually wrote 10 instruction templates to convert traditional NLP samples into
+natural language instruction format.
+For example, an NLI sample (\texttt{premise}, \texttt{hypothesis}, \texttt{label})
+was converted into ``Premise: [P]. Hypothesis: [H]. Does the premise entail the hypothesis?''.
+
+\paragraph{Key experimental findings.}
+FLAN's experimental design was remarkably rigorous---when evaluating zero-shot performance on a given cluster,
+all tasks from that cluster were \textbf{excluded} from the training data, ensuring that genuine cross-task generalization was being measured:
+
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Zero-shot FLAN surpasses zero-shot GPT-3}:
+    On the majority of the 25 evaluation tasks, FLAN's zero-shot performance exceeded that of GPT-3's zero-shot performance,
+    and on some tasks even approached or surpassed GPT-3's few-shot performance.
+
+  \item \textbf{Scaling effect of task cluster count}:
+    As the number of task clusters included in training increased from 1 to 7,
+    the average performance on held-out clusters rose from 49.9\% to 63.5\%,
+    exhibiting a nearly linear growth trend.
+    This demonstrated that the generalization capability of instruction tuning increases monotonically with task diversity.
+
+  \item \textbf{Threshold effect of model scale}:
+    Instruction tuning yielded significant improvements for large models ($\geq$ 100B parameters),
+    but could actually cause performance degradation for small models ($\leq$ 8B parameters).
+    The authors hypothesized that this is because small models lack sufficient capacity to learn instruction following across multiple tasks simultaneously,
+    leading to catastrophic forgetting.
+
+  \item \textbf{Critical role of instructions}:
+    Ablation experiments showed that using natural language instruction templates (55.2\%)
+    versus a baseline without instructions (37.3\%) resulted in a gap of nearly 18 percentage points,
+    demonstrating that the instructions themselves---not merely multi-task training---are the key driver of improved generalization.
+\end{enumerate}
+
+\paragraph{Significance and limitations of FLAN.}
+FLAN established the basic paradigm of instruction tuning:
+by training on instruction-formatted data from multiple tasks, the model can generalize to unseen tasks.
+However, FLAN also had notable limitations:
+(1) all instruction templates were manually authored, making scaling costly;
+(2) task types were limited to traditional NLP benchmarks, lacking open-domain dialogue and creative generation scenarios representative of real user needs;
+(3) validation was conducted only at the 137B scale, leaving applicability to smaller models uncertain.
+
+
+% --- T0 ---
+\subsubsection{T0: Prompted Training for Zero-Shot Generalization}
+\label{sec:t1-t0}
+
+\landmark{sanh2022multitask}
+T0 was published nearly simultaneously with FLAN, independently validating similar core ideas
+while differing in experimental design and model choice.
+
+T0 was based on the encoder-decoder architecture of T5 (11B parameters),
+using the Public Pool of Prompts (P3) dataset---comprising
+2,073 manually written prompt templates across 62 datasets.
+On 11 held-out tasks, T0's zero-shot performance
+matched or surpassed GPT-3's few-shot (16-shot) performance on 7 tasks,
+despite T0 having only $1/16$ the parameters of GPT-3.
+
+The complementarity between T0 and FLAN is reflected in:
+(1) T0 demonstrated that encoder-decoder architectures also benefit from instruction tuning, not just decoder-only models;
+(2) the large-scale prompt template library of P3 provided a valuable data resource for subsequent research;
+(3) T0's prompt engineering practices accumulated empirical knowledge about how template design affects performance.
+
+Concurrent with FLAN, \citet{mishra2021crossfit} proposed a crowdsourcing-based approach
+for collecting cross-task instruction data,
+and \citet{wang2022supernaturalinstructions} extended this idea to
+Super-Natural\-Instructions---a large-scale benchmark containing 1,616 tasks
+that provided important data infrastructure for subsequent multi-task instruction tuning.
+
+
+% --- InstructGPT ---
+\subsubsection{InstructGPT: Establishing the Three-Stage Training Paradigm}
+\label{sec:t1-instructgpt}
+
+\landmark{ouyang2022instructgpt}
+While FLAN and T0 demonstrated the effectiveness of instruction tuning on academic benchmarks,
+InstructGPT extended this approach to real-world user scenarios
+and established the highly influential ``SFT $\rightarrow$ Reward Model $\rightarrow$ PPO'' three-stage training paradigm.
+
+\paragraph{Technical details of the SFT stage.}
+InstructGPT's SFT stage used approximately 13,000 demonstration data entries written by human annotators.
+These data came from two sources:
+(1) real user prompts collected from the OpenAI API (filtered and anonymized), and
+(2) prompts proactively composed by annotators based on the task distribution.
+Training configuration: 16 epochs, cosine learning rate decay, dropout on residual connections ($p=0.2$).
+The authors found that multi-epoch training on a small dataset was effective---despite the training data being far smaller than the pre-training corpus,
+SFT could still significantly alter the model's behavioral patterns.
+
+\paragraph{Core findings.}
+InstructGPT's most striking conclusion was:
+\textbf{a 1.3B-parameter SFT+RLHF model surpassed the 175B-parameter original GPT-3 in human evaluation with an 85$\pm$3\% win rate}.
+This means that post-training can achieve a qualitative leap without increasing model size---despite
+a parameter count difference of over 100$\times$, the smaller model after alignment was preferred by users.
+Furthermore, InstructGPT's performance on truthfulness was approximately twice that of GPT-3 (TruthfulQA),
+with the hallucination rate dropping from 41\% to 21\%.
+
+\paragraph{Alignment Tax.}
+InstructGPT was the first to systematically identify the \textbf{alignment tax}---the
+phenomenon where post-training, while improving instruction following and safety,
+may cause performance degradation on traditional NLP benchmarks.
+The authors mitigated this issue by incorporating pre-training data into the PPO objective through mixed training (PPO-ptx):
+\[
+  \text{objective}(\theta) =
+    \mathbb{E}_{(x,y) \sim \pi_{\text{RL}}} \big[ r_\theta(x,y) - \beta \log \frac{\pi_{\text{RL}}(y|x)}{\pi_{\text{SFT}}(y|x)} \big]
+    + \gamma \, \mathbb{E}_{x \sim \mathcal{D}_{\text{pretrain}}} \big[ \log \pi_{\text{RL}}(x) \big]
+\]
+where the second term alleviates the alignment tax by maintaining the model's performance on the pre-training distribution.
+\crossref{2}{sec:t2}
+
+\paragraph{Impact of InstructGPT on subsequent research.}
+The impact of InstructGPT extends far beyond its technical contributions.
+It established two paradigms that persist to this day:
+(1) SFT as a necessary precursor stage of the RLHF/DPO pipeline
+(virtually all subsequent preference optimization work starts from an SFT checkpoint);
+(2) human evaluation as the gold standard for evaluating instruction-following models
+(rather than relying solely on automatic metrics).
+
+
+% ========================================================
+\subsection{Limitations and Branching: Data Challenges and Divergent Solution Paths}
+\label{sec:t1-branching}
+
+FLAN, T0, and InstructGPT established the effectiveness of instruction tuning,
+but also exposed a core bottleneck: \textbf{the cost of acquiring high-quality instruction data is prohibitively high}.
+InstructGPT's 13,000 demonstration data entries were completed by 40 professional annotators over several months,
+a cost that is unsustainable for the academic community and the open-source ecosystem.
+
+\begin{problembox}
+How can large-scale, high-quality instruction tuning data be obtained at low cost?
+\end{problembox}
+
+This problem gave rise to two nearly opposite solution paths:
+\textbf{Branch A} pursues data quantity expansion (reducing costs through synthetic generation),
+while \textbf{Branch B} pursues data quality refinement (achieving more with less through careful curation).
+The tension between these two approaches constitutes the most central debate in the SFT field.
+
+\evolution{High cost of human-annotated data}{Branch A: Synthetic data / Branch B: Data curation}{Lowering the barrier to obtaining instruction data}
+
+
+% --- Branch A: Synthetic Data ---
+\subsubsection{Branch A: Synthetic Data Generation---Winning Through Quantity}
+\label{sec:t1-synthetic}
+
+The idea of using language models themselves to generate training data can be traced back to
+\citet{schick2021generating}, who demonstrated that GPT-2-level models
+could generate effective labeled data for SuperGLUE tasks,
+and that models trained on generated data approached the performance of those trained on human-annotated data for some tasks.
+This result foreshadowed the possibility that ``an LM can serve as both student and teacher''.
+
+\paragraph{Self-Instruct: Bootstrapping instruction data from the LM itself.}
+\landmark{wang2023selfinstruct}
+Self-Instruct extended this approach from task-specific labeled data to the generation of \textbf{general-purpose instruction data},
+becoming the most influential work in the synthetic instruction data domain.
+It pioneered the bootstrap paradigm of leveraging a model's own capabilities to generate training data.
+
+\textbf{Pipeline design.}
+The Self-Instruct pipeline consists of four stages:
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Instruction generation}:
+    Starting from 175 manually written seed tasks, new instructions are generated by
+    vanilla GPT-3 (text-davinci-001) through in-context learning.
+    Each round samples 6 human seeds + 2 model-generated instructions from the task pool as few-shot examples.
+
+  \item \textbf{Classification identification}:
+    Each instruction is classified as either a classification task or a non-classification task,
+    as the two require different instance generation strategies.
+
+  \item \textbf{Instance generation}:
+    For non-classification tasks, an input-first approach is used (generating input before output);
+    for classification tasks, an output-first approach is used (determining the label before generating input),
+    which effectively prevents label distribution skew.
+
+  \item \textbf{Filtering}:
+    A ROUGE-L $< 0.7$ threshold is applied to filter out newly generated samples that are overly similar to existing data,
+    ensuring data diversity.
+\end{enumerate}
+
+\textbf{Results.}
+Starting from 175 seed tasks, Self-Instruct generated 52,445 instructions and 82,439 instances.
+Quality evaluation showed: 92\% of generated instructions were valid, and 54\% of samples were valid across all fields.
+On the SuperNI benchmark, GPT-3 fine-tuned with Self-Instruct data
+outperformed vanilla GPT-3 by 33.1\% ROUGE-L,
+and in human evaluation fell only about 5\% behind InstructGPT$_{\text{001}}$.
+The total API cost for the entire data generation process was approximately \$600.
+
+\textbf{Significance.}
+The significance of Self-Instruct lies in demonstrating that \textbf{an LM can serve as a source of instruction data itself},
+an idea that directly inspired a series of subsequent works.
+
+\paragraph{Alpaca: Industrializing Self-Instruct.}
+Stanford Alpaca \citep{taori2023alpaca} applied the Self-Instruct approach to LLaMA 7B,
+using GPT-3.5 (text-davinci-003) to generate 52K instruction data entries,
+with a total fine-tuning cost of only approximately \$600 (API) + \$100 (training).
+Alpaca demonstrated performance comparable to GPT-3.5 in human evaluation,
+marking a milestone for open-source instruction-following models.
+However, Alpaca also exposed the limitations of synthetic data:
+the generated data contained significant hallucination and style mimicry (imitating the teacher model's linguistic style
+rather than truly learning the underlying capabilities), sparking discussion about the ceiling of synthetic data.
+Concurrently, Vicuna \citep{chiang2023vicuna} offered a contrasting path:
+it used approximately 70K \textbf{real user conversations with ChatGPT} collected from the ShareGPT platform
+to fine-tune LLaMA 13B, achieving approximately 90\% of ChatGPT's quality in GPT-4 evaluation.
+Vicuna's success demonstrated that real conversation data holds advantages
+that synthetic data can hardly replicate in capturing user interaction patterns---the way users phrase questions, contextual dependencies in multi-turn dialogue,
+and implicit preferences are all embedded in real interactions.
+The parallel development of Alpaca (synthetic data) and Vicuna (real conversation data)
+laid the empirical foundation for subsequent discussions about data source selection.
+
+\paragraph{WizardLM: Evol-Instruct for progressive complexity.}
+\citet{xu2024wizardlm} proposed the Evol-Instruct method---rather
+than generating instructions from scratch, it iteratively evolves existing simple instructions.
+In each evolution round, a prompt directs the LLM to perform one of the following operations on an instruction:
+adding constraints, increasing reasoning steps, concretizing scenarios, or increasing input complexity.
+After multiple rounds of evolution, a simple ``Write a poem about spring'' might become
+``Write a Shakespearean sonnet about spring, incorporating at least three
+metaphors related to scientific phenomena, and ending with a volta
+that challenges the reader's expectations''.
+This method achieves controlled data augmentation along the instruction complexity dimension.
+
+\paragraph{Other synthetic data works.}
+\citet{honovich2022unnatural}'s Unnatural Instructions adopted an approach similar to Self-Instruct
+but used fewer seeds (15), validating the robustness of bootstrapping.
+\citet{peng2023gpt4instruct} used GPT-4 to generate higher-quality instruction data,
+demonstrating the decisive influence of teacher model capability on synthetic data quality.
+Orca \citep{mukherjee2023orca} proposed a progressive learning strategy---learning
+from GPT-4's detailed reasoning traces,
+not only imitating the final answer but also the reasoning process (the system message instructs GPT-4 to ``explain step by step''),
+an idea that foreshadowed the development of reasoning distillation in Thread 4
+\crossref{4}{sec:t4}.
+Baize \citep{xu2023baize} explored the use of ChatGPT self-dialogue to generate multi-turn conversation data.
+
+
+% --- Branch B: Data Quality ---
+\subsubsection{Branch B: Data Quality Curation---Winning Through Quality}
+\label{sec:t1-quality}
+
+\paragraph{LIMA: The Superficial Alignment Hypothesis.}
+\landmark{zhou2023lima}
+LIMA proposed one of the most controversial hypotheses in the SFT field---the
+\textbf{Superficial Alignment Hypothesis}:
+\textit{a model's knowledge and capabilities are acquired almost entirely during pre-training,
+and the role of alignment is merely to teach the model the correct output format and interaction style}.
+
+\textbf{Experimental design.}
+LIMA fine-tuned LLaMA 65B using only 1,000 carefully curated training samples.
+The diversity of data sources was meticulously designed:
+750 samples came from community Q\&A platforms (highest-quality responses from Stack Exchange,
+wikiHow articles, highly upvoted Reddit posts),
+and 250 were manually written by the authors (ensuring coverage of specific conversational abilities and safety behaviors).
+The training configuration appeared simple but was carefully tuned:
+15 epochs, AdamW optimizer, residual dropout increasing linearly from $p_d = 0.0$ at the bottom layers to $p_d = 0.3$ at the top layers.
+This \textbf{layer-wise increasing dropout} is a noteworthy detail---it
+protects the representational stability of lower layers (closer to pre-training knowledge)
+while allowing greater learning flexibility in upper layers (closer to output formatting).
+
+\textbf{Core results.}
+In human evaluation, LIMA's performance was striking:
+\begin{itemize}[leftmargin=1.5em]
+  \item 50\% of outputs were rated ``excellent'', 88\% ``pass'' or better
+  \item Against Alpaca 65B: LIMA was preferred in 53\% of cases
+  \item Against DaVinci003: LIMA was preferred or tied in 44\% of cases
+  \item Against GPT-4: LIMA was comparable or superior in 43\% of cases
+\end{itemize}
+
+\textbf{Ablation experiments} (conducted on 7B models) provided more granular insights:
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Diversity $>$ homogeneity}:
+    Diverse Stack Exchange data (rating 3.83/6) outperformed homogeneous wikiHow data (3.49/6),
+    demonstrating that source diversity matters more than data volume.
+  \item \textbf{Quality filtering is effective}:
+    Manually filtered data (3.83/6) significantly outperformed unfiltered data (3.33/6).
+  \item \textbf{Quantity scaling has a ceiling}:
+    After increasing from 2K to 4K samples, performance gains plateaued.
+  \item \textbf{A small amount of dialogue data has outsized impact}:
+    Adding just 30 multi-turn dialogue samples raised the ``excellent'' rating from 45.2\% to 76.1\%.
+\end{itemize}
+
+\textbf{Controversies surrounding LIMA.}
+LIMA's Superficial Alignment Hypothesis sparked ongoing debate.
+Proponents argue that it reveals the essence of SFT---not teaching the model new knowledge, but activating the correct expression of existing capabilities.
+Critics counter that:
+(1) it remains unclear whether the conclusions from 1,000 samples generalize to more complex capabilities (e.g., multi-step reasoning, code generation);
+(2) LIMA used a 65B-parameter LLaMA---for smaller models, SFT may genuinely need to impart new knowledge rather than merely adjust formatting;
+(3) LIMA's evaluation was primarily based on single-turn open-domain Q\&A, with insufficient coverage of specialized domains and long-horizon tasks.
+
+\paragraph{Data selection methodologies.}
+LIMA's success inspired a series of data selection methods.
+\citet{li2023ifd} proposed the Instruction-Following Difficulty (IFD) metric---measuring
+the informativeness of each data sample by comparing the difference in the model's output probability with and without the instruction,
+then selecting samples with the highest IFD for training.
+DEITA \citep{liu2024deita} proposed an automated data scoring framework based on three dimensions---complexity, quality, and diversity---using ChatGPT to score and rank data,
+then selecting the optimal subset through embedding-based diversity filtering.
+\citet{chen2023maybeonly} found that using only 0.5\% of the Alpaca data could achieve over 90\% of the performance of full-data training.
+Instruction Mining \citep{cao2023instructionmining} trained a quality predictor
+to automate the data filtering process.
+
+\paragraph{Open-source datasets and community contributions.}
+OpenAssistant Conversations \citep{kopf2023openassistant} provided
+a multilingual dialogue dataset contributed by 13,500 volunteers (161,443 messages in 35 languages),
+demonstrating the potential of crowdsourcing for instruction data collection.
+Dolly \citep{conover2023dolly}, contributed by 5,000 Databricks employees during work hours with approximately 15,000 entries,
+was one of the earliest enterprise-level open-source instruction datasets.
+
+
+% --- Multi-task Scaling ---
+\subsubsection{Branch C: Multi-task Scaling---Expansion Along the Task Quantity Dimension}
+\label{sec:t1-multitask}
+
+\paragraph{Flan-v2: Pushing instruction tuning to the extreme.}
+\landmark{chung2022flan}
+Flan-v2 is the large-scale follow-up to FLAN,
+pushing the task scale of instruction tuning to unprecedented levels.
+
+\textbf{Data scale.}
+Flan-v2 integrated four major task collections:
+Muffin (80 tasks), T0-SF (193 tasks), NIV2 (1,554 tasks), and CoT (9 reasoning tasks),
+totaling 1,836 tasks (473 unique datasets, 146 task categories).
+This represents approximately a 30$\times$ expansion over the original FLAN's 62 tasks.
+
+\textbf{Core findings.}
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Cross-architecture effectiveness}:
+    Flan-v2 validated its effectiveness on T5 (encoder-decoder, 80M--11B),
+    PaLM (decoder-only, 8B--540B), as well as cont-PaLM and U-PaLM,
+    demonstrating that the benefits of instruction tuning are architecture-agnostic.
+
+  \item \textbf{Diminishing marginal returns of task scaling}:
+    Performance continued to improve with increasing task count, but the majority of gains were concentrated in the first 282 tasks,
+    with diminishing marginal contributions from subsequent tasks.
+    This suggests an important practical insight:
+    achieving ``good enough'' performance does not require exhausting every possible task.
+
+  \item \textbf{Extreme efficiency advantages}:
+    Taking PaLM 540B as an example, Flan fine-tuning used only 512 v4 TPU chips for 37 hours,
+    amounting to a mere \textbf{0.2\%} of the pre-training compute.
+    Yet the effects were substantial: Flan-PaLM 540B achieved 75.2\% on MMLU (5-shot, with CoT + self-consistency),
+    with a normalized average improvement of 9.4--15.5\%.
+    Even more remarkably, \textbf{Flan-T5-XL 3B achieved 52.4\% on MMLU, surpassing GPT-3 175B's 43.9\%}---a
+    model with $1/58$ the parameters outperformed a $58\times$ larger model after instruction tuning.
+
+  \item \textbf{Critical role of CoT fine-tuning}:
+    An underappreciated yet highly important finding in Flan-v2 concerns Chain-of-Thought fine-tuning.
+    Instruction tuning without CoT data actually \textbf{harmed} the model's reasoning capabilities;
+    however, jointly training with both CoT and non-CoT data
+    not only preserved reasoning capabilities but also improved performance on both types of tasks.
+    Furthermore, CoT fine-tuning unlocked zero-shot CoT capability---merely
+    appending ``Let's think step by step'' to the end of a prompt
+    could elicit reasoning behavior from the model, without requiring few-shot reasoning examples.
+    This finding foreshadowed the development of reasoning post-training in Thread 4
+    \crossref{4}{sec:t4}.
+\end{enumerate}
+
+The Flan Collection \citep{longpre2023flancollection} subsequently open-sourced the complete data mixing recipe and templates of Flan-v2,
+providing the community with a reproducible foundation.
+OPT-IML \citep{iyer2022optiml} replicated similar multi-task instruction tuning experiments on Meta's OPT model.
+BLOOMZ/mT0 \citep{muennighoff2022bloomz} extended multi-task instruction tuning
+to multilingual scenarios (crosslingual instruction tuning with the xP3 dataset),
+demonstrating the effectiveness of this paradigm for non-English languages.
+
+
+% --- Domain-specific SFT ---
+\subsubsection{Branch D: Domain-Specific SFT---Precise Adaptation for Specialized Domains}
+\label{sec:t1-domain}
+
+As general-purpose instruction tuning matured, researchers began applying SFT techniques to
+vertical domains requiring specialized knowledge, sparking a wave of domain-specific SFT research.
+
+\paragraph{Code: Data quality can break scaling laws.}
+\landmark{gunasekar2023phi1}
+phi-1 is the most disruptive work in the domain of code SFT.
+This research from Microsoft Research used a model of only 1.3B parameters
+to achieve 50.6\% pass@1 on HumanEval and 55.5\% pass@1 on MBPP---at
+the time surpassing many models an order of magnitude larger.
+
+\textbf{The core innovation lies in data engineering.}
+phi-1's training data comprises three carefully designed components:
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Filtered code-language corpus} (approximately 6B tokens):
+    A random forest classifier was used to filter ``textbook quality'' code snippets
+    from The Stack and StackOverflow.
+    The classifier was trained on a small set of GPT-4-labeled samples (annotating the educational value of each code snippet),
+    then applied to filter the entire corpus at scale.
+
+  \item \textbf{Synthetic textbooks} ($< 1$B tokens):
+    GPT-3.5 was used to generate textbook-style Python teaching content,
+    including concept explanations, code examples, and progressive exercises.
+
+  \item \textbf{CodeExercises} ($< 180$M tokens):
+    GPT-3.5 was used to generate function-level programming exercises (function docstring + solution),
+    serving as training data for the fine-tuning stage.
+\end{itemize}
+
+\textbf{Key insights.}
+phi-1's success challenged the conventional scaling law mindset---it
+demonstrated that \textbf{data quality can, to a certain extent, substitute for model scale and data volume}.
+A 10$\times$ smaller model trained on 100$\times$ less data
+could match or even surpass the performance of larger models.
+More interestingly, phi-1 exhibited some \textbf{emergent capabilities} after fine-tuning---including
+the ability to use external libraries such as Pygame and Tkinter as well as chat-style interaction modes---capabilities
+that were not present in the fine-tuning data, suggesting that high-quality data may help the model
+better organize and generalize the knowledge acquired during pre-training.
+This finding resonates intriguingly with LIMA's Superficial Alignment Hypothesis.
+
+WizardCoder \citep{luo2023wizardcoder} applied WizardLM's Evol-Instruct method to the code domain,
+generating high-difficulty training data through progressive complexification of programming instructions.
+Magicoder \citep{wei2023magicoder} proposed OSS-Instruct---starting
+from real open-source code snippets, it has the LLM generate corresponding instructions for these code segments,
+ensuring that the code style and complexity of training data are consistent with real-world projects.
+
+\paragraph{Math: Reasoning-enhanced SFT.}
+Mathematical reasoning is another active direction in domain-specific SFT.
+WizardMath \citep{luo2023wizardmath} extended Evol-Instruct to the mathematics domain,
+combining Reinforced Evol-Instruct to further improve data quality.
+MAmmoTH \citep{yue2023mammoth} constructed a hybrid instruction dataset mixing CoT and Program-of-Thought (PoT)---using
+Python code as reasoning steps for problems amenable to symbolic computation,
+and natural language CoT for problems requiring semantic understanding.
+MetaMath \citep{yu2023metamath} proposed question bootstrapping for mathematical problems---augmenting
+data diversity by rephrasing problem statements (synonym substitution, condition inversion, self-questioning decomposition)
+while maintaining mathematical correctness.
+RFT \citep{yuan2023rft} (Rejection sampling Fine-Tuning)
+investigated the sampling-then-filtering strategy for mathematical reasoning:
+for each math problem, the model generates multiple candidate answers, retaining only samples with correct final answers for SFT,
+and analyzed the scaling relationship between sampling quantity and final performance.
+
+\paragraph{Multilingual \& Other Domains.}
+Aya Model \citep{ustun2024aya} is a significant milestone in multilingual instruction tuning,
+covering 101 languages and demonstrating both the feasibility and challenges of instruction tuning in extremely multilingual settings.
+Gorilla \citep{patil2023gorilla} focused on API calling capabilities,
+performing SFT on API documentation and calling examples to enable models to accurately generate complex API calling code
+\crossref{6}{sec:t6}.
+Platypus \citep{lee2023platypus} conducted small-scale curated SFT for the STEM domain.
+LongForm \citep{koksal2023longform} focused on instruction tuning for long-form text generation tasks.
+
+
+% ========================================================
+\subsection{Convergence and Frontiers: Systematic Synthesis and Methodological Fusion}
+\label{sec:t1-convergence}
+
+In the second half of 2023, the SFT field transitioned from a period of diverse exploration to a phase of systematic synthesis.
+Multiple works began integrating the experience from the aforementioned branches, seeking to answer:
+\textbf{How can data engineering, multi-task training, and domain specialization
+be fused into a unified set of best practices?}
+
+\evolution{Branch A (synthetic) / Branch B (curation) / Branch C (scaling) developing independently}%
+  {Systematic synthesis: best practices fusing multiple paths}{Experiment-driven recipe research}
+
+
+% --- Tulu ---
+\subsubsection{Tulu: Systematic Exploration of Open-Source SFT Recipes}
+\label{sec:t1-tulu}
+
+Tulu \citep{wang2023tulu} was the first work to systematically compare different instruction data
+sources and training strategies in an open-source setting.
+Through controlled experiments on LLaMA, Tulu answered multiple practical questions:
+Which combinations of data sources are most effective? How does the data mixing ratio affect performance?
+What are the relative advantages of human-written and synthetic data across different tasks?
+
+Tulu 2 \citep{ivison2023tulu2} further expanded this research,
+extending the experimental scope from SFT to the full post-training pipeline (SFT + DPO)
+and validating optimal recipes on the LLaMA 2 series of models.
+Tulu 2's core contribution was providing a reproducible training recipe---including
+data mixing strategies, hyperparameter configurations, and evaluation protocols---enabling
+the open-source community to iteratively optimize on this foundation.
+
+\subsubsection{Zephyr \& OpenChat: Knowledge Distillation from Strong to Weak Models}
+\label{sec:t1-distillation}
+
+Zephyr \citep{tunstall2023zephyr} proposed the Direct Distillation approach:
+first using GPT-4 as a teacher model to generate high-quality instruction data for SFT,
+then using GPT-4's preference annotations for DPO training.
+The entire process required no human annotation whatsoever, achieving end-to-end
+knowledge distillation from a proprietary model to an open-source model.
+Zephyr-7B outperformed most 70B-scale open-source models on MT-Bench at the time,
+demonstrating the extreme effectiveness of distillation + alignment for small models
+\crossref{7}{sec:t7}.
+
+OpenChat \citep{wang2023openchat} addressed another practical issue:
+when training data comes from mixed-quality sources (e.g., some from GPT-4, some from GPT-3.5),
+how can such data be effectively utilized?
+OpenChat proposed Conditioned RLFT (C-RLFT)---a
+class-conditioned training strategy that enables the model to distinguish and leverage data of varying quality,
+rather than simply discarding low-quality data as noise.
+
+
+\subsubsection{Scaling Laws and Theoretical Analysis}
+\label{sec:t1-scaling}
+
+\citet{muennighoff2023scaling} systematically investigated
+the scaling behavior of instruction-tuned LMs in data-constrained scenarios.
+When available instruction data is limited (an extremely common situation in practice),
+should one train for more epochs on the limited data (repeat), or augment the limited data and train for one epoch?
+Their experiments demonstrated that data repetition training exhibits clear diminishing returns---performance
+growth slows significantly beyond 4 epochs,
+providing theoretical support for the epoch count choices made by small-data approaches such as LIMA.
+
+The Instruction Tuning Survey \citep{zhang2023instruction} provided
+a systematic review of the entire instruction tuning field, tracing the development from FLAN to LIMA
+and summarizing best practices in data construction, training strategies, and evaluation methods.
+
+
+\subsubsection{2025: SFT as the Cornerstone of Reasoning Model Training Pipelines}
+\label{sec:t1-2025}
+
+The reasoning model wave of 2025 (\crossref{4}{sec:t4-thinking-models})
+endowed SFT with a new role:
+SFT is no longer merely the final step that ``teaches the model to follow instructions'',
+but has become the \textbf{infrastructure layer} in multi-stage post-training pipelines.
+
+\paragraph{Qwen3's four-stage pipeline.}
+Qwen3 \cite{yang2025qwen3}'s four-stage post-training pipeline (detailed in \crossref{4}{sec:t4-thinking-models})
+clearly illustrates the multiple roles of SFT in modern training paradigms:
+SFT appears simultaneously in Stage 1 (long CoT cold start, reasoning format initialization)
+and Stage 3 (thinking mode fusion, integration of reasoning and non-reasoning modes),
+marking the evolution of SFT from a ``one-time training step'' to a ``general-purpose alignment tool deployable multiple times within a pipeline''.
+
+\paragraph{Llama 4's natively multimodal SFT.}
+Meta's Llama 4 \cite{meta2025llama4} extended the scope of SFT to natively multimodal scenarios,
+performing joint instruction tuning on images, text, and code within a unified framework,
+further broadening the applicability of SFT methodology
+(a systematic discussion of multimodal post-training can be found in \crossref{5}{sec:t5}).
+
+\subsubsection{2026: Token-Level SFT and SFT-RL Synergy}
+\label{sec:t1-2026}
+
+In early 2026, the SFT field exhibited two prominent trends:
+\textbf{training granularity descending from the sample level to the token level},
+and \textbf{SFT being repositioned as the ``optimal initializer'' for RL training}.
+
+\paragraph{Token-Level SFT: From uniform loss to selective training.}
+Traditional SFT applies uniform cross-entropy loss to all tokens in a sequence,
+but in 2026, multiple independent studies simultaneously challenged this assumption.
+Shen et al.\ \cite{shen2026tokenpriority} formalized this emerging paradigm as
+\textbf{Token Priority},
+pointing out that fine-grained autoregressive generation is constrained by coarse uniform supervision signals,
+and categorized existing work into two types:
+\emph{Positive Priority} (filtering noisy tokens, retaining high-information tokens)
+and \emph{Signed Priority} (applying negative weights to harmful patterns).
+
+ProFit \cite{liu2026profit} provided a concrete instance:
+by analyzing the probability distribution of token generation,
+it found that \textbf{high-probability tokens carry the core logical framework, while low-probability tokens are mostly substitutable expressions}.
+Based on this observation, ProFit selectively retains high-probability tokens for training,
+suppressing surface-level overfitting to low-probability, non-core tokens.
+TOSS \cite{li2026toss} approached token-level selection from a \textbf{safety perspective}:
+by measuring the per-token loss difference between a safety-degraded model and a utility-oriented model,
+it quantifies the safety risk of each token,
+achieving a fine-grained balance between maintaining task capability and preserving safety
+(\crossref{3}{sec:t3}).
+
+\evolution{Sample-level data selection (LIMA, DEITA)}{Token-level selective training (ProFit, TOSS)}{Uniform loss wastes gradient signal on non-critical tokens}
+
+\paragraph{Deepening of data selection methodologies.}
+At the sample level, progress in 2026 was equally notable.
+NAIT \cite{chen2026nait} proposed a \textbf{neuron activation pattern-based} data selection framework:
+by analyzing the \emph{neuron activation similarity} between instruction tuning datasets and target capabilities,
+it consistently outperformed methods relying on external strong models using only 10\% of the Alpaca-GPT4 dataset.
+NAIT also revealed an intriguing finding:
+logical reasoning and programming data exhibit strong generalizability at the neuron level,
+enabling cross-capability transfer.
+Skill-Aware Data Selection \cite{zhang2026skillaware}
+targets reasoning distillation scenarios,
+proposing a \textbf{skill-coverage-oriented} data selection strategy:
+prioritizing samples corresponding to the target model's weakest skills,
+selecting only 1K samples from a 100K corpus to surpass random SFT baselines.
+
+In synthetic data generation,
+DS$^2$-Instruct \cite{xu2026ds2instruct} introduced Bloom's taxonomy of cognitive levels
+to construct domain-specific instruction datasets:
+by pairing domain keywords with different cognitive levels,
+it achieved significant zero-shot performance improvements across 7 specialized domains.
+Terminal-Task-Gen \cite{pi2026terminaltaskgen} demonstrated
+a systematic data engineering pipeline for terminal/CLI tasks,
+combining seed-based and skill-based task construction,
+data filtering, and curriculum learning strategies,
+with the resulting Nemotron-Terminal 32B achieving 27.4\% on Terminal-Bench 2.0.
+
+\paragraph{PEAR: The goal of SFT should be to prepare for RL.}
+\landmark{pear2026sftrl}
+Perhaps the most paradigm-shifting finding of 2026 comes from PEAR:
+\textbf{after identical RL training, a stronger SFT checkpoint may end up significantly weaker than a weaker SFT checkpoint}.
+The root cause lies in the \emph{distribution mismatch} between offline SFT data and online RL rollouts---overfitting
+during the SFT stage to the teacher data distribution
+restricts the exploration space during the RL stage.
+
+PEAR mitigates this distribution mismatch by introducing \textbf{importance sampling}
+into the SFT loss (reweighting at the token, block, and sequence levels).
+On AIME2025, models initialized with PEAR achieved
+pass@8 improvements of up to 14.6\% after RL training.
+This result fundamentally redefines the optimization objective of SFT:
+\textbf{good SFT is not about maximizing performance on SFT tasks,
+but about making the model the best starting point for the RL stage}.
+
+\begin{openproblembox}
+\textbf{Open Problem 6: The optimal granularity of SFT.}
+The success of token-level selective training indicates that
+uniform sequence-level loss may not be optimal.
+But what is the optimal training granularity?
+Token-level? Span-level? Skill-level?
+How do different granularity choices affect downstream RL training?
+PEAR's findings suggest that the evaluation criterion for SFT itself needs to be revisited---it
+should not be measured by performance on SFT tasks themselves,
+but rather optimized for ``RL-readiness'' as the objective.
+\end{openproblembox}
+
+% ========================================================
+\subsection{Open Problems}
+\label{sec:t1-open}
+
+Despite SFT being the most mature technique in post-training, several core problems remain unresolved:
+
+\begin{openproblembox}
+\paragraph{Open Problem 1: Where is the ceiling of synthetic data?}
+Self-Instruct and Alpaca launched the wave of synthetic instruction data,
+but multiple studies have observed that models trained on synthetic data exhibit \textbf{style mimicry without substance}---the
+model learns the teacher model's output style, but is brittle when confronting out-of-distribution problems requiring deep understanding.
+phi-1 partially mitigated this issue through ``textbook quality'' data filtering,
+but a more fundamental question remains: \textbf{does synthetic data have a theoretical capability ceiling?}
+That is, can a student model surpass the capability boundary of the teacher model through synthetic data?
+This relates to the classic question in knowledge distillation, but in the context of instruction tuning
+introduces additional complexity (the transfer of instruction following ability vs. knowledge itself).
+\end{openproblembox}
+
+\begin{openproblembox}
+\paragraph{Open Problem 2: The optimal interplay between SFT and preference optimization.}
+The ``SFT $\rightarrow$ RLHF/DPO'' pipeline established by InstructGPT has become the de facto standard,
+but to what extent should the SFT stage be trained?
+Excessive SFT (overfitting to instruction data) may limit the exploration space for subsequent RLHF/DPO;
+insufficient SFT may lead to instability during the RLHF stage.
+Zephyr and Tulu 2's experiments provide some empirical guidance,
+but a systematic understanding of the relationship between SFT intensity (training steps, data volume) and downstream alignment effectiveness remains lacking
+\crossref{2}{sec:t2}.
+\end{openproblembox}
+
+\begin{openproblembox}
+\paragraph{Open Problem 3: The capability boundary of instruction following in small models.}
+FLAN observed that instruction tuning can cause performance degradation for small models ($\leq$ 8B),
+and LIMA's Superficial Alignment Hypothesis implies that SFT effectiveness is highly dependent on pre-training quality.
+Then, for models at the 1B--3B scale, where does the capability boundary of instruction following lie?
+phi-1 demonstrated impressive code capabilities at the 1.3B scale,
+but does this generalize to broader instruction following scenarios?
+Understanding the upper efficiency bound of SFT for small models has significant practical implications for edge computing and mobile device scenarios
+\crossref{7}{sec:t7}.
+\end{openproblembox}
+
+\begin{openproblembox}
+\paragraph{Open Problem 4: A systematic solution to catastrophic forgetting.}
+SFT inevitably overwrites some knowledge acquired during pre-training,
+as manifested concretely in InstructGPT's alignment tax and Flan-v2's reasoning capability degradation due to missing CoT data.
+While ad hoc solutions such as PPO-ptx and CoT mixed training are effective in specific scenarios,
+a unified continual learning framework with theoretical guarantees is still lacking.
+How to precisely control the balance between ``learning new behaviors'' and ``preserving existing knowledge'' during SFT
+remains a fundamental cross-thread challenge in the post-training field.
+\end{openproblembox}
+
+\begin{openproblembox}
+\paragraph{Open Problem 5: Fragmentation of evaluation standards.}
+The evaluation of instruction-tuned models is currently highly fragmented:
+academia relies on benchmarks (MMLU, SuperNI, HumanEval),
+while industry relies on human evaluation and LLM-as-judge approaches (e.g., MT-Bench, AlpacaEval).
+The correlations among these evaluation dimensions are weak and unstable---a
+model that excels on MMLU may perform mediocrely in human evaluation, and vice versa.
+Establishing an evaluation framework that is both scalable and accurately reflects actual user experience
+remains one of the most pressing infrastructure needs in this field.
+\end{openproblembox}
+
+
+\subsection{Chapter Summary}
+\label{sec:t1-summary}
+
+\begin{figure}[!ht]
+\centering
+\begin{tikzpicture}[
+  node distance=0.6cm and 1.2cm,
+  every node/.style={font=\small},
+  milestone/.style={rectangle, rounded corners, draw=thread1, fill=thread1!10,
+    text width=3.8cm, minimum height=0.8cm, align=center, font=\small\bfseries},
+  branch/.style={rectangle, rounded corners, draw=gray!60, fill=gray!5,
+    text width=3.2cm, minimum height=0.7cm, align=center, font=\small},
+  arrow/.style={-{Stealth[length=2.5mm]}, thick, thread1!70},
+  brancharrow/.style={-{Stealth[length=2mm]}, gray!60, thick},
+]
+% Timeline nodes
+\node[milestone] (flan) {FLAN / T0 (2021)\\Multi-task Instruction Tuning};
+\node[milestone, below=1.2cm of flan] (igpt) {InstructGPT (2022)\\SFT$\rightarrow$RM$\rightarrow$PPO Pipeline};
+\node[milestone, below=1.2cm of igpt] (si) {Self-Instruct (2022)\\Bootstrap from LM};
+
+% Branching
+\node[branch, below left=1.2cm and 0.5cm of si] (brA) {Branch A: Synthetic Data\\Alpaca, WizardLM, Orca};
+\node[branch, below right=1.2cm and 0.5cm of si] (brB) {Branch B: Data Curation\\LIMA (2023)};
+
+% Convergence
+\node[milestone, below=2.8cm of si] (flanv2) {Flan-v2 (2022)\\1836 Tasks Scaling};
+\node[milestone, below=1.2cm of flanv2] (phi1) {phi-1 (2023)\\Textbook-Quality Data};
+\node[branch, below=1.2cm of phi1] (conv) {Convergence: Tulu, Zephyr\\Recipe \& Distillation};
+
+% Arrows
+\draw[arrow] (flan) -- (igpt);
+\draw[arrow] (igpt) -- (si);
+\draw[brancharrow] (si) -- (brA);
+\draw[brancharrow] (si) -- (brB);
+\draw[arrow] (si) -- (flanv2);
+\draw[arrow] (flanv2) -- (phi1);
+\draw[brancharrow] (brA) -- (conv);
+\draw[brancharrow] (brB) -- (conv);
+\draw[arrow] (phi1) -- (conv);
+\end{tikzpicture}
+\caption{Evolution path of Thread 1: from the proposal of instruction tuning to the convergence of data engineering methodologies.
+Red nodes represent landmark works; gray nodes represent important branches.}
+\label{fig:sft-evolution}
+\end{figure}
+
+\begin{table}[!ht]
+\centering
+\caption{Comparison of core methods in Thread 1. The Data Scale column reflects the data scale during the instruction tuning stage.}
+\label{tab:sft-comparison}
+\small
+\begin{tabularx}{\textwidth}{l c >{\raggedright\arraybackslash}p{2.2cm} >{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Method} & \textbf{Year} & \textbf{Data Scale} & \textbf{Key Insight} & \textbf{Limitation} \\
+\midrule
+FLAN & 2021 & 62 tasks, 10 templates each & Zero-shot generalization scales with task diversity & Human-crafted templates; NLP benchmarks only \\
+InstructGPT & 2022 & 13K demos & 1.3B SFT+RLHF $>$ 175B GPT-3 in human eval & 40 professional labelers; high cost \\
+Self-Instruct & 2022 & 52K from 175 seeds & LM can bootstrap its own instruction data & Style mimicry without substance \\
+LIMA & 2023 & 1K curated & Quality $\gg$ quantity (Superficial Alignment Hypothesis) & Single-turn QA only; 65B model \\
+Flan-v2 & 2022 & 1,836 tasks & 0.2\% pre-training compute; cross-architecture & Marginal returns after $\sim$282 tasks \\
+phi-1 & 2023 & $<$7B tokens (textbook quality) & Data quality can break scaling laws & Code domain only \\
+Zephyr & 2023 & GPT-4 distilled & 7B distilled surpasses 70B open models & Dependent on proprietary teacher \\
+PEAR & 2026 & Importance-weighted SFT & Best SFT $\neq$ best RL initialization & Early empirical finding \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The evolution of Thread 1 follows a clear trajectory:
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{Problem formulation} (2021): FLAN and T0 demonstrated that multi-task instruction tuning
+    can unlock the zero-shot generalization capability of pre-trained LMs.
+  \item \textbf{Paradigm establishment} (2022): InstructGPT embedded SFT within a broader alignment pipeline,
+    establishing the ``SFT $\rightarrow$ RM $\rightarrow$ PPO'' three-stage training paradigm.
+  \item \textbf{Path divergence} (2022--2023): Driven by the problem of data acquisition cost,
+    the field diverged into two paths: synthetic data (Self-Instruct $\rightarrow$ Alpaca $\rightarrow$ WizardLM)
+    and data curation (LIMA $\rightarrow$ DEITA $\rightarrow$ IFD).
+  \item \textbf{Scaling and specialization} (2022--2023): Flan-v2 pushed multi-task scaling to its extreme,
+    phi-1 demonstrated that data quality can break scaling laws,
+    and domain-specific SFT expanded across code, math, multilingual, and other domains.
+  \item \textbf{Convergence and fusion} (2023--): Works such as Tulu and Zephyr began to systematically integrate
+    the experience from multiple paths, seeking reproducible optimal training recipes.
+\end{enumerate}
+
+\noindent
+The core takeaway of this chapter is:
+\textbf{SFT is fundamentally a data engineering problem}.
+Whether it is Self-Instruct's synthetic data pipeline,
+LIMA's Superficial Alignment Hypothesis,
+phi-1's textbook-quality data filtering,
+or Flan-v2's large-scale task mixing---all
+breakthroughs revolve around the central question of how to construct optimal training data.
+The model architecture and training algorithm (standard cross-entropy loss on response tokens)
+have remained virtually unchanged throughout this evolution;
+what has changed is always the \textbf{source}, \textbf{quality}, \textbf{diversity}, and \textbf{scale} of the data.
+
+This insight also points to deep connections between SFT and other threads:
+Thread 2 (preference optimization) supplements SFT's binary supervision by introducing preference signals;
+Thread 4 (reasoning) extends SFT's training objectives through CoT and process rewards;
+Thread 7 (efficiency) makes SFT feasible in resource-constrained scenarios through methods such as LoRA.
+These cross-thread connections will be elaborated in subsequent chapters.
+
+\paragraph{Preview of the next chapter.}
+SFT trains models using binary supervision (correct vs.\ incorrect),
+but human preferences inherently form a continuous spectrum---the
+distinction between ``a good answer'' and ``a better answer'' is far beyond what SFT's cross-entropy loss can express.
+Thread~2 will introduce preference optimization,
+tracing the evolutionary path from comparison-based reward learning through RLHF and DPO to RLVR,
+demonstrating how post-training has progressed from ``imitation learning'' to ``preference alignment''.

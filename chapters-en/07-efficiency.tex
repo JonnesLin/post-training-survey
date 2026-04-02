@@ -1,0 +1,755 @@
+% === Chapter 7: Efficiency & Data Engineering ===
+\section{Thread 7: Efficiency \& Data Engineering}
+\label{sec:t7}
+
+\begin{problembox}
+The computational overhead of post-training (SFT, RLHF, DPO, etc.) is prohibitively high:
+full fine-tuning a 175B-parameter model requires TB-scale GPU memory and hundreds of GPUs;
+the PPO phase of RLHF demands maintaining four large model replicas simultaneously---the policy model, reference model, reward model, and value model;
+high-quality human-annotated data is scarce and expensive to obtain.
+These cost barriers severely constrain both the research iteration speed and the deployment coverage of post-training techniques.
+\textbf{How can we achieve comparable or superior post-training results with lower computational cost and less data?}
+\end{problembox}
+
+\noindent
+This question has given rise to five major research directions in Thread~7:
+(1) parameter-efficient fine-tuning, which approximates full fine-tuning performance with a minimal number of trainable parameters;
+(2) data selection \& curation, which identifies the most valuable subsets from massive instruction datasets;
+(3) synthetic data generation, which leverages strong models to produce training data at scale;
+(4) distillation for alignment, which transfers alignment capabilities from large models to smaller ones;
+(5) compute-efficient RL, which simplifies the training architecture of RLHF.
+These directions are closely synergistic---for example, QLoRA makes it possible to perform RLHF on consumer-grade GPUs, while synthetic data provides low-cost training corpora for LoRA fine-tuning.
+
+\subsection{Problem Origin: The Cost Bottleneck of Post-Training}
+\label{sec:t7-origin}
+
+The cost bottleneck of post-training can be understood along three dimensions.
+
+\paragraph{Computational cost.}
+Full fine-tuning requires maintaining gradients and optimizer states for all model parameters.
+Taking the Adam optimizer as an example, each parameter requires storing three additional tensors: the gradient (FP16), the first moment (FP32), and the second moment (FP32).
+This means that the optimizer states alone for a 175B-parameter model require approximately 1.2TB of GPU memory.
+RLHF further amplifies this problem:
+the PPO training phase requires simultaneously loading the policy model, the reference model (a frozen copy), the reward model, and the value model---the memory footprint of four large models makes even a 7B-scale model require multiple A100 GPUs \cite{santacroce2023efficient}.
+\crossref{2}{sec:t2}
+
+\paragraph{Data cost.}
+The human annotation cost for high-quality instruction-following data is substantial:
+InstructGPT \cite{ouyang2022instructgpt} employed 40 annotators, and the labeling process involved complex quality control procedures.
+Preference data annotation is even more challenging---annotators must compare the quality of two model outputs, a task for which inter-annotator agreement tends to be low.
+\crossref{1}{sec:t1}
+
+\paragraph{Iteration speed.}
+The compounding of the above computational and data costs results in extremely long experiment cycles.
+A single RLHF training experiment may take days or even weeks, severely constraining the efficiency of hyperparameter search and methodology iteration.
+This constitutes a nearly insurmountable barrier, particularly for academic researchers and small teams.
+
+\evolution{Full fine-tuning 175B: requires 1.2TB memory, hundreds of GPUs}{LoRA: trainable parameters reduced to 0.01\%, single-GPU training}{Parameter efficiency}
+
+\subsection{Foundational Methods: LoRA and QLoRA}
+\label{sec:t7-foundation}
+
+\subsubsection{LoRA: Low-Rank Adaptation}
+\label{sec:t7-lora}
+
+\landmark{hu2022lora} introduced a key insight:
+\textbf{the weight updates during adaptation of pre-trained language models exhibit low-rank structure}.
+This implies that although the number of model parameters is enormous, the ``information content'' required for fine-tuning is far smaller than the full parameter space of the model.
+
+\paragraph{Core method.}
+For a pre-trained weight matrix $W_0 \in \mathbb{R}^{d \times k}$,
+LoRA constrains its update to a low-rank decomposition:
+\begin{equation}
+h = W_0 x + \Delta W x = W_0 x + B A x
+\label{eq:lora}
+\end{equation}
+where $B \in \mathbb{R}^{d \times r}$, $A \in \mathbb{R}^{r \times k}$,
+and rank $r \ll \min(d, k)$.
+During training, the original weights $W_0$ are completely frozen (receiving no gradient updates),
+and only $A$ and $B$ are trainable parameters.
+$A$ is initialized with random Gaussian values, while $B$ is initialized to the zero matrix,
+ensuring that $\Delta W = BA = 0$ at the start of training---i.e., the adapted model begins in a state identical to the pre-trained model.
+In practice, a scaling factor $\alpha / r$ is also introduced so that switching ranks does not require significant learning rate adjustments.
+
+\paragraph{Key experimental findings.}
+Experiments on GPT-3 175B demonstrated the following:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Parameter efficiency}:
+    LoRA requires only 4.7M trainable parameters (approximately 0.003\% of the 175B total),
+    reducing the checkpoint size from 350GB to 35MB and memory requirements from approximately 1.2TB to approximately 350GB.
+  \item \textbf{Performance}:
+    On tasks such as WikiSQL (+0.4\%) and SAMSum (+0.7\%),
+    LoRA matched or even surpassed full fine-tuning performance,
+    and outperformed prior parameter-efficient methods:
+    the \textbf{Adapter} approach proposed by Houlsby et al.\ \cite{houlsby2019adapters}, which inserts small bottleneck layers into each Transformer layer,
+    and \textbf{Prefix Tuning} by Li \& Liang \cite{li2021prefix}, which freezes model parameters and only optimizes continuous prefix embeddings at the input.
+    LoRA outperformed both in terms of performance, and more crucially, introduced no additional inference latency.
+  \item \textbf{Zero inference latency}:
+    At deployment time, $\Delta W = BA$ can be merged back into $W_0$,
+    yielding a weight matrix $W' = W_0 + BA$ with the same structure as the original model,
+    introducing no additional inference computation or latency.
+    This property is a significant advantage of LoRA over adapter and prefix tuning approaches.
+  \item \textbf{Rank selection}:
+    Experiments revealed that extremely low ranks ($r = 1$ or $r = 2$) are sufficient for many tasks,
+    indicating that the intrinsic dimensionality of adaptation is far lower than the model parameter space.
+    Applying LoRA to $W_q$ and $W_v$ (the query and value projection matrices in attention)
+    with $r = 4$ yielded the best results.
+\end{itemize}
+
+\paragraph{Why does low rank work?}
+Through their analysis, Hu et al.\ found that
+the subspace overlap between $\Delta W$ and $W_0$ is very low---that is, the directions required for adaptation primarily reside in subspaces that were not heavily emphasized during pre-training.
+This explains why extremely low-rank updates can effectively alter model behavior:
+the essence of post-training is not to rewrite all of the model's knowledge,
+but rather to ``modulate'' how the model expresses its existing capabilities within a low-dimensional subspace.
+This is highly consistent with the Superficial Alignment Hypothesis proposed by LIMA \cite{zhou2023lima}:
+\textbf{the amount of information required for alignment is far less than the knowledge imparted to the model during pre-training}.
+\crossref{1}{sec:t1}
+
+\begin{solutionbox}
+The core contribution of LoRA is transforming fine-tuning from a full parameter-space problem into a low-rank subspace problem:
+freezing the pre-trained weights $W_0$ and learning only the low-rank update $\Delta W = BA$,
+achieving 10,000$\times$ parameter compression and 3$\times$ memory savings,
+with zero additional inference latency at deployment.
+\end{solutionbox}
+
+\subsubsection{QLoRA: Fusing Quantization with LoRA}
+\label{sec:t7-qlora}
+
+\landmark{dettmers2023qlora} combined quantization techniques with LoRA,
+further compressing memory requirements to a fraction of what LoRA alone needs.
+The core objective was: \textbf{to fine-tune a 65B-parameter model on a single 48GB GPU},
+with no performance degradation relative to 16-bit full fine-tuning.
+
+\paragraph{Three key techniques.}
+QLoRA introduced three complementary innovations:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{4-bit NormalFloat (NF4)}:
+    An information-theoretically optimal quantization data type.
+    Its design is based on a key observation:
+    pre-trained neural network weights approximately follow a zero-mean normal distribution $\mathcal{N}(0, \sigma^2)$.
+    NF4 sets quantization anchor points by computing equal-probability quantiles of the standard normal distribution:
+    \begin{equation}
+    q_i = \frac{1}{2}\left(Q_X\!\left(\frac{i}{2^k+1}\right) + Q_X\!\left(\frac{i+1}{2^k+1}\right)\right)
+    \end{equation}
+    where $Q_X$ is the quantile function of the standard normal distribution and $k = 4$ is the number of quantization bits.
+    Each anchor interval contains an equal probability mass of weight values,
+    thereby maximizing the information carried by each quantization bit in an information-theoretic sense.
+    Experiments showed that NF4 consistently outperforms FP4 and Int4 in quantization error.
+
+  \item \textbf{Double Quantization (DQ)}:
+    The quantization constants generated during quantization themselves consume memory---every 64 parameters correspond to one FP32 scaling factor, amounting to an additional 0.5 bits per parameter.
+    DQ applies a second round of quantization to these quantization constants (using 8-bit quantization with a larger block size of 256),
+    reducing the overhead from 0.5 bits per parameter to approximately 0.127 bits,
+    saving approximately 3GB of memory on a 65B model.
+
+  \item \textbf{Paged Optimizers}:
+    Leveraging NVIDIA's unified memory mechanism,
+    optimizer states are automatically paged to CPU memory when GPU memory is insufficient,
+    preventing out-of-memory errors caused by uneven sequence lengths within mini-batches.
+    This is particularly important for handling memory spikes during the generation phase of RLHF.
+\end{enumerate}
+
+\paragraph{Complete computation flow.}
+The forward pass of QLoRA can be expressed as:
+\begin{equation}
+Y^{\text{BF16}} = X^{\text{BF16}} \cdot \text{doubleDequant}(c_1^{\text{FP32}}, c_2^{\text{k-bit}}, W^{\text{NF4}}) + X^{\text{BF16}} \cdot L_1^{\text{BF16}} \cdot L_2^{\text{BF16}}
+\end{equation}
+where the base model weights are stored in NF4 (dequantized to BF16 during the forward pass),
+while the LoRA adapters $L_1$ and $L_2$ are always computed in BF16.
+Gradients are backpropagated only through the LoRA adapters; the base weights remain frozen throughout training.
+
+\paragraph{Guanaco: Large-scale validation of QLoRA.}
+Based on QLoRA, Dettmers et al.\ trained the Guanaco family of models,
+performing single-GPU fine-tuning on the OASST1 dataset (approximately 9,000 multi-turn dialogues).
+Key results:
+\begin{itemize}[leftmargin=2em]
+  \item Guanaco 65B achieved 99.3\% of ChatGPT's performance on the Vicuna benchmark,
+    requiring only a single 48GB GPU and 24 hours of training.
+  \item Guanaco 33B surpassed all prior open-source models with just 12 hours of training on a single 24GB GPU.
+  \item \textbf{4-bit QLoRA matches the performance of 16-bit full fine-tuning}:
+    controlled experiments across multiple tasks and model scales demonstrated that
+    QLoRA introduces no systematic performance degradation.
+\end{itemize}
+
+\begin{solutionbox}
+QLoRA achieves fine-tuning of a 65B model on a single 48GB GPU through
+NF4 quantization (information-theoretically optimal) + Double Quantization (compressing quantization constants)
++ Paged Optimizers (handling memory spikes),
+with experiments confirming that 4-bit QLoRA fully matches the performance of 16-bit full fine-tuning.
+\end{solutionbox}
+
+\subsection{Limitations and Branches: Beyond Parameter Efficiency}
+\label{sec:t7-branches}
+
+LoRA and QLoRA addressed the parameter efficiency problem, but the efficiency challenges of post-training extend far beyond this.
+Parameter efficiency is only one dimension of computational cost---data acquisition and selection, training data quality and diversity, distillation efficiency, and the architectural complexity of RL training are all independent and significant efficiency bottlenecks.
+Consequently, Thread~7 diverged into five parallel research branches following the foundational methods.
+
+\subsubsection{Branch A: Subsequent Developments in Parameter-Efficient Fine-Tuning}
+\label{sec:t7-peft}
+
+After LoRA established the low-rank adaptation paradigm, subsequent work improved upon it from multiple angles.
+
+\paragraph{DoRA: Weight-Decomposed Low-Rank Adaptation.}
+Liu et al.\ \cite{liu2024dora} observed significant differences between full fine-tuning and LoRA in the magnitude and direction change patterns of weight updates.
+DoRA decomposes the weight matrix into magnitude and direction components: $W = m \cdot \frac{V}{\|V\|}$,
+where the magnitude $m$ is learned independently and the direction $V$ is adjusted through LoRA's low-rank updates.
+This decomposition enables DoRA to consistently outperform LoRA across various NLP and vision tasks without introducing additional inference overhead (weights can likewise be merged at deployment);
+see \crossref{5}{sec:t5} for post-training methods on vision-language models.
+
+\paragraph{PERL: Parameter-Efficient RLHF.}
+Sidahmed et al.\ \cite{sidahmed2024perl} systematically applied LoRA to the PPO phase of RLHF,
+demonstrating that using LoRA for both the reward model and the policy model can reduce the memory requirements of RLHF by over 50\%, with final alignment performance comparable to full fine-tuning RLHF.
+This result shows that the combination of parameter-efficient methods with RL-based alignment is viable.
+\crossref{2}{sec:t2}
+
+\paragraph{DoRAN: Stabilized DoRA.}
+Diep et al.\ \cite{diep2025doran} proposed \textbf{DoRAN},
+which introduces noise injection and auxiliary networks on top of DoRA's magnitude-direction decomposition,
+addressing DoRA's instability issues under certain training configurations.
+DoRAN significantly improves training robustness while preserving DoRA's accuracy advantages, performing particularly well in RL-based post-training scenarios.
+
+\subsubsection{Branch B: Data Selection \& Curation}
+\label{sec:t7-data-selection}
+
+\begin{problembox}
+The effectiveness of instruction tuning is highly dependent on data quality, yet high-quality data annotation is expensive.
+Given large-scale automatically generated or web-crawled instruction datasets,
+how can we select the most valuable subsets to maximize training efficiency?
+\end{problembox}
+
+\paragraph{LIMA: The Superficial Alignment Hypothesis.}
+\landmark{zhou2023lima} fine-tuned LLaMA 65B using only 1,000 carefully curated instruction-response pairs,
+and the resulting model was preferred over or tied with DaVinci003 in 43\% of cases in human evaluation.
+The resulting \textbf{Superficial Alignment Hypothesis}---that alignment merely teaches the model to present its existing capabilities in the correct format---fundamentally reframed the optimization objective of data engineering:
+the key factor is not data volume, but rather \textbf{data quality and diversity}.
+Detailed experimental results and an in-depth discussion of the hypothesis can be found in Thread~1 (\S\ref{sec:t1-quality}).
+
+\paragraph{Subsequent data selection methods.}
+LIMA's findings inspired a series of automated data selection methods:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{AlpaGasus} \cite{chen2024alpagasus}:
+    Used ChatGPT as a quality evaluator to score Alpaca's 52K data samples,
+    retaining only 9K high-quality samples for training, which outperformed training on the full 52K dataset.
+
+  \item \textbf{DEITA} \cite{liu2024deita}:
+    Proposed a three-dimensional data evaluation framework---complexity (instruction complexity),
+    quality (response quality), and diversity (sample diversity).
+    Through scoring and diversity-aware sampling, selecting only 6K samples matched the performance of 10K randomly sampled examples.
+
+  \item \textbf{IFD (Instruction Following Difficulty)} \cite{li2023ifd}:
+    Used the model's own perplexity changes as a proxy for data value---if a sample's IFD score is high (i.e., the model's perplexity changes substantially before and after incorporating the instruction),
+    it indicates that the sample contains information the model has not yet mastered, making it more valuable for training.
+
+  \item \textbf{Superfiltering} \cite{li2024superfiltering}:
+    Discovered that IFD rankings produced by small models (e.g., GPT-2) are highly consistent with those from large models,
+    enabling the use of small models for preliminary filtering and substantially reducing the computational cost of the selection stage.
+
+  \item \textbf{LESS} \cite{xia2024less}:
+    Based on the theoretical framework of influence functions,
+    selects the most relevant training samples according to the validation loss gradient on the target task.
+    Only 5\% of the data is needed to match or even exceed the performance achieved with the full dataset.
+\end{itemize}
+
+\subsubsection{Branch C: Synthetic Data Generation}
+\label{sec:t7-synthetic}
+
+\begin{problembox}
+Human-annotated instruction data is high in quality but expensive to obtain and difficult to scale.
+Can existing strong models (e.g., GPT-4) be leveraged to automatically generate large-scale, high-quality training data?
+\end{problembox}
+
+\paragraph{Self-Instruct: Generating data from the model itself.}
+\landmark{wang2023selfinstruct} proposed a bootstrapping pipeline:
+starting from a small set (175) of manually written seed instructions,
+the dataset is iteratively expanded through four steps:
+(1) having the model generate new task instructions,
+(2) determining whether the new instruction is a classification task,
+(3) generating corresponding input instances,
+(4) generating outputs.
+Through ROUGE-L deduplication and heuristic filtering,
+52K instruction data samples were ultimately generated from GPT-3 (text-davinci-001).
+Fine-tuning GPT-3 on this self-generated data substantially outperformed the original GPT-3 in user-oriented evaluation,
+approaching the level of InstructGPT.
+Self-Instruct directly gave rise to open-source projects such as Stanford Alpaca \cite{taori2023alpaca},
+establishing the ``training LLMs with LLMs'' data production paradigm.
+
+\paragraph{Orca: Explanation Tuning.}
+\landmark{mukherjee2023orca} identified a key limitation of Self-Instruct and Alpaca-style methods:
+they only distill the teacher model's final outputs,
+discarding the reasoning process behind those outputs.
+Orca proposed \textbf{explanation tuning}---using carefully designed system instructions (such as ``explain step by step,'' ``think like you are answering to a five year old,'' and 16 other diverse reasoning prompts)
+to guide GPT-4 to produce not only answers but also detailed reasoning processes (explanation traces).
+Training data was sourced from 5M samples from FLAN-v2 (with ChatGPT-generated traces) plus 1M samples (with GPT-4-generated traces),
+employing a \textbf{progressive learning} strategy:
+training first on the easier ChatGPT traces, then continuing on the more challenging GPT-4 traces.
+Orca 13B achieved ChatGPT-level performance on BigBench Hard,
+demonstrating that \textbf{distilling reasoning processes} is more effective than merely distilling outputs.
+The subsequent Orca 2 \cite{mitra2023orca2} further enabled small models to adaptively select reasoning strategies (e.g., step-by-step, direct answer) based on task difficulty,
+surpassing larger-scale models on multiple reasoning benchmarks.
+\crossref{4}{sec:t4}
+
+\paragraph{Phi-1: Textbook-quality data.}
+\landmark{gunasekar2023phi1} validated the decisive role of data quality from a unique angle.
+The direct precursor to this work was TinyStories \cite{eldan2023tinystories}---Eldan \& Li demonstrated that extremely small models ($<$10M parameters) trained solely on short children's stories generated by GPT-3.5/GPT-4 could fluently generate coherent English, providing the first quantitative evidence of the decisive impact of synthetic data quality on small model capabilities.
+Inspired by this, Gunasekar et al.\ did not filter from real web data
+but instead used GPT-3.5 to directly generate ``textbook quality'' synthetic data---structured, progressive, and comprehensive textbook-grade code training data that covers core concepts.
+A model with only 1.3B parameters achieved 50.6\% pass@1 on HumanEval,
+surpassing many models more than ten times its size.
+Phi-1.5 \cite{li2023phi15} extended this approach to the general NLP domain,
+where a 1.3B model trained on synthetic textbook data approached the performance of 5$\times$--10$\times$ larger models on reasoning benchmarks,
+further demonstrating that \textbf{data quality can compensate for model scale}.
+
+\paragraph{WizardLM: Evol-Instruct.}
+\landmark{xu2024wizardlm} proposed the Evol-Instruct method---performing multiple rounds of ``evolutionary'' rewriting on initial instructions,
+progressively increasing instruction complexity and diversity by adding constraints, introducing multi-step reasoning, and concretizing scenarios.
+This data augmentation strategy does not require re-annotation by humans
+but instead leverages the LLM itself to systematically complexify existing instructions.
+WizardLM 7B approached ChatGPT-level performance in human evaluation,
+demonstrating a pathway to improving model capabilities by enhancing data \textbf{complexity} (rather than quantity).
+
+\paragraph{UltraChat and UltraFeedback: Large-scale synthetic datasets.}
+UltraChat \cite{ding2023ultrachat} constructed approximately 1.5M multi-turn dialogue data samples covering diverse topics including world knowledge, creative writing, and data analysis,
+providing large-scale, diversified training resources for SFT.
+UltraFeedback \cite{cui2023ultrafeedback} targeted preference learning---collecting responses from multiple models to the same prompt and using GPT-4 for preference annotation,
+generating large-scale preference pair data.
+Together, these two datasets form the data foundation of the Zephyr \cite{tunstall2023zephyr} pipeline.
+
+\paragraph{Self-Alignment with Instruction Backtranslation (Humpback).}
+Li et al.\ \cite{li2023humpback} proposed a reverse data generation method:
+first sampling high-quality text from the web corpus as ``responses,''
+then training a model to reverse-generate instructions for these responses (backtranslation),
+followed by quality filtering of the generated (instruction, response) pairs.
+After two iterations,
+Humpback surpassed all open-source models trained with non-distillation methods on AlpacaEval.
+
+\paragraph{RLAIF vs.\ RLHF: Substituting AI feedback for human feedback.}
+\landmark{lee2023rlaif} systematically compared the effectiveness of AI-generated preference annotations (RLAIF) with human annotations (RLHF).
+The core finding was that
+on tasks such as summarization and helpful dialogue,
+\textbf{the final model performance of RLAIF shows no significant difference from RLHF}---AI-annotated preference data can effectively substitute for human annotations.
+This conclusion provides theoretical support for fully synthetic alignment pipelines
+and lays the foundation for zero-human-annotation methods such as Zephyr.
+\crossref{2}{sec:t2}
+
+\subsubsection{Branch D: Distillation for Alignment}
+\label{sec:t7-distillation}
+
+\begin{problembox}
+Large models (e.g., GPT-4) deliver exceptional performance but are prohibitively expensive to deploy.
+Can the alignment capabilities of large models be ``distilled'' into smaller models,
+enabling low-cost deployment of small models while preserving the alignment quality of large models?
+\end{problembox}
+
+\paragraph{Zephyr: Direct Distillation of LM Alignment.}
+\landmark{tunstall2023zephyr} proposed a three-stage distillation pipeline that
+\textbf{requires no human annotation whatsoever} to transfer alignment capabilities from large models to a 7B model:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Distilled SFT (dSFT)}:
+    SFT was performed on the Mistral-7B \cite{jiang2023mistral} base model using the UltraChat dataset (approximately 200K multi-turn dialogues generated by ChatGPT).
+    Mistral-7B itself is a pivotal base model---through architectural optimizations such as sliding window attention and grouped-query attention,
+    it surpassed LLaMA-2 13B on multiple benchmarks with only 7B parameters,
+    providing a high-quality training starting point for Zephyr.
+    The data underwent deduplication and quality filtering to ensure diversity and quality in the training corpus.
+
+  \item \textbf{AI Feedback (AIF)}:
+    Using the UltraFeedback dataset---for each prompt, responses from 4 different models were collected,
+    and GPT-4 scored the response quality (on a 1--10 scale).
+    The highest-scored and lowest-scored responses were paired to form preference pairs.
+    This step was entirely performed by AI, with \textbf{zero human annotation}.
+
+  \item \textbf{Distilled DPO (dDPO)}:
+    The dSFT model was trained with DPO using the above AI Feedback data.
+    The dSFT checkpoint served as the reference model for DPO,
+    training on approximately 64K preference pairs.
+\end{enumerate}
+
+\noindent
+Zephyr-7B-$\beta$ achieved a score of 7.34 on MT-Bench,
+\textbf{surpassing LLaMA2-Chat-70B} (6.86),
+and approaching GPT-3.5-turbo (7.94)---this was the first time a 7B model outperformed a 70B RLHF model on a dialogue quality benchmark.
+
+\paragraph{Key ablation experiments.}
+The ablation experiments of Zephyr revealed several important findings:
+\begin{itemize}[leftmargin=2em]
+  \item There was a substantial gap between dSFT alone without dDPO (score 5.32) and the full pipeline (7.34),
+    indicating that \textbf{preference optimization is indispensable},
+    even when the data comes from distillation.
+  \item Applying DPO directly to the base model without dSFT (score 4.76) performed poorly,
+    indicating that the SFT stage provides an essential warm start.
+  \item During DPO training, the training accuracy converged to nearly 1.0 (i.e., the model fully fit the preference data),
+    yet the MT-Bench score \textbf{did not decline}---this ``overfitting without degradation'' phenomenon suggests
+    that DPO exhibits good generalization under distribution-shifted evaluation.
+\end{itemize}
+
+\paragraph{Limitations of distillation: The False Promise.}
+However, Gudibande et al.\ \cite{gudibande2023false} raised a pointed critique of the distillation paradigm.
+They found that small models trained by imitating ChatGPT outputs (e.g., Alpaca-family models),
+while quickly approaching the teacher in \textbf{style} (fluency, formatting),
+showed no significant narrowing of the gap in \textbf{factuality} and \textbf{reasoning ability}---imitation primarily learned ``how to speak'' rather than ``how to think.''
+This finding provides corroborating evidence for Orca's explanation tuning from the negative side:
+output-level imitation alone is indeed insufficient;
+process-level imitation (distilling reasoning processes) is necessary to transfer deeper capabilities.
+
+\paragraph{Other distillation methods.}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{MiniLLM} \cite{gu2023minillm}:
+    Replaced standard forward KL divergence with reverse KL divergence,
+    training the student model to better fit the high-probability regions of the teacher distribution,
+    consistently outperforming standard distillation on text generation tasks.
+
+  \item \textbf{GKD (Generalized Knowledge Distillation)} \cite{agarwal2023gkd}:
+    Proposed on-policy distillation---computing the KL divergence loss on the student model's own output distribution
+    rather than on the teacher's output distribution.
+    This alleviates the distribution shift between train-time (teacher distribution) and test-time (student distribution).
+
+  \item \textbf{Lion} \cite{jiang2023lion}:
+    Introduced an adversarial training framework,
+    alternately training the student model (to imitate the teacher) and
+    a discriminator (to distinguish student outputs from teacher outputs),
+    improving distillation quality through adversarial signals.
+\end{itemize}
+
+\subsubsection{Branch E: Compute-Efficient Reinforcement Learning}
+\label{sec:t7-compute-rl}
+
+\begin{problembox}
+PPO is the standard RL algorithm for RLHF, but its training architecture is extremely complex:
+it requires simultaneously maintaining 4 models (policy, reference, reward, value),
+incurs massive memory overhead, suffers from high training instability, and is sensitive to hyperparameters.
+Can simpler RL algorithms be designed to replace PPO?
+\end{problembox}
+
+\paragraph{GRPO: Group Relative Policy Optimization.}
+\landmark{shao2024grpo} proposed an elegant solution:
+\textbf{completely removing the critic (value) model from PPO},
+instead using the relative rewards among a group of outputs for the same prompt as the advantage baseline
+(algorithmic details and the complete derivation are provided in \S\ref{sec:t2-grpo};
+the special significance for reasoning scenarios is discussed in \S\ref{sec:t4-grpo}).
+
+\paragraph{Efficiency gains.}
+GRPO delivers threefold efficiency improvements:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Elimination of the value model}:
+    Memory is directly reduced by approximately 25\% (for equally-sized models),
+    and the training architecture is simplified from 4 models to 3 (policy + reference + reward).
+  \item \textbf{No per-token advantage estimation required}:
+    PPO requires the value model to produce a value estimate for each token to compute GAE.
+    GRPO directly uses outcome-level group-relative rewards,
+    completely avoiding the error accumulation inherent in value estimation.
+  \item \textbf{Natural compatibility with verifiable rewards}:
+    For tasks with verifiable correctness such as mathematics and programming,
+    rewards can be directly based on answer correctness (0/1 or rule-based),
+    eliminating the need for a trained reward model.
+    The final setup requires maintaining only 2 models (policy + reference),
+    bringing the overhead close to that of DPO.
+\end{itemize}
+
+\noindent
+GRPO achieved 51.7\% on MATH and 88.2\% on GSM8K with DeepSeekMath 7B,
+significantly outperforming PPO and DPO baselines.
+It was subsequently adopted by DeepSeek-R1 \cite{deepseek2025r1} as the core algorithm for large-scale reasoning training.
+GRPO's success validates an efficiency principle:
+\textbf{removing unnecessary components (the value model) not only reduces cost but can also improve performance}---because value estimation itself is an additional source of error.
+
+\paragraph{Other compute-efficient RL methods.}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Efficient RLHF} \cite{santacroce2023efficient}:
+    Through engineering techniques such as gradient checkpointing,
+    mixed-precision training, and distributed policy optimization,
+    reduced PPO's memory usage by approximately 50\% without modifying the algorithm.
+
+  \item \textbf{ReMax} \cite{li2023remax}:
+    Replaced PPO with a variant of REINFORCE,
+    using the sample mean as a baseline (similar in spirit to GRPO),
+    eliminating the value model and GAE computation.
+    Theoretical analysis of ReMax demonstrated that under the specific settings of LLM alignment,
+    this simplification does not introduce excessive variance.
+
+  \item \textbf{REINFORCE++} \cite{hu2025reinforcepp}:
+    Built upon REINFORCE by introducing token-level KL penalties and PPO-style clipping,
+    incorporating PPO's stability improvements while maintaining the simplicity of REINFORCE,
+    achieving a favorable balance between performance and efficiency.
+
+  \item \textbf{OpenRLHF} \cite{hu2024openrlhf}:
+    An open-source RLHF training framework
+    supporting multiple algorithms including PPO, GRPO, and REINFORCE++,
+    with efficient distributed training orchestration via Ray.
+\end{itemize}
+
+\evolution{PPO: 4 models + GAE + complex training loop}{GRPO: 3 models + group-relative reward + simple objective}{Removal of the value model}
+
+\subsection{Convergence and Frontiers: Scaling Laws for Post-Training}
+\label{sec:t7-scaling}
+
+After efficiency challenges were addressed at the technical level (parameter efficiency, data engineering, RL simplification),
+a more fundamental question emerged:
+\textbf{How does post-training performance scale with compute budget, data volume, and model size?}
+Answering this question requires establishing scaling laws for the post-training domain.
+
+\subsubsection{Data-Constrained Scaling Laws}
+\label{sec:t7-scaling-data}
+
+\landmark{muennighoff2023scaling} extended Chinchilla's scaling laws to
+\textbf{data-constrained} scenarios.
+Muennighoff et al.\ systematically studied the effects of data repetition (multi-epoch training)
+across 400+ training experiments
+(model scales from 10M to 9B, with training token counts reaching 900B).
+
+\paragraph{Core findings.}
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Effective data volume}:
+    When unique data $U_D$ is repeated for $R_D$ epochs,
+    the equivalent amount of ``new data'' can be described by the following formula:
+    \begin{equation}
+    D' = U_D + U_D \cdot R_D^* \cdot \left(1 - e^{-R_D / R_D^*}\right)
+    \label{eq:effective-data}
+    \end{equation}
+    where $R_D^* \approx 15$ is the characteristic epoch count.
+    Intuitively, the first 4 epochs of data repetition are approximately equivalent to using new data,
+    but beyond approximately 16 epochs, the marginal benefit of each additional epoch diminishes sharply.
+
+  \item \textbf{Optimal resource allocation under data constraints}:
+    In data-constrained scenarios (i.e., when available unique data is limited),
+    the optimal strategy is to allocate more compute to increasing the number of epochs
+    rather than increasing model parameters.
+    This stands in sharp contrast to the data-unconstrained scenario,
+    where Chinchilla recommends proportional scaling of model and data.
+
+  \item \textbf{Code mixing}:
+    Incorporating code data into natural language training yields approximately 2$\times$
+    effective token gains---the structured nature of code data provides useful inductive biases for natural language tasks.
+
+  \item \textbf{Data deduplication vs.\ filtering}:
+    On downstream task evaluation,
+    perplexity-based filtering is more effective than deduplication---while deduplication intuitively reduces redundant information,
+    its impact on final task performance is less pronounced than quality filtering.
+\end{enumerate}
+
+\paragraph{Implications for post-training.}
+Although this work primarily studied pre-training,
+its conclusions have direct relevance for post-training data engineering:
+(1) in scenarios where instruction tuning data is limited, moderate multi-epoch training is justified;
+(2) data augmentation (e.g., paraphrasing, backtranslation) can effectively increase data diversity,
+breaking through the diminishing returns of epoch repetition;
+(3) data quality filtering should take priority over simple deduplication.
+
+\subsubsection{Post-Training-Specific Scaling Studies}
+\label{sec:t7-scaling-pt}
+
+\paragraph{Does RLHF Scale?}
+Hou et al.\ \cite{hou2024doesrlhfscale} systematically investigated
+the relationship between RLHF effectiveness and model scale as well as data volume.
+Key findings include:
+RLHF benefits increase with model scale (scaling with model size),
+but the reward model overoptimization problem also intensifies---larger policy models become more adept at ``exploiting'' the reward model's weaknesses.
+This implies an important scaling tension:
+\textbf{larger models require stronger reward models for effective optimization guidance};
+otherwise, reward hacking will offset the gains from scale.
+\crossref{2}{sec:t2}
+
+\paragraph{Scaling Laws for Reward Model Overoptimization.}
+Rafailov et al.\ \cite{rafailov2024scaling} extended the scaling behavior of reward model overoptimization
+to DPO and other direct alignment algorithms (DAAs).
+The study found that DAAs also exhibit overoptimization---when KL divergence exceeds a certain threshold,
+the true reward (gold standard evaluation) begins to decline
+while the proxy reward (the reward signal used during training) continues to rise.
+This finding underscores that even in the DPO framework, which does not use an explicit reward model,
+the tension between optimization and generalization persists.
+
+\subsubsection{2025: New Advances in RL Efficiency and Reasoning Distillation}
+\label{sec:t7-rl-distill-2025}
+
+\paragraph{RLVR as compute-efficient RL.}
+RLVR methods such as DAPO \cite{yu2025dapo} and GSPO \cite{zheng2025gspo}
+(\crossref{2}{sec:t2-rlvr}) have not only achieved breakthroughs in reasoning performance
+but also provided new answers to the efficiency challenges of RL-based post-training.
+DAPO further simplified the GRPO training pipeline by removing the KL constraint and the value model,
+making RLVR training lower in both compute and memory overhead compared to traditional PPO-based RLHF.
+This trend suggests that: \textbf{for verifiable tasks, RLVR is simultaneously the most effective and most efficient RL method}.
+
+\paragraph{Scaling up reasoning distillation.}
+After DeepSeek-R1 \cite{deepseek2025r1} confirmed the distillability of reasoning capabilities,
+reasoning distillation rapidly became the most economical pathway for acquiring reasoning abilities.
+R1 distilled models (e.g., R1-Distill-Qwen-32B) require only standard SFT training
+to significantly outperform non-distilled models of comparable scale on reasoning benchmarks.
+Marco-o1 v2 \cite{yin2025marcoo1v2} further explored methods for expanding the distillation bottleneck.
+The implication for the efficiency domain is that:
+\textbf{``large model RL training $\to$ small model SFT distillation'' may be the optimal compute allocation strategy for acquiring reasoning capabilities}.
+
+\paragraph{Adjustable reasoning budgets.}
+The long2short strategy of Kimi k1.5 \cite{moonshot2025kimi} and
+the thinking mode fusion of Qwen3 \cite{yang2025qwen3}
+have opened the research direction of ``adjustable reasoning budgets'':
+models can dynamically adjust inference-time compute based on problem difficulty,
+responding quickly to simple problems and thinking deeply on complex ones.
+This extends Thread~7's efficiency optimization from training-time to inference-time.
+
+\subsection{Open Problems}
+\label{sec:t7-open}
+
+\begin{openproblembox}
+\textbf{Model Collapse: The Recursive Trap of Synthetic Data.}\\
+Shumailov et al.\ \cite{shumailov2023modelcollapse} revealed a fundamental risk:
+when models are repeatedly trained on data generated by themselves or predecessor models,
+the output distribution progressively degrades (mode collapse),
+and low-frequency but valuable information is irreversibly lost.
+As the proportion of synthetic data in post-training continues to rise
+(Self-Instruct, UltraChat, and WizardLM's Evol-Instruct all rely on model-generated data),
+the risk of model collapse grows increasingly severe.
+How to maintain output distribution diversity while using synthetic data at scale---whether through Molmo-style purely human-annotated data as an ``anchor,'' or through theoretically guided synthetic-real data mixing ratios---remains an open problem.
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Optimal Composition of Synthetic Data.}
+The optimal balance among the three dimensions of synthetic data---quality, diversity, and complexity---remains unclear.
+Phi-1's ``textbook quality'' strategy, WizardLM's ``complexity evolution'' strategy, and LIMA's ``less is more'' strategy each emphasize different data characteristics---yet no unified theoretical framework currently exists to guide the optimal generation strategy for synthetic data.
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Scaling Laws for RL-Based Post-Training.}
+GRPO and DeepSeek-R1 have demonstrated the enormous potential of RL-based post-training for reasoning,
+but its scaling behavior has not yet been systematically characterized.
+Key questions include:
+What is the optimal allocation strategy for RL training compute?
+How should the group size $G$ scale with model size and task complexity?
+How does the coverage range of verifiable rewards affect scaling behavior?
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Unification of Data Quality Metrics.}
+Existing data selection methods (IFD, DEITA, LESS, etc.) each define different quality metrics,
+and the correlations and complementarities among these metrics have not been thoroughly studied.
+A universal, composable data quality metric would greatly advance the systematic development of data engineering.
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Capability Boundaries of Distillation vs.\ Native Training.}
+Zephyr and Orca have demonstrated the powerful potential of distillation,
+but does a theoretical upper bound exist on the capabilities of distilled models?
+In other words, can a student ever surpass the teacher in capability dimensions where the teacher itself is weak?
+Preliminary explorations in weak-to-strong generalization \cite{burns2023weak} suggest that
+students can surpass teachers in certain cases,
+but systematic theoretical analysis remains lacking.
+\crossref{3}{sec:t3}
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Adaptive Reasoning Budget Optimization.}
+Thinking models have introduced a new efficiency dimension: adaptive allocation of inference-time compute.
+Current methods (e.g., s1's budget forcing \cite{muennighoff2025s1}, Qwen3's thinking mode fusion)
+provide coarse-grained reasoning budget control, but the optimal adaptive strategy remains unclear.
+Key questions include: How can models be trained during post-training to autonomously assess problem difficulty?
+How can token-level rather than sequence-level fine-grained control of reasoning budgets be achieved?
+Can reasoning budget optimization be jointly optimized with PEFT and distillation techniques?
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{A Unified Benchmark for Post-Training Efficiency.}
+No standardized benchmark currently exists for fairly comparing the cost-effectiveness of different efficiency techniques.
+An ideal benchmark should simultaneously measure FLOPs, peak memory, wall-clock time,
+final task performance, and data annotation cost,
+enabling researchers to compare the ROI of different strategy combinations---such as LoRA vs.\ full FT,
+synthetic data vs.\ human data, and PPO vs.\ GRPO---within a unified framework.
+\end{openproblembox}
+
+\subsection{Chapter Summary}
+
+\begin{figure}[!ht]
+\centering
+\begin{tikzpicture}[
+  node distance=0.6cm and 1.2cm,
+  every node/.style={font=\small},
+  milestone/.style={rectangle, rounded corners, draw=thread7, fill=thread7!10,
+    text width=4.2cm, minimum height=0.8cm, align=center, font=\small\bfseries},
+  branch/.style={rectangle, rounded corners, draw=gray!60, fill=gray!5,
+    text width=3.2cm, minimum height=0.7cm, align=center, font=\small},
+  arrow/.style={-{Stealth[length=2.5mm]}, thick, thread7!70},
+  brancharrow/.style={-{Stealth[length=2mm]}, gray!60, thick},
+]
+% Main timeline
+\node[milestone] (lora) {LoRA (2022)\\Parameter-Efficient Fine-Tuning};
+\node[milestone, below=1.2cm of lora] (lima) {LIMA (2023)\\1000 Samples Suffice};
+\node[milestone, below=1.2cm of lima] (qlora) {QLoRA (2023)\\4-bit Quantized Adaptation};
+
+% Branches
+\node[branch, below left=1.2cm and 0.5cm of qlora] (brA) {Branch A: Synthetic Data\\Self-Instruct, Alpaca};
+\node[branch, below right=1.2cm and 0.5cm of qlora] (brB) {Branch B: Data Curation\\Phi-1, IFD, DEITA};
+
+% Convergence
+\node[milestone, below=2.8cm of qlora] (zephyr) {Zephyr (2023)\\Distillation Pipeline};
+\node[milestone, below=1.2cm of zephyr] (grpo) {GRPO (2024)\\Algorithmic Simplification};
+\node[branch, below=1.2cm of grpo] (conv) {Convergence: Data + Parameter + Algorithm\\Three-Way Efficiency Fusion};
+
+% Arrows
+\draw[arrow] (lora) -- (lima);
+\draw[arrow] (lima) -- (qlora);
+\draw[brancharrow] (qlora) -- (brA);
+\draw[brancharrow] (qlora) -- (brB);
+\draw[arrow] (qlora) -- (zephyr);
+\draw[arrow] (zephyr) -- (grpo);
+\draw[brancharrow] (brA) -- (zephyr);
+\draw[brancharrow] (brB) -- (zephyr);
+\draw[arrow] (grpo) -- (conv);
+\end{tikzpicture}
+\caption{Thread 7 evolution path: from parameter efficiency breakthroughs to three-way fusion of data, parameter, and algorithm efficiency.
+Brown nodes denote landmark works; gray nodes denote important branches.}
+\label{fig:efficiency-evolution}
+\end{figure}
+
+\begin{table}[!ht]
+\centering
+\caption{Comparison of core methods in Thread 7. The Efficiency Dimension distinguishes parameter efficiency, data efficiency, and algorithmic efficiency.}
+\label{tab:efficiency-comparison}
+\small
+\begin{tabularx}{\textwidth}{l >{\raggedright\arraybackslash}p{2.2cm} >{\raggedright\arraybackslash}p{2.2cm} >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Method} & \textbf{Efficiency Dim.} & \textbf{Resource Savings} & \textbf{Key Innovation} \\
+\midrule
+LoRA & Parameter & 0.1\% trainable params & Low-rank adapter matrices; frozen backbone \\
+QLoRA & Parameter & 4-bit base + LoRA & NF4 quantization; paged optimizers \\
+LIMA & Data & 1K samples suffice & Superficial Alignment Hypothesis \\
+Self-Instruct & Data & \$600 API cost & Bootstrap 52K instructions from 175 seeds \\
+Zephyr & Data + Algorithm & No human annotation & GPT-4 distillation + DPO; 7B $>$ 70B \\
+GRPO & Algorithm & No value network & Group-normalized advantage replaces critic \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The evolution of Thread~7 reveals the inevitable trend in post-training from ``brute-force scaling'' to ``precision engineering'':
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{The data efficiency revolution} (2023):
+    LIMA demonstrated that 1,000 carefully selected samples can rival the SFT performance of tens of thousands of data points.
+    AlpaGasus and IFD established methodologies for data quality assessment.
+    Phi-1's ``textbook-quality data'' approach pushed data curation to its extreme.
+
+  \item \textbf{Parameter efficiency breakthroughs} (2023--2024):
+    LoRA compressed trainable parameters to below 0.1\%.
+    QLoRA enabled efficient fine-tuning under 4-bit quantization.
+    DoRA further separated directional and magnitude adaptation.
+
+  \item \textbf{Algorithmic efficiency optimization} (2024--2025):
+    GRPO and REINFORCE++ simplified PPO's four-model architecture to two- or single-model designs.
+    ReMax completely eliminated the critic network.
+    Distillation techniques enabled small models to acquire the reasoning capabilities of large models.
+
+  \item \textbf{System-level integration} (2025--2026):
+    The three efficiency pathways---data, parameter, and algorithm---have begun to converge.
+    The combination of efficient algorithms + PEFT + curated data has become the standard practice.
+    Model merging techniques provide a new paradigm for combining capabilities without additional training.
+\end{enumerate}
+
+The core insight from efficiency research is that the bottleneck of post-training is often not compute volume, but data quality and algorithm design.
+This thread is deeply intertwined with Thread~1 (foundational methods of data curation, \crossref{1}{sec:t1}),
+Thread~2 (simplification of preference optimization algorithms, \crossref{2}{sec:t2}), and
+Thread~4 (distillation of reasoning capabilities, \crossref{4}{sec:t4}).
+
+\paragraph{Preview of the next chapter.}
+With this, all seven evolutionary threads have been fully presented.
+The final chapter will return to a global perspective, synthesizing the cross-thread convergence trends,
+distilling the macro-level evolutionary patterns of the post-training field, and outlining key future research directions.

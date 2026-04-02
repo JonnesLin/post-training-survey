@@ -1,0 +1,315 @@
+% === Chapter 0: Introduction ===
+\section*{Introduction}
+\label{sec:t0}
+\addcontentsline{toc}{section}{Introduction}
+
+The capabilities of Large Language Models (LLMs) and Vision-Language Models (VLMs)
+are not fully unleashed during the pre-training stage alone.
+Pre-training endows a model with statistical understanding of language and broad world knowledge,
+but a model that has only undergone pre-training is essentially a high-quality next-token predictor ---
+it does not know how to follow human instructions, cannot reliably distinguish harmful outputs from safe responses,
+and is unable to exhibit structured reasoning processes in complex reasoning tasks.
+\textbf{Post-training} is precisely the critical stage that bridges this gap:
+it transforms a raw language model into a truly useful AI assistant.
+
+\subsection{Definition and Importance of Post-Training}
+\label{sec:t0-definition}
+
+This book defines \textbf{post-training} as the collective term for all training stages
+conducted after the completion of pre-training and before model deployment or inference,
+aimed at enhancing specific model capabilities.
+This definition encompasses the following core technical areas:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Supervised Fine-Tuning (SFT)}:
+    Using human-annotated (instruction, response) data to perform supervised fine-tuning on the model,
+    enabling it to learn to follow instructions and produce well-formatted outputs
+    \cite{wei2022flan,ouyang2022instructgpt,sanh2022multitask}.
+
+  \item \textbf{Reinforcement Learning from Human Feedback (RLHF)}:
+    Training a reward model to capture human preferences, then optimizing the model policy
+    through reinforcement learning algorithms such as PPO,
+    so that the outputs better align with human expectations
+    \cite{christiano2017rlhf,ouyang2022instructgpt,bai2022constitutional}.
+
+  \item \textbf{Direct Preference Optimization (DPO) and Its Variants}:
+    Bypassing the explicit reward model and directly optimizing the policy from preference data pairs,
+    substantially simplifying the training pipeline for alignment
+    \cite{rafailov2023dpo,azar2023ipo,ethayarajh2024kto}.
+
+  \item \textbf{Other Post-Training Techniques}:
+    Including Constitutional AI \cite{bai2022constitutional},
+    process reward models \cite{lightman2023prm},
+    Group Relative Policy Optimization (GRPO) \cite{shao2024grpo},
+    as well as specialized training methods targeting specific capabilities (reasoning, safety, tool use, multimodal).
+\end{itemize}
+
+\noindent
+The boundaries between post-training and its upstream and downstream stages need to be clearly delineated:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Distinction from Pre-Training}:
+    Pre-training is conducted on large-scale unlabeled corpora, with the objective of general language modeling (typically next-token prediction or masked language modeling).
+    Post-training, in contrast, uses relatively small-scale but high-quality annotated data or preference signals, with the objective of endowing the model with specific behavioral patterns.
+    The two differ by orders of magnitude in data scale, training objectives, and computational cost.
+
+  \item \textbf{Distinction from Inference-Time Techniques}:
+    Techniques such as chain-of-thought prompting \cite{wei2022cot},
+    in-context learning \cite{brown2020gpt3},
+    and retrieval-augmented generation (RAG) \cite{lewis2020rag}
+    improve model performance at inference time through prompt engineering or external knowledge retrieval,
+    but do not modify model parameters. Post-training, by contrast, permanently alters model weights through gradient updates.
+    Of course, the two are not entirely orthogonal ---
+    for example, OpenAI o1 \cite{openai2024o1} deeply integrates the reasoning capabilities acquired during post-training
+    with inference-time extended compute strategies.
+\end{itemize}
+
+\noindent
+The importance of post-training can be understood from three dimensions.
+\textbf{First}, it serves as the bridge from ``capability'' to ``usability'' ---
+InstructGPT \cite{ouyang2022instructgpt}, with a mere 1.3B-parameter SFT+RLHF model, outperformed
+the 175B original GPT-3 in human evaluations, directly demonstrating that post-training can achieve
+qualitative leaps without increasing model scale.
+\textbf{Second}, it is the core mechanism for implementing alignment ---
+from safety alignment to value calibration, from reducing hallucinations to improving reasoning reliability,
+post-training is the key stage that translates abstract alignment objectives into measurable training signals.
+\textbf{Third}, it is the primary battleground for model differentiation ---
+as pre-training architectures and data converge toward homogeneity (predominantly decoder-only Transformers + web-scale corpora),
+differences in post-training strategies increasingly become the decisive factor in determining final product quality.
+
+\paragraph{Target Audience of This Book.}
+This book is intended for three types of readers:
+(1)~\textbf{ML researchers}, who seek a systematic understanding of the latest advances across post-training subfields and their interconnections;
+(2)~\textbf{graduate students}, who need a structured learning path from foundational concepts to frontier methods;
+(3)~\textbf{industry practitioners}, who are concerned with practical selection and deployment strategies for post-training techniques in model development.
+This book assumes that readers possess foundational knowledge of Transformer architectures and language modeling,
+but does not require prior familiarity with each subfield (e.g., RLHF, multimodal training, agent tuning).
+
+\paragraph{Distinction from Existing Surveys.}
+Several representative surveys related to post-training already exist.
+\citet{casper2023rlhfproblems} systematically cataloged the open problems and fundamental limitations of RLHF,
+but the scope was limited to reward modeling and preference learning,
+without addressing subsequent branches such as multimodal and agentic post-training.
+\citet{wang2023alignsurvey} organized LLM alignment techniques along three dimensions --- data collection, training methods, and evaluation ---
+providing a clear taxonomy, but adopted a static classification rather than an evolutionary perspective.
+\citet{shen2023alignmentsurvey} approached the topic from the theoretical framework of inner/outer alignment,
+covering interpretability and adversarial attacks, but did not delve into the technical details of individual subfields.
+This book complements the above works in three respects:
+(1)~\textbf{broader coverage}, integrating SFT, preference optimization, safety, reasoning, multimodal, agentic, and efficiency into a unified framework across seven threads;
+(2)~an \textbf{evolutionary structure} rather than a static taxonomy, tracing the temporal evolution of each thread from problem origin to the frontier;
+(3)~\textbf{cross-thread references} that explicitly document the flow of ideas across subfields, revealing technical transfers that traditional classification approaches tend to obscure.
+
+\subsection{Organization of This Book}
+\label{sec:t0-organization}
+
+Traditional surveys are typically organized by method (e.g., one chapter for SFT, one for RLHF, one for DPO).
+This organizational approach is clear but static, and fails to capture the most fundamental characteristic of the post-training landscape:
+\textbf{dense idea flow and technical transfer across different research directions}.
+
+For example, the ideas behind reward modeling flow from preference optimization (Thread~2)
+to process reward models in reasoning verification (Thread~4),
+and then loop back to preference optimization through GRPO;
+the instruction tuning pipeline developed in SFT (Thread~1)
+is directly adopted and extended by multimodal post-training (Thread~5) and tool use (Thread~6);
+efficiency techniques such as LoRA (Thread~7) enable the methods across all preceding threads to be deployed at lower cost.
+
+To capture this dynamic structure, this book adopts a \textbf{Hybrid Problem-Evolution Graph} as its organizational framework.
+The core ideas are as follows:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Seven Problem-Driven Evolution Threads}:
+    This book divides the post-training landscape into seven relatively independent problem threads,
+    each centered around a core question.
+    Within each thread, the evolution is traced chronologically along the chain of
+    ``Problem Origin $\rightarrow$ Foundation $\rightarrow$ Limitations \& Branching $\rightarrow$ Convergence $\rightarrow$ Open Problems''.
+
+  \item \textbf{Cross-Thread References}:
+    When a technique or idea from one thread is adopted by another,
+    this book annotates it using \crossref{1}{sec:t1}-style cross-references,
+    enabling readers to trace the origin and destination of ideas.
+
+  \item \textbf{Panoramic View}:
+    \cref{fig:overview} presents a panoramic view of the seven threads as a TikZ diagram,
+    where horizontal swim lanes correspond to threads, the x-axis represents the timeline,
+    nodes denote landmark works, and dashed arrows indicate cross-thread idea flow.
+\end{enumerate}
+
+\noindent
+The advantages of this organizational approach are threefold:
+(1)~it maintains a clear timeline and causal relationships within each thread;
+(2)~through cross-thread references, it reveals intellectual connections that traditional taxonomies tend to sever;
+(3)~the panoramic diagram provides readers with an entry point to begin reading from any position.
+
+\subsection{Overview of the Seven Evolution Threads}
+\label{sec:t0-threads}
+
+\paragraph{Thread 1: Instruction Following \& SFT.}
+Core question: \textit{How can a pre-trained language model be taught to understand and follow human instructions?}
+FLAN \cite{wei2022flan} and T0 \cite{sanh2022multitask} first demonstrated that
+multi-task instruction tuning can significantly improve a model's zero-shot generalization capability.
+InstructGPT \cite{ouyang2022instructgpt} established SFT as the first stage of the RLHF pipeline,
+codifying the classic three-stage training paradigm of ``SFT $\rightarrow$ reward model $\rightarrow$ PPO''.
+Self-Instruct \cite{wang2023selfinstruct} pioneered the method of leveraging the model itself to generate instruction data,
+drastically reducing annotation costs and giving rise to open-source instruction-tuned models such as Alpaca \cite{taori2023alpaca}.
+LIMA \cite{zhou2023lima} achieved highly competitive performance with only 1,000 carefully curated samples,
+proposing the ``Superficial Alignment Hypothesis'' --- that the knowledge required for alignment has already been acquired during pre-training,
+and the role of SFT is merely to activate the correct output format and style.
+\crossref{1}{sec:t1}
+
+\paragraph{Thread 2: Reward Modeling \& Preference Optimization.}
+Core question: \textit{How can vague human preferences be transformed into optimizable training signals?}
+The foundational framework of RLHF can be traced back to
+the work of Christiano et al.\ \cite{christiano2017rlhf} on Atari and MuJoCo tasks,
+which was subsequently applied to text summarization by Stiennon et al.\ \cite{stiennon2020summarize},
+and comprehensively applied to dialogue model training in InstructGPT \cite{ouyang2022instructgpt}.
+However, the RLHF training pipeline is complex and unstable, involving the coordinated training of four separate models.
+DPO \cite{rafailov2023dpo} demonstrated through mathematical derivation that the reward model can be implicitly parameterized,
+thereby converting RLHF into a simple classification loss and substantially lowering the implementation barrier.
+Subsequently, variants such as IPO \cite{azar2023ipo}, KTO \cite{ethayarajh2024kto},
+and ORPO \cite{hong2024orpo} addressed various limitations of DPO from different angles.
+GRPO \cite{shao2024grpo} introduced group-relative rewards into policy optimization,
+achieving breakthrough results on reasoning tasks.
+In 2025, the emergence of the RLVR (Reinforcement Learning with Verifiable Rewards) paradigm
+marked a new watershed: methods such as DAPO \cite{yu2025dapo} entirely dispensed with reward models,
+directly using rule-based verifiers as reward signals, improving GRPO's performance on AIME from 30\% to 50\%.
+\crossref{2}{sec:t2}
+
+\paragraph{Thread 3: Safety \& Alignment.}
+Core question: \textit{How can a model be ensured to refuse harmful requests while following instructions, without becoming overly conservative?}
+Constitutional AI (CAI) \cite{bai2022constitutional} proposed having the model critique and revise its own outputs
+according to a set of predefined principles (a constitution),
+reducing the dependence of safety alignment on human annotation of harmful data.
+Safe RLHF \cite{dai2024saferlhf} decoupled helpfulness and harmlessness into two independent objectives,
+seeking an optimal balance on the Pareto frontier through a constrained optimization framework.
+Meanwhile, the evolution of jailbreaking attacks ---
+from simple prompt injection to gradient-based automated attacks such as GCG \cite{zou2023gcg} ---
+has created an ongoing adversarial arms race, driving continuous iteration in safety research.
+In 2025--2026, the emergence of reasoning models introduced a new safety dimension:
+research has shown that reasoning models can be employed as autonomous jailbreak agents,
+achieving a 97\% attack success rate with zero human intervention \cite{hagendorff2026jailbreakagents},
+making the safety of chain-of-thought reasoning a new core challenge.
+\crossref{3}{sec:t3}
+
+\paragraph{Thread 4: Reasoning \& Verification.}
+Core question: \textit{How can models perform reliable multi-step reasoning and verify intermediate steps?}
+Chain-of-Thought (CoT) prompting \cite{wei2022cot} demonstrated that
+including reasoning processes in the prompt can significantly improve model performance on mathematical and logical tasks,
+but the upper bound of this capability is constrained by inference-time prompt design.
+Process Reward Models (PRMs) \cite{lightman2023prm} refined the verification granularity from final answers to each individual reasoning step,
+providing more fine-grained signals for reward-guided search.
+OpenAI o1 \cite{openai2024o1} deeply integrated reasoning capabilities into post-training,
+training models through large-scale reinforcement learning to autonomously unfold long chains of reasoning at inference time,
+achieving expert-level performance on mathematics competitions and programming tasks.
+DeepSeek-R1 \cite{deepseek2025r1} further explored
+the possibility of training reasoning capabilities through pure RL (without SFT cold start),
+revealing the remarkable phenomenon that reasoning capabilities can spontaneously emerge from RL.
+In 2025--2026, thinking models became the default paradigm:
+OpenAI o3 \cite{openai2025o3} achieved 88.9\% on AIME 2025,
+DeepSeek-V3.2 \cite{deepseek2025v32} reached gold-medal level on IMO-level mathematics competitions,
+and Qwen3 \cite{yang2025qwen3} achieved seamless integration of thinking and non-thinking modes.
+\crossref{4}{sec:t4}
+
+\paragraph{Thread 5: Multimodal Post-training.}
+Core question: \textit{How can text-only post-training techniques be extended to joint vision-language modeling?}
+LLaVA \cite{liu2023llava} introduced visual instruction tuning into VLM training,
+constructing an efficient multimodal instruction-following model
+through a two-stage training process (visual-text alignment + instruction tuning).
+Subsequently, RLHF techniques were introduced into VLMs to reduce multimodal hallucination ---
+i.e., the model generating descriptions inconsistent with the image content
+\cite{sun2023rlhfv,yu2024rlhfv}.
+Hallucination reduction has become one of the core challenges of multimodal post-training,
+giving rise to dedicated evaluation benchmarks such as POPE \cite{li2023pope}
+and CHAIR, as well as targeted training methods.
+In 2025, RL for VLM reasoning emerged as a new frontier direction:
+works such as R1-VL \cite{zhang2025r1vl} and MM-Eureka \cite{meng2025mmeureka}
+extended the RLVR paradigm from text-only reasoning to multimodal reasoning,
+marking the paradigm shift in VLM post-training from SFT+DPO to SFT+RL.
+\crossref{5}{sec:t5}
+
+\paragraph{Thread 6: Tool Use \& Agentic Capabilities.}
+Core question: \textit{How can post-training enable models to invoke external tools and complete complex tasks?}
+Toolformer \cite{schick2023toolformer} demonstrated that models can learn through self-supervised learning
+to insert API calls during the generation process.
+The function calling mechanism introduced by OpenAI in GPT-3.5/4
+standardized tool use as a structured JSON schema interface,
+making it a foundational infrastructure for production-grade applications.
+Agent tuning \cite{zeng2023agenttuning} further extended the training objective from single tool invocations
+to multi-step task planning and execution, laying the groundwork for building autonomous agents.
+This thread has deep intersections with Thread~1 (instruction following provides the foundational capability)
+and Thread~4 (reasoning provides the planning capability).
+In 2024--2025, agent capabilities evolved from API calls to direct manipulation of computer GUIs:
+Claude Computer Use \cite{anthropic2024computeruse} and OpenAI Operator \cite{openai2025operator}
+demonstrated the ability of AI agents to complete complex tasks in real desktop environments,
+and standardized protocols such as MCP \cite{anthropic2024mcp} are driving agents from experimental prototypes toward industrial deployment.
+\crossref{6}{sec:t6}
+
+\paragraph{Thread 7: Efficiency \& Data Engineering.}
+Core question: \textit{How can equivalent or superior post-training results be achieved with lower computational cost and less data?}
+LoRA \cite{hu2022lora} reduced the number of trainable parameters for fine-tuning to 0.1\%--1\% of the original model through low-rank decomposition,
+making post-training feasible on consumer-grade GPUs.
+QLoRA \cite{dettmers2023qlora} further combined quantization techniques,
+enabling fine-tuning of 65B models within 48GB of GPU memory.
+On the data engineering front,
+data selection methods (such as DEITA \cite{liu2024deita}
+and Instruction Mining \cite{cao2024instructionmining}) aim to identify the most valuable subsets from large-scale instruction data;
+synthetic data generation leverages strong models (such as GPT-4) to produce training data,
+giving rise to methodologies such as Alpaca \cite{taori2023alpaca},
+WizardLM \cite{xu2024wizardlm},
+and Evol-Instruct.
+\crossref{7}{sec:t7}
+
+\subsection{Cross-Thread References}
+\label{sec:t0-crossref}
+
+The seven evolution threads do not develop in isolation; dense idea flow and technical transfer exist among them.
+\cref{fig:overview} presents these cross-thread connections in a panoramic view.
+Here we outline the most important idea flows:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{T1 $\rightarrow$ T2} (SFT provides a warm start for RLHF):
+    The ``SFT $\rightarrow$ RM $\rightarrow$ PPO'' pipeline established by InstructGPT
+    positions instruction tuning as the preceding stage of preference optimization,
+    a paradigm inherited by virtually all subsequent works.
+
+  \item \textbf{T1 $\rightarrow$ T3} (Instruction following exposes safety risks):
+    The instruction-following capability conferred by SFT in T1 simultaneously opens safety vulnerabilities ---
+    a model that faithfully follows instructions will also faithfully execute malicious ones.
+    This inherent tension is precisely the problem origin of T3,
+    driving the development of safety alignment methods such as Constitutional AI.
+
+  \item \textbf{T2 $\rightarrow$ T3} (Preference optimization shapes safety):
+    RLHF and DPO provide a general framework for converting human safety preferences into training signals,
+    upon which Constitutional AI and Safe RLHF developed specialized methods for safety.
+
+  \item \textbf{T2 $\leftrightarrow$ T4} (Bidirectional flow between reward modeling and reasoning):
+    The ideas behind reward models flow from T2 into T4, giving rise to process reward models;
+    conversely, the verifiable rewards developed in T4 (automatic verification based on ground-truth answers)
+    inspired methods such as GRPO in T2, enabling preference optimization without human annotation.
+
+  \item \textbf{T1 $\rightarrow$ T5, T6} (Cross-modal transfer of instruction tuning):
+    The mature instruction tuning pipeline developed in T1 was directly adopted by T5 (LLaVA's visual instruction tuning)
+    and T6 (Toolformer's tool use instruction tuning),
+    demonstrating the high transferability of this paradigm.
+
+  \item \textbf{T7 $\rightarrow$ T1--T6} (Democratizing effect of efficiency techniques):
+    Parameter-efficient training methods such as LoRA and QLoRA have enabled the post-training techniques
+    across the preceding six threads to be widely reproduced and iterated upon in academia and the open-source community,
+    significantly accelerating progress across the entire field.
+
+  \item \textbf{T4 $\rightarrow$ T6} (Reasoning empowers agent planning):
+    The long-chain reasoning capabilities developed in T4 provide core support for multi-step agent planning in T6;
+    the reasoning capabilities of o1 and DeepSeek-R1 directly enhance agent performance on complex tasks.
+
+  \item \textbf{T2 $\rightarrow$ T4 $\rightarrow$ T5} (Cross-thread migration of RLVR):
+    In 2025, the RLVR paradigm was systematized in T2 (DAPO \cite{yu2025dapo}),
+    applied at scale to reasoning training in T4,
+    and subsequently migrated rapidly to T5 (R1-VL \cite{zhang2025r1vl}, MM-Eureka \cite{meng2025mmeureka}),
+    forming a clear T2 $\rightarrow$ T4 $\rightarrow$ T5 technical migration path.
+\end{itemize}
+
+\input{figures/overview}
+
+\noindent
+In the chapters that follow, we will conduct in-depth analyses of the technical details of landmark papers along each thread,
+while maintaining a global perspective through cross-thread references. Readers may read linearly following the thread order (T1--T7),
+or start from any thread of interest and navigate to related threads via cross-references.

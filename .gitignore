@@ -2,22 +2,23 @@
 *.aux
 *.bbl
 *.blg
+*.brf
 *.log
 *.out
 *.toc
+*.xdv
 *.synctex*
 *.fdb_latexmk
 *.fls
 missfont.log
 
 # PDF output (regenerated from source)
-main.pdf
+*.pdf
 
-# VLM project proposals artifacts
-vlm-first-principles-project-proposals.aux
-vlm-first-principles-project-proposals.fdb_latexmk
-vlm-first-principles-project-proposals.fls
-vlm-first-principles-project-proposals.log
-vlm-first-principles-project-proposals.out
-vlm-first-principles-project-proposals.pdf
-vlm-first-principles-project-proposals.xdv
+# Downloaded papers (copyrighted, not for distribution)
+papers/
+
+# Internal tooling / progress tracking
+claude-progress.txt
+feature_list.json
+init.sh

@@ -1,0 +1,72 @@
+% === Preface ===
+\section*{前言}
+\addcontentsline{toc}{section}{前言}
+
+\subsection*{为什么写这本书}
+
+Post-training 是当前大语言模型（LLM）和视觉语言模型（VLM）研究中演化最快的领域。
+从 2022 年 InstructGPT 确立 SFT$\rightarrow$RLHF pipeline，
+到 2025 年 DeepSeek-R1 证明纯 RL 可以从零涌现推理能力，
+再到 2026 年 thinking models 和 computer use 成为行业默认范式——
+短短四年间，post-training 的核心方法论已经经历了多次根本性的范式转变。
+
+现有的 survey 多采用静态分类法：按方法类型（SFT、RLHF、DPO）或能力维度（推理、安全、多模态）组织内容。
+这种组织方式在某一时间切面上是清晰的，但难以回答一个更本质的问题：
+\textbf{这些方法为什么会出现？它们解决了什么问题？又引发了哪些新的问题？}
+本书的写作动机正是源于此——
+我们希望从\textbf{演化}的视角重新审视 post-training 领域，
+追踪``问题 $\rightarrow$ 解决方案 $\rightarrow$ 新问题 $\rightarrow$ 改进方案''的发展链条，
+并揭示不同研究方向之间的思想流动。
+
+\subsection*{如何阅读本书}
+
+本书将 post-training 领域划分为七条问题驱动的演化线程（thread），
+每条线程对应一个核心问题。以下是几种推荐的阅读路径：
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{线性阅读}（Thread 1 $\rightarrow$ Thread 7）：
+    按顺序阅读全部章节，获得 post-training 领域的完整全景。
+    章节之间存在逻辑递进关系——SFT 奠定基础，preference optimization 补充偏好信号，
+    safety 施加约束，reasoning 扩展能力边界，multimodal 拓展模态，
+    agentic 连接真实世界，efficiency 使一切落地。
+
+  \item \textbf{线程跳读}：
+    选择任意感兴趣的线程直接阅读，
+    利用文中的彩色交叉引用箭头（{\color{thread2}$\rightarrow$} \textit{见 \S X.Y} 格式）跳转到相关线程的对应小节。
+    每条线程都是自包含的，但交叉引用会揭示更深层的联系。
+
+  \item \textbf{全局导航}：
+    Introduction 中的 Figure~1 提供了七条线程的全景演化图，
+    可作为阅读导航地图——先定位感兴趣的区域，再深入对应章节。
+\end{itemize}
+
+\noindent
+本书使用统一的 box 系统标注关键信息：
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{\color{red!60}红色框}（Problem Box）：标识推动领域演化的核心问题
+  \item \textbf{\color{blue!60}蓝色框}（Solution Box）：标识针对问题的关键解决方案
+  \item \textbf{\color{green!60!black}绿色框}（Evolution Box）：标识方法论的演化路径
+  \item \textbf{\color{yellow!70!black}黄色框}（Open Problem Box）：标识尚未解决的开放问题
+\end{itemize}
+
+\subsection*{本书的局限性}
+
+本书存在以下已知局限，请读者在阅读时留意：
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{知识截止}：本书的文献覆盖截至 2026 年初。
+    Post-training 领域的演化速度极快，部分讨论可能在出版时已需要更新。
+
+  \item \textbf{方法导向}：本书聚焦于训练方法论的演化，
+    较少涉及工程部署（serving、inference optimization）和产品化实践。
+
+  \item \textbf{文献覆盖}：本书以已发表的学术工作和公开的技术报告为主要参考来源。
+    工业界的大量内部实践未被充分覆盖，
+    这意味着某些方法的真实应用场景可能比文中描述的更为广泛。
+\end{enumerate}
+
+\subsection*{致谢}
+
+感谢所有在 post-training 领域做出贡献的研究者——
+正是他们的工作使得这一领域的演化如此丰富和精彩。
+本书的写作过程中，与同行的讨论和交流提供了许多宝贵的视角和洞见。

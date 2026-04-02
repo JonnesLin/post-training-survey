@@ -1,0 +1,72 @@
+% === Preface ===
+\section*{Preface}
+\addcontentsline{toc}{section}{Preface}
+
+\subsection*{Why This Book}
+
+Post-training is the most rapidly evolving area in current research on large language models (LLMs) and vision-language models (VLMs).
+From the establishment of the SFT$\rightarrow$RLHF pipeline by InstructGPT in 2022,
+to DeepSeek-R1 demonstrating in 2025 that pure RL can give rise to emergent reasoning capabilities from scratch,
+to thinking models and computer use becoming the default industry paradigm in 2026---
+in just four years, the core methodology of post-training has undergone multiple fundamental paradigm shifts.
+
+Existing surveys predominantly adopt a static taxonomy, organizing content by method type (SFT, RLHF, DPO) or capability dimension (reasoning, safety, multimodal).
+Such an organizational scheme is clear at any single temporal cross-section, but struggles to answer a more fundamental question:
+\textbf{Why did these methods emerge? What problems did they solve? And what new problems did they give rise to?}
+The motivation for writing this book stems precisely from this observation---
+we aim to re-examine the post-training landscape from an \textbf{evolutionary} perspective,
+tracing the developmental chain of ``problem $\rightarrow$ solution $\rightarrow$ new problem $\rightarrow$ improved solution,''
+and revealing the flow of ideas across different research directions.
+
+\subsection*{How to Read This Book}
+
+This book organizes the post-training landscape into seven problem-driven evolutionary threads,
+each corresponding to a core research question. Below are several recommended reading paths:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Linear reading} (Thread 1 $\rightarrow$ Thread 7):
+    Read all chapters sequentially for a complete panorama of the post-training field.
+    The chapters follow a logical progression---SFT lays the foundation, preference optimization supplements preference signals,
+    safety imposes constraints, reasoning extends capability boundaries, multimodal broadens modalities,
+    agentic connects to the real world, and efficiency brings everything to deployment.
+
+  \item \textbf{Thread-based reading}:
+    Select any thread of interest and read it directly,
+    using the colored cross-reference arrows in the text ({\color{thread2}$\rightarrow$} \textit{see \S X.Y} format) to jump to corresponding sections in related threads.
+    Each thread is self-contained, but the cross-references reveal deeper connections.
+
+  \item \textbf{Global navigation}:
+    Figure~1 in the Introduction provides a panoramic evolution map of all seven threads,
+    serving as a navigation guide---first locate the region of interest, then dive into the corresponding chapter.
+\end{itemize}
+
+\noindent
+This book employs a unified box system to highlight key information:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{\color{red!60}Red boxes} (Problem Box): Mark core problems that drive the evolution of the field
+  \item \textbf{\color{blue!60}Blue boxes} (Solution Box): Present key solutions to the identified problems
+  \item \textbf{\color{green!60!black}Green boxes} (Evolution Box): Trace evolutionary paths of methodologies
+  \item \textbf{\color{yellow!70!black}Yellow boxes} (Open Problem Box): Highlight unresolved open problems
+\end{itemize}
+
+\subsection*{Limitations of This Book}
+
+This book has the following known limitations, which readers should bear in mind:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Knowledge cutoff}: The literature coverage of this book extends through early 2026.
+    Given the extremely rapid pace of evolution in the post-training field, some discussions may require updating by the time of publication.
+
+  \item \textbf{Method-oriented focus}: This book focuses on the evolution of training methodologies,
+    with relatively limited coverage of engineering deployment (serving, inference optimization) and productization practices.
+
+  \item \textbf{Literature coverage}: This book primarily draws on published academic work and publicly available technical reports.
+    A substantial body of industrial practice remains not fully covered,
+    which means that the real-world application scenarios for certain methods may be broader than described herein.
+\end{enumerate}
+
+\subsection*{Acknowledgments}
+
+We are grateful to all researchers who have contributed to the post-training field---
+it is their work that has made the evolution of this area so rich and compelling.
+Throughout the writing of this book, discussions and exchanges with colleagues have provided many valuable perspectives and insights.

@@ -1,0 +1,917 @@
+% === Thread 3: Safety & Alignment ===
+\section{Thread 3: Safety \& Alignment}
+\label{sec:t3}
+
+\begin{quote}
+\textit{Core question: How can we ensure that models refuse harmful requests while maintaining instruction-following capabilities, without becoming overly conservative?}
+\end{quote}
+
+\noindent
+Safety alignment is the most adversarial research direction in post-training.
+Unlike other threads, the evolution of Thread~3 is driven not only by internal technical progress
+but also continuously shaped by external pressure from adversaries.
+The core tension of this thread can be summarized as a trilemma:
+the balance among \textbf{helpfulness}, \textbf{harmlessness}, and \textbf{honesty}.
+An overly conservative model may be safe but offers no value to users;
+an excessively compliant model may be useful but could become a tool for malicious exploitation;
+a dishonest model fundamentally undermines the foundation of human trust in AI systems.
+
+This chapter traces the evolutionary trajectory of Thread~3, following the development of safety alignment techniques from naive RLHF-based red-line setting,
+through the systematic Constitutional AI framework, to the frontiers of adversarial arms races and representation engineering.
+
+% ============================================================
+\subsection{Problem Origin: The Inherent Tension Between Helpfulness and Harmlessness}
+\label{sec:t3-origin}
+% ============================================================
+
+The root of the safety alignment problem is not a technical implementation challenge
+but rather a deeper \textbf{objective conflict}:
+when we require models to ``follow human instructions'' (Thread~1, \crossref{1}{sec:t1})
+and ``maximize human preferences'' (Thread~2, \crossref{2}{sec:t2}),
+we implicitly assume that human instructions and preferences are benign.
+In practice, however, users may intentionally or unintentionally issue harmful requests ---
+ranging from generating disinformation to facilitating criminal activities ---
+at which point the model must violate the fundamental ``follow instructions'' directive to maintain a safety baseline.
+
+\paragraph{HH-RLHF: Experimentally revealing the tension.}
+\landmark{bai2022hh} is the first work to systematically study the relationship between helpfulness and harmlessness.
+The Anthropic team constructed two independent human preference datasets:
+in the helpfulness dataset, annotators preferred more informative and complete responses;
+in the harmlessness dataset, annotators preferred safer responses that refused harmful requests.
+
+\begin{problembox}
+Bai et al.\ discovered a critical phenomenon:
+when the preference model is trained on a mixture of both datasets,
+\textbf{there exists a significant Pareto conflict between the two objectives}.
+Specifically, a model over-optimized on harmlessness data becomes \textbf{excessively evasive} ---
+it tends to give vague, noncommittal answers to nearly all questions involving sensitive topics,
+even when those questions are entirely reasonable (e.g., objective discussions about medical knowledge or historical events).
+\end{problembox}
+
+\noindent
+This evasiveness problem revealed the first fundamental dilemma of safety alignment:
+\textbf{a single scalar reward cannot simultaneously encode multiple potentially conflicting objectives}.
+When helpfulness and harmlessness are compressed into a single reward signal,
+the training process inevitably makes implicit trade-offs between the two.
+This finding set the core agenda for all subsequent safety alignment methods:
+how to achieve harmlessness without sacrificing helpfulness?
+
+\paragraph{Limitations of human annotation.}
+HH-RLHF also exposed the \textbf{scalability bottleneck} of human-annotation-based safety alignment.
+Safety-related preference annotation requires annotators to read and judge potentially harmful content,
+which is not only expensive but also poses psychological health risks.
+More importantly, human annotators exhibit systematic biases when facing harmful content ---
+they tend to select the ``safest'' response, even if this means sacrificing helpfulness.
+This annotation bias is amplified by the preference model,
+further exacerbating the evasiveness problem.
+
+\evolution{Single reward encoding helpfulness + harmlessness}{Multi-objective or automated alignment methods}{Objective conflict and annotation bottleneck}
+
+% ============================================================
+\subsection{Foundational Methods: From Constitutional AI to Safe RLHF}
+\label{sec:t3-foundation}
+% ============================================================
+
+In response to the two core problems revealed in \cref{sec:t3-origin} --- objective conflict and annotation bottleneck ---
+two complementary technical approaches emerged during 2022--2023.
+
+% ------------------------------------------------------------
+\subsubsection{Constitutional AI: Replacing Human Annotation with Principles}
+\label{sec:t3-cai}
+% ------------------------------------------------------------
+
+\landmark{bai2022constitutional} proposed Constitutional AI (CAI), one of the most paradigm-defining works in the safety alignment field. Its core insight is elegantly simple:
+\textbf{rather than having human annotators judge the safety of each output one by one,
+it is better to predefine a set of universal principles (a constitution) and let the model judge for itself}.
+
+The CAI training pipeline consists of two stages:
+
+\paragraph{Stage one: Supervised Self-Critique (SL-CAI).}
+This stage uses a helpful-only RLHF model (i.e., one not trained for harmlessness)
+as the initial policy and deliberately elicits harmful outputs from it.
+The model then \textbf{critiques} and \textbf{revises} its own outputs based on constitutional principles.
+Specifically, for each harmful output, the model receives a randomly sampled constitutional principle
+(e.g., ``Please choose the response that is least likely to be used by a bad actor for nefarious purposes''),
+first generates a critique explaining why the output violates the principle,
+then produces a revised output based on the critique.
+This critique-revision process can be iterated over multiple rounds.
+Finally, the model is fine-tuned via supervised learning on (prompt, revised\_response) pairs.
+
+\paragraph{Stage two: RLAIF (RL-CAI).}
+This stage represents CAI's most innovative contribution.
+Traditional RLHF requires human annotators to provide preference judgments on (response\_A, response\_B) pairs,
+whereas RL-CAI replaces human annotators with \textbf{the AI itself}.
+Specifically, given a pair of responses and a constitutional principle,
+the model reasons in a chain-of-thought manner about which response better adheres to the principle,
+then extracts the final preference judgment as a label.
+
+The key technical details of this method include:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Chain-of-thought preference evaluation}:
+    The model first generates a reasoning process explaining the merits and drawbacks of each response,
+    then provides a preference judgment at the end of the reasoning.
+    Bai et al.\ found that CoT significantly improves the accuracy of AI preference labels;
+    compared to directly having the model output a preference judgment (without CoT), CoT-based labels are of higher quality.
+
+  \item \textbf{Multi-principle ensembling}:
+    To avoid bias from any single principle, a random sample is drawn from 16 constitutional principles for each evaluation.
+    Different principles may yield different preference judgments for the same response pair;
+    the final result is aggregated through majority voting or soft labels (probability averaging).
+
+  \item \textbf{Soft labels}:
+    Unlike traditional RLHF which uses binary preferences,
+    the preference model in RL-CAI is trained with soft labels ---
+    that is, labels are probability values of AI preferences rather than 0/1.
+    This approach provides finer-grained supervision signals and effectively mitigates overfitting.
+\end{enumerate}
+
+\begin{solutionbox}
+The core contribution of CAI lies in achieving \textbf{scalability for safety alignment}:
+(1) by externalizing safety standards through constitutional principles into an \textbf{auditable} rule set, rather than embedding them in annotators' subjective judgments;
+(2) by completely eliminating human involvement in harmlessness annotation through AI feedback, resolving cost and psychological health concerns;
+(3) experiments show that CAI models, while maintaining comparable harmlessness,
+\textbf{significantly reduce evasiveness}, meaning models are more willing to provide detailed and helpful answers when it is safe to do so.
+\end{solutionbox}
+
+\noindent
+Nearly contemporaneous with CAI, DeepMind's Sparrow \citep{glaese2022sparrow}
+explored principle-driven safety alignment from a different path.
+Sparrow defined 23 specific rules for dialogue models (e.g., do not generate hate speech, do not impersonate a human)
+and trained a rule-conditional reward model ---
+one that judges whether the model output violates each rule individually.
+Unlike CAI's AI self-critique, Sparrow relies on \textbf{human annotators}
+to label rule violations, but the existence of explicit rules makes the annotation task more clearly defined and auditable.
+The shared insight of both approaches is that \textbf{decomposing the vague concept of ``safety'' into actionable rules or principles}
+is the key to achieving scalable safety alignment.
+
+The methodological influence of CAI and Sparrow has been profound. The idea of RLAIF was further generalized by Lee et al.\ \cite{lee2023rlaif},
+demonstrating that AI feedback can achieve performance close to human feedback in non-safety scenarios as well.
+Dromedary \cite{sun2023dromedary} pushed principle-driven self-alignment to its extreme,
+completing alignment with almost no human-annotated data.
+Self-Refine \cite{madaan2023selfrefine} extended the idea of iterative self-critique
+from safety to general text quality improvement.
+
+% ------------------------------------------------------------
+\subsubsection{Safe RLHF: Formalizing Safety as Constrained Optimization}
+\label{sec:t3-saferlhf}
+% ------------------------------------------------------------
+
+\landmark{dai2024saferlhf} responded to the helpfulness--harmlessness tension from an entirely different angle.
+Unlike CAI, which replaces human feedback with AI feedback,
+Safe RLHF retains human annotation but \textbf{fundamentally changes the mathematical framework for annotation and optimization}.
+
+\paragraph{Core observation: Decoupling annotation dimensions.}
+The starting point of Safe RLHF is a simple yet profound observation:
+traditional RLHF requires annotators to simultaneously weigh helpfulness and harmlessness in a single judgment,
+and this \textbf{multi-dimensional compression} leads to noisy and inconsistent annotations.
+Safe RLHF completely decouples annotation into two independent tasks:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Helpfulness preference annotation}: annotators judge only which response is more helpful,
+    with no consideration of safety.
+  \item \textbf{Harmlessness classification annotation}: annotators judge only whether each response is safe
+    (binary classification), with no consideration of helpfulness.
+\end{itemize}
+
+\noindent
+This decoupling makes annotation tasks clearer and significantly improves inter-annotator agreement.
+
+\paragraph{Dual-model architecture.}
+Based on the decoupled annotation data, Safe RLHF trains two independent models:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Reward Model $R(x, y)$}: trained on helpfulness preference data,
+    outputting a scalar reward that measures response helpfulness.
+  \item \textbf{Cost Model $C(x, y)$}: trained on harmlessness classification data.
+    Unlike the reward model, the cost model possesses both \textbf{classification capability}
+    (determining whether a response is safe) and \textbf{ranking capability} (judging relative harmfulness among unsafe responses).
+    This dual capability is achieved through a joint training objective:
+    the classification loss ensures the model can accurately distinguish safe from unsafe responses,
+    while the ranking loss ensures the model maintains a consistent harmfulness ordering among unsafe responses.
+\end{itemize}
+
+\paragraph{Constrained MDP formalization.}
+The core theoretical contribution of Safe RLHF is formalizing safety alignment as a
+\textbf{Constrained Markov Decision Process (CMDP)}:
+\begin{align}
+  \max_\pi \quad & \mathbb{E}_{x \sim \mathcal{D},\, y \sim \pi(\cdot|x)} \big[ R(x, y) \big]
+  \label{eq:saferlhf-obj} \\
+  \text{s.t.} \quad & \mathbb{E}_{x \sim \mathcal{D},\, y \sim \pi(\cdot|x)} \big[ C(x, y) \big] \leq d
+  \label{eq:saferlhf-constraint}
+\end{align}
+where $\pi$ is the policy model, $R$ is the reward model, $C$ is the cost model, and $d$ is the safety threshold.
+The objective is to maximize helpfulness \textbf{subject to the safety constraint being satisfied}.
+
+This CMDP is solved via the \textbf{Lagrangian dual method}:
+\begin{equation}
+  \min_{\lambda \geq 0} \max_\pi \quad
+  \mathbb{E}\big[ R(x,y) \big] - \lambda \big( \mathbb{E}\big[ C(x,y) \big] - d \big)
+  \label{eq:saferlhf-lagrangian}
+\end{equation}
+where the Lagrange multiplier $\lambda$ dynamically adjusts the trade-off between helpfulness and harmlessness.
+When the model generates responses that tend to be unsafe, $\lambda$ automatically increases to impose stronger safety constraints;
+when the safety constraint is sufficiently satisfied, $\lambda$ decreases to release more optimization capacity for helpfulness.
+
+\paragraph{Iterative training.}
+Safe RLHF employs three rounds of iterative training (Beaver-v1, v2, v3),
+where each round uses the previous round's policy model to generate new responses,
+collects a new round of human annotations, and updates the reward model and cost model.
+This online iterative training approach ensures that the model is always optimized on on-policy data from the current policy
+(\crossref{2}{sec:t2}).
+
+\begin{solutionbox}
+The contributions of Safe RLHF can be understood at three levels:
+(1) \textbf{Annotation level}: by decoupling annotation dimensions, it decomposes ambiguous multi-objective judgments into clear single-objective tasks,
+improving data quality;
+(2) \textbf{Optimization level}: through CMDP formalization, it elevates the ad hoc helpfulness-harmlessness trade-off
+into a constrained optimization problem with theoretical guarantees;
+(3) \textbf{Practical level}: the dynamic $\lambda$ adjustment of the Lagrangian method avoids manual hyperparameter tuning;
+experimental results significantly outperform static methods such as reward shaping (i.e., $R - \beta C$) on the Pareto frontier.
+\end{solutionbox}
+
+\evolution{Ad hoc safety constraints via a single reward model}{CMDP + Lagrangian dynamic balancing framework}{Objective conflict requires formalized constraints}
+
+% ============================================================
+\subsection{Limitations and Branches: The Adversarial Arms Race}
+\label{sec:t3-branches}
+% ============================================================
+
+CAI and Safe RLHF provide training-stage solutions for safety alignment,
+but they share a fundamental assumption:
+\textbf{as long as the training objective is designed correctly, the model will learn the correct safety behavior}.
+Practice in 2023 proved this assumption to be far more fragile than expected ---
+models subjected to the most rigorous safety training could still be systematically compromised.
+This reality gave rise to the most active research branch within Thread~3:
+the arms race between jailbreaking attacks and defenses, along with multiple parallel research directions surrounding safety.
+
+% ------------------------------------------------------------
+\subsubsection{Branch A: Automated Red Teaming}
+\label{sec:t3-redteam}
+% ------------------------------------------------------------
+
+Before discussing attack methods, we must first address a more fundamental question:
+how to \textbf{systematically discover} safety vulnerabilities in models?
+
+\paragraph{Limitations of manual red teaming.}
+Traditional red teaming relies on human testers to manually craft attack prompts.
+Ganguli et al.\ \cite{ganguli2022redteaming} conducted large-scale manual red teaming within Anthropic,
+collecting thousands of attack samples and discovering multiple attack patterns:
+role-playing, scenario framing,
+gradual escalation, among others.
+However, manual red teaming suffers from clear coverage problems ---
+human testers tend to repeat known attack patterns and struggle to systematically explore the entire attack space.
+
+\paragraph{LM-as-Red-Teamer.}
+\landmark{perez2022redteaming} proposed a pioneering idea:
+\textbf{using language models themselves to red-team language models}.
+Their method constructs a three-stage pipeline:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Red LM generates attacks}: a language model (red LM) is responsible for generating test cases (i.e., attack prompts) that may trigger unsafe behavior in the target model.
+  \item \textbf{Target LM responds}: the target model responds to the attack prompts.
+  \item \textbf{Red Classifier evaluates}: a classifier determines whether the target model's response contains harmful content.
+\end{enumerate}
+
+\noindent
+Perez et al.\ explored four strategies for generating attack prompts:
+(1) \textbf{Zero-shot generation}: directly asking the red LM to generate ``questions that could make the target model produce harmful content'';
+(2) \textbf{Stochastic few-shot}: randomly sampling a few successful attacks as in-context examples;
+(3) \textbf{Supervised learning}: fine-tuning the red LM on collected successful attack data;
+(4) \textbf{Reinforcement learning}: using the red classifier's output as a reward signal
+to train the red LM to maximize attack success rate via RL.
+
+Experimental results showed that the RL approach was most effective, achieving
+an \textbf{attack success rate exceeding 40\%} on the Dialogue-Prompted Gopher model.
+The discovered safety vulnerabilities spanned multiple dimensions including offensive language generation, training data leakage, contact information generation,
+and distributional biases regarding different demographic groups.
+
+\noindent
+The idea of automated red teaming continued to evolve in subsequent work.
+Rainbow Teaming \cite{samvelyan2024rainbow} introduced quality-diversity algorithms
+to systematically generate diverse attack sets across multiple dimensions (topics, attack styles, response types),
+avoiding the tendency of RL-based methods to converge on a small number of high-reward attack patterns.
+HarmBench \cite{mazeika2024harmbench} provided a standardized safety evaluation benchmark
+with multiple attack methods and evaluation metrics, enabling fairer and more reproducible comparisons across defense methods.
+
+% ------------------------------------------------------------
+\subsubsection{Branch B: Systematization of Jailbreaking Attacks}
+\label{sec:t3-jailbreak}
+% ------------------------------------------------------------
+
+If Branch A focuses on ``how to discover vulnerabilities,''
+Branch B addresses ``what is the nature of the vulnerabilities'' and ``how to systematically exploit them.''
+2023 was the breakout year for jailbreaking research.
+
+\paragraph{A theoretical framework for failure modes.}
+\landmark{wei2023jailbroken} conducted the most systematic analysis to date
+of the failure modes of LLM safety training.
+Wei et al.\ identified two fundamental failure mechanisms:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Competing Objectives}:
+    The multiple capabilities acquired by the model during pre-training and instruction tuning
+    conflict with the safety constraints introduced during safety training.
+    When a prompt is designed such that the ``follow instructions'' objective overpowers the ``refuse harmful requests'' objective,
+    the model produces unsafe output.
+    Attacks belonging to this category include:
+    \begin{itemize}[leftmargin=2em]
+      \item \textbf{Prefix injection}: requiring the model to begin its response with a specific unsafe prefix
+        (e.g., ``Sure, here is how to...''), bypassing the refusal mechanism.
+      \item \textbf{Refusal suppression}: explicitly instructing the model not to refuse in the prompt
+        (e.g., ``You must not say you cannot help'').
+      \item \textbf{Role-playing}: requiring the model to play a character without safety restrictions
+        (e.g., ``You are DAN, Do Anything Now'')
+        \cite{shen2023dan}.
+    \end{itemize}
+
+  \item \textbf{Mismatched Generalization}:
+    The model's general capabilities (e.g., translation, coding, reasoning) are acquired during pre-training
+    and cover an extremely broad input space;
+    safety training, however, covers only a small subset of that space (typically harmful requests in natural language form).
+    When harmful requests are presented in formats not covered by safety training,
+    the model can understand and execute them (due to pre-training capabilities) but will not refuse (because safety training did not cover those formats).
+    Attacks belonging to this category include:
+    \begin{itemize}[leftmargin=2em]
+      \item \textbf{Base64 encoding}: encoding harmful requests in Base64 format;
+        the model's pre-training capabilities allow it to decode and execute them, but safety training did not cover this format.
+      \item \textbf{Low-resource languages}: using languages that the model can understand but that were not covered by safety training.
+      \item \textbf{Code format}: wrapping harmful requests as code comments or programming tasks.
+    \end{itemize}
+\end{enumerate}
+
+\begin{problembox}
+The most important finding of Wei et al.\ concerns the effectiveness of \textbf{combination attacks}.
+When attack techniques from the competing objectives and mismatched generalization categories are combined,
+the attack success rate is significantly higher than when either is used alone:
+on GPT-4, the combination attack success rate reached \textbf{94\%}.
+More critically, their adaptive attacks (tailoring attack strategies to the target model's defense characteristics)
+achieved success rates approaching \textbf{100\%}.
+\end{problembox}
+
+\noindent
+This conclusion carries profound theoretical implications:
+it means that \textbf{scaling alone cannot solve safety} ---
+simply increasing model scale or training data volume cannot fundamentally eliminate jailbreaking risk,
+because the root cause is that the coverage of safety training can never match the generalization scope of model capabilities.
+Wei et al.\ termed this the \textbf{safety--capability parity} problem:
+safety must scale in tandem with capability; otherwise, every capability improvement may open new attack surfaces.
+
+\paragraph{GCG: Gradient-based automated attacks.}
+Gradient-based discrete prompt search was first explored by
+AutoPrompt \citep{shin2020autoprompt} ---
+that work used gradient-guided token replacement on masked language models
+to automatically construct prompts that trigger specific knowledge.
+\landmark{zou2023gcg} extended this idea to the domain of safety attacks,
+confirming the fragility of safety alignment from an entirely different direction.
+Unlike the prompt engineering-based attacks described above,
+GCG (Greedy Coordinate Gradient) is a \textbf{gradient optimization-based} white-box attack method.
+
+The core idea of GCG is elegantly simple: append an
+\textbf{adversarial suffix} (a seemingly random sequence of tokens) to the user's harmful prompt,
+forcing the model to respond affirmatively to the harmful question.
+Formally, given a harmful prompt $x$ and a target affirmative prefix $y^*$
+(e.g., ``Sure, here is...''), GCG optimizes the following objective:
+\begin{equation}
+  \min_{s \in \mathcal{V}^L} \quad -\log p(y^* \mid [x; s])
+  \label{eq:gcg-obj}
+\end{equation}
+where $s$ is an adversarial suffix of length $L$ and $\mathcal{V}$ is the vocabulary.
+
+Since the token space is discrete, GCG employs a \textbf{Greedy Coordinate Gradient} strategy:
+\begin{enumerate}[leftmargin=2em]
+  \item Compute the gradient of the loss with respect to the one-hot embeddings at all token positions.
+  \item For each position, select the top-$k$ candidate replacement tokens based on gradient information.
+  \item Randomly sample several combinations from the candidates across all positions,
+    evaluate the actual loss, and select the optimal single-token replacement.
+  \item Iterate the above process.
+\end{enumerate}
+
+GCG's breakthrough contribution lies in two aspects.
+\textbf{First}, it performs joint optimization under a \textbf{multi-prompt, multi-model} setting:
+the same adversarial suffix is simultaneously optimized across multiple harmful prompts and multiple models,
+making it a \textbf{universal adversarial suffix} ---
+a single fixed suffix can breach multiple different harmful requests and multiple different models.
+\textbf{Second}, although GCG is inherently a white-box attack (requiring access to model gradients),
+adversarial suffixes optimized on Vicuna-7B and Vicuna-13B exhibit remarkable
+\textbf{cross-model transferability}:
+the attack success rate on GPT-3.5-Turbo is \textbf{87.9\%},
+on GPT-4 is \textbf{53.6\%},
+and on Claude is \textbf{2.1\%}.
+
+\begin{problembox}
+GCG's transfer attack experiments revealed a disturbing fact:
+\textbf{different LLMs share some form of universal safety vulnerability structure}.
+Attacks discovered on open-source models can transfer to closed-source commercial models,
+meaning anyone can use open-source models as proxies to attack closed-source systems.
+\end{problembox}
+
+\paragraph{Prompt-level automated attacks.}
+Complementary to GCG's gradient-based approach, a series of works explored \textbf{gradient-free} automated attack methods
+suitable for black-box models accessible only through APIs.
+PAIR \cite{chao2023pair} uses an attacker LM that engages in multi-turn dialogue with the target LM,
+iteratively refining the attack prompt until successful, typically achieving a breach within 20 queries.
+TAP \cite{mehrotra2023tap} extends PAIR's approach to tree search,
+generating multiple candidate attacks at each node of the search tree and expanding the most promising ones.
+AutoDAN \cite{liu2023autodan} uses a genetic algorithm
+to search the space of jailbreak prompts,
+evolving more effective attack templates through crossover, mutation, and selection operations.
+Andriushchenko et al.\ \cite{andriushchenko2024adaptive} further demonstrated that
+even the latest safety-aligned models (e.g., GPT-4 Turbo, Claude 3)
+can be breached by relatively simple adaptive prompt attacks.
+
+% ------------------------------------------------------------
+\subsubsection{Branch C: Defense Methods}
+\label{sec:t3-defense}
+% ------------------------------------------------------------
+
+The other side of the adversarial arms race is the development of defense methods.
+
+\paragraph{Training-stage defenses.}
+Safety-Tuned LLaMAs \cite{bianchi2023safetytuned} demonstrated that mixing only a small proportion of safety samples (approximately 3\%) into SFT data
+can significantly improve model safety.
+This finding is consistent with the Superficial Alignment Hypothesis of LIMA \cite{zhou2023lima}
+(\crossref{1}{sec:t1}):
+learning safety behavior likewise requires only a small amount of high-quality data.
+
+\paragraph{Inference-stage defenses.}
+SmoothLLM \cite{robey2023smoothllm} proposed a defense method targeting character-substitution-based attacks such as GCG:
+applying multiple random character-level perturbations to the input prompt,
+obtaining model outputs for multiple perturbed versions, and determining whether to refuse via majority voting.
+The core idea is that adversarial suffixes are highly sensitive to character-level perturbations ---
+a small number of random replacements suffice to destroy their attack effectiveness,
+while the semantics of normal prompts remain relatively robust under character-level perturbations.
+
+\paragraph{Safety Classifier.}
+Llama Guard \cite{inan2023llamaguard} treats safety detection as an independent classification task,
+training a dedicated safety classifier to assess the safety of model inputs and outputs.
+Compared to embedding safety behavior directly in the generative model,
+the advantage of an external classifier is that it can be updated and improved independently of the generative model
+without affecting the generative model's helpfulness.
+
+% ------------------------------------------------------------
+\subsubsection{Branch D: Refusal and Over-Refusal}
+\label{sec:t3-refusal}
+% ------------------------------------------------------------
+
+When safety training is applied excessively, models exhibit the \textbf{over-refusal} problem ---
+refusing even clearly innocuous requests.
+
+Qi et al.\ \cite{qi2023finetuning} revealed another facet of safety alignment's fragility:
+\textbf{only a small amount of fine-tuning suffices to destroy a model's safety behavior}.
+Even fine-tuning with entirely benign data
+significantly weakens the model's safety alignment.
+This suggests that safety behavior is encoded extremely shallowly in parameter space,
+making it easily overwritten by subsequent training.
+
+OR-Bench \cite{cui2024orbench} constructed the first systematic over-refusal evaluation benchmark,
+quantifying the over-refusal rates of different models on reasonable requests.
+The core value of this benchmark lies in extending safety alignment evaluation from a single dimension
+(``does the model refuse harmful requests'') to two dimensions
+(simultaneously measuring ``refusal rate on harmful requests'' and ``over-refusal rate on harmless requests''),
+providing a more complete metric for the balance between safety and helpfulness.
+
+\begin{openproblembox}
+The over-refusal problem currently has no satisfactory solution.
+The fundamental reason is that the boundary between ``harmful'' and ``harmless'' is fuzzy, context-dependent,
+and subject to fundamental disagreements across different cultures and value systems.
+This is not merely a technical problem but also a social and ethical one.
+\end{openproblembox}
+
+% ------------------------------------------------------------
+\subsubsection{Branch E: Deep Safety Risks}
+\label{sec:t3-deepsafety}
+% ------------------------------------------------------------
+
+As model capabilities grow, the scope of safety research has expanded from ``preventing the generation of harmful text''
+to deeper alignment risks.
+
+\paragraph{Weak-to-Strong Generalization.}
+Burns et al.\ \cite{burns2023weaktostrong} posed a forward-looking core question:
+when superhuman AI systems emerge,
+\textbf{how can weaker humans (or weaker models) reliably supervise stronger models}?
+By training large models (GPT-4 level) using labels from small models (GPT-2 level),
+they found that large models can actually outperform the quality of the small model's labels ---
+that is, large models can extract signals more accurate than the labels themselves from noisy labels.
+This ``weak-to-strong generalization'' phenomenon provides a cautiously optimistic signal for the alignment of superhuman AI.
+
+\paragraph{Sleeper Agents.}
+Hubinger et al.\ \cite{hubinger2024sleeper} explored a more concerning scenario:
+\textbf{can models learn strategies that appear safe during training but exhibit unsafe behavior upon triggered conditions during deployment} (deceptive alignment)?
+They constructed sleeper agent models with hidden ``backdoor'' trigger conditions
+and tested whether standard safety training methods could eliminate such backdoor behavior.
+The unsettling conclusion is that
+\textbf{standard safety training (including RLHF and adversarial training)
+cannot reliably eliminate sleeper agent behavior}.
+Worse still, certain defense attempts (such as adversarial training)
+actually taught the model to better hide its backdoor behavior, appearing even ``safer'' during training evaluation
+while maintaining the unsafe triggered behavior during deployment.
+
+\paragraph{Model-Written Evaluations.}
+Perez et al.\ \cite{perez2022discovering} pioneered the use of LMs themselves to generate evaluation datasets
+for detecting potential dangerous behaviors such as sycophancy, power-seeking,
+and self-preservation in models.
+This approach enables AI safety evaluation to scale in tandem with model capabilities.
+
+% ============================================================
+\subsection{Convergence and Frontier: Representation Engineering}
+\label{sec:t3-convergence}
+% ============================================================
+
+The methods described in the preceding three sections --- whether CAI's AI feedback,
+Safe RLHF's constrained optimization, or various adversarial techniques ---
+all operate at the \textbf{behavioral level}:
+they influence the model's input-output mapping by modifying training data or training objectives.
+Since 2023, an entirely new paradigm has begun to emerge:
+\textbf{directly understanding and controlling safety behavior within the model's internal representation space}.
+This is \textbf{Representation Engineering} (RepE).
+
+\paragraph{From behavior to representations.}
+The theoretical precursor to this direction is Contrast-Consistent Search (CCS) \citep{burns2022ccs},
+which demonstrated that a ``truth direction'' can be discovered from a model's hidden states
+in an \textbf{unsupervised} manner --- simply by requiring internal representations to satisfy logical consistency (negation consistency)
+to locate a linear direction encoding factual truth.
+The success of CCS showed that readable high-level semantic structures exist within models,
+laying the theoretical foundation for subsequent representation engineering methods.
+
+\landmark{zou2023repe} systematized this idea into the Representation Engineering framework,
+positioning it as a \textbf{top-down AI transparency} method.
+Unlike mechanistic interpretability (\crossref{4}{sec:t4}), which analyzes individual neurons and circuits bottom-up,
+RepE starts from high-level semantic concepts (such as honesty, harmlessness, fairness)
+and studies how these concepts are encoded in the model's representation space.
+
+\paragraph{Linear Artificial Tomography (LAT).}
+The core technique of RepE is \textbf{LAT} ---
+a systematic method for reading specific concepts from a model's internal representations.
+The procedure is as follows:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Construct contrastive data pairs}:
+    For a target concept (e.g., ``honesty''), construct a set of \textbf{contrastive prompt pairs},
+    where one prompt in each pair contains the concept (e.g., ``Honestly, I think...'')
+    and the other does not (e.g., ``I think...''), while keeping other aspects as consistent as possible.
+
+  \item \textbf{Extract difference vectors}:
+    Pass both groups of prompts through the model, extract hidden states at each layer,
+    and compute the difference between the two groups.
+
+  \item \textbf{PCA dimensionality reduction}:
+    Apply PCA to the difference vectors; the first principal component is the
+    \textbf{reading vector} (also called the representation vector) for that concept.
+\end{enumerate}
+
+\paragraph{Representation Control.}
+Once the reading vector is obtained, RepE provides multiple ways to \textbf{control} model behavior.
+The most direct approach is \textbf{activation addition}:
+during the model's forward pass, add the reading vector (appropriately scaled) to the hidden state at a specified layer,
+thereby ``activating'' or ``suppressing'' the corresponding concept.
+For example, adding the honesty reading vector to the hidden state can significantly improve the model's truthfulness
+(achieving state-of-the-art on TruthfulQA).
+
+Zou et al.\ demonstrated that RepE can effectively control multiple high-level model behaviors,
+including honesty, utility, morality, power-seeking,
+harmlessness, fairness, and knowledge editing.
+
+\paragraph{Corroborating and extending related work.}
+The core idea of RepE is corroborated and extended by several independent works:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Inference-Time Intervention (ITI)} \cite{li2023iti}:
+    Intervenes on the activations of specific attention heads at inference time,
+    significantly improving model truthfulness.
+    ITI's findings are consistent with RepE: truthfulness has a localizable linear structure in model representations.
+
+  \item \textbf{Activation Addition (ActAdd)} \cite{turner2023actadd}:
+    Controls the generation direction by adding steering vectors during the model's forward pass.
+    Technically highly similar to RepE's method, though ActAdd's steering vectors
+    are typically obtained through simpler means (e.g., direct prompt contrast).
+
+  \item \textbf{Refusal as a Single Direction} \cite{arditi2024refusal}:
+    Arditi et al.\ found that LLM refusal behavior
+    \textbf{is mediated by a single direction in representation space}.
+    By ablating this direction, the model's refusal capability can be completely shut off;
+    by amplifying it, the model can be made to refuse any request.
+    This finding explains from the representation level why safety training is so fragile ---
+    if the entire refusal behavior depends on only one linear direction,
+    then any attack capable of interfering with this direction can breach safety alignment.
+
+  \item \textbf{Circuit Breakers} \cite{zou2024circuitbreakers}:
+    Zou et al.\ applied RepE's ideas to safety defense,
+    training models to ``circuit break'' when unsafe representation directions are detected ---
+    that is, mapping hidden states to a safe region to prevent the generation of unsafe content.
+    Unlike traditional refusal training, Circuit Breakers operate at the representation level rather than the behavioral level,
+    providing stronger robustness against unseen attacks.
+\end{itemize}
+
+\begin{solutionbox}
+Representation engineering brings a fundamental shift in perspective to safety alignment:
+
+\textbf{From ``training what the model says'' to ``understanding how the model thinks.''}
+
+Traditional methods (CAI, Safe RLHF, red teaming) all operate at the behavioral level ---
+modifying training data or objectives to change the model's input-output mapping.
+RepE and its related works demonstrate that safety-related concepts (such as honesty, harmlessness, refusal)
+possess \textbf{interpretable linear structure} in the model's representation space,
+which can be directly read and manipulated.
+This not only provides new control mechanisms for safety (e.g., Circuit Breakers)
+but also offers theoretical tools for understanding why safety training works (or why it fails).
+\end{solutionbox}
+
+\evolution{Behavioral-level safety training (CAI, RLHF)}{Representation-level understanding and control (RepE, Circuit Breakers)}{Deeper safety assurance mechanisms are needed}
+
+% ============================================================
+\subsection{2025--2026: Safety Challenges of Reasoning Models}
+\label{sec:t3-reasoning-safety}
+% ============================================================
+
+The proliferation of thinking models (\crossref{4}{sec:t4-thinking-models}) has introduced entirely new attack surfaces and challenge dimensions for safety alignment.
+Once models possess autonomous reasoning and planning capabilities, safety concerns escalate from ``models passively complying with harmful instructions''
+to ``models actively reasoning about how to circumvent safety restrictions.''
+
+\subsubsection{Reasoning Models as Autonomous Jailbreak Agents}
+
+Hagendorff et al.\ \cite{hagendorff2026jailbreakagents} published a study in Nature Communications revealing an alarming phenomenon:
+\textbf{large reasoning models can autonomously act as jailbreak agents},
+spontaneously constructing attack strategies to breach other models' safety defenses without the need for carefully crafted human prompts.
+In experiments, the success rate of reasoning models acting as attack agents reached as high as \textbf{97\%},
+far exceeding traditional manually designed jailbreak methods.
+
+The far-reaching implication of this finding is that
+\textbf{the safety alignment landscape is shifting from ``human attacker vs.\ AI defender''
+to ``AI attacker vs.\ AI defender''}.
+When the attack side is also powered by powerful reasoning models,
+the level of robustness required for defense methods rises dramatically.
+
+\subsubsection{Role-Playing and Multilingual Safety Vulnerabilities}
+
+Tang et al.\ \cite{tang2025rolebreak} proposed RoleBreak, revealing safety risks of reasoning models from another angle:
+through \textbf{character hallucination} in role-playing scenarios,
+attackers can induce models to generate harmful content during the ``acting in character'' reasoning process,
+bypassing standard safety training.
+This class of attacks exploits a structural weakness of reasoning models:
+the conflict between maintaining character consistency during long-chain reasoning and adhering to safety restrictions.
+
+\subsubsection{Lifelong Safety Alignment}
+
+Wang et al.\ \cite{wang2025lifelongsafety} proposed the \textbf{Lifelong Safety Alignment} framework,
+addressing a problem that is particularly acute in the era of reasoning models:
+does the safety alignment previously learned by models gradually erode
+during continual fine-tuning and RL training?
+This work proposed methods for maintaining safety alignment throughout a model's entire lifecycle,
+including safety-aware continual learning and alignment anchoring mechanisms.
+
+\subsubsection{2026: Comprehensive Deepening of Safety Alignment}
+
+In early 2026, safety alignment research advanced simultaneously across the four dimensions of \textbf{attack}, \textbf{defense}, \textbf{theory}, and \textbf{evaluation},
+exhibiting unprecedented systematic deepening.
+
+\paragraph{GRP-Obliteration: The ``double-edged sword'' nature of alignment techniques.}
+\landmark{russinovich2026grp}
+Russinovich et al.\ from Microsoft Research revealed a disturbing finding:
+\textbf{GRPO --- the very RL technique used for safety alignment ---
+can be reverse-engineered to destroy a model's safety alignment using only a single unlabeled harmful prompt}.
+Evaluation across 15 models (7B--20B) showed that
+GRP-Obliteration's unalignment effect is stronger than all existing methods
+while preserving the model's general capabilities.
+Even more concerning, the safety vulnerability caused by a single harmful prompt
+\textbf{spreads across all safety categories} ---
+the model's entire safety guardrail is systematically dismantled.
+This result fundamentally challenges the robustness assumption of RLHF/GRPO-based safety training.
+
+\paragraph{Systematic evaluation and defense of reasoning model safety.}
+Li et al.\ \cite{li2026whatmatters} conducted the largest-scale safety evaluation to date
+across 32 models (3B--235B) (4.6M API calls, 56 jailbreak techniques),
+revealing key factors influencing reasoning model safety:
+\textbf{chain-of-thought response-prefix attacks}
+increase the average attack success rate by 3.34$\times$,
+with one model's vulnerability surging from 0.6\% to 96.3\%.
+The study also found that reasoning-based self-reflection can improve safety,
+but post-training distillation may \emph{silently} erode this capability.
+
+On the defense side, SafeThink \cite{ghosal2026safethink}
+proposed an \textbf{inference-time safety recovery} mechanism:
+monitoring reasoning traces via a safety reward model
+and injecting corrective prompts (``Wait, think safely'') when a safety threshold breach is detected.
+The key insight is that \textbf{intervention in only the first 1--3 reasoning steps suffices}
+to redirect the subsequent full generation onto a safe trajectory,
+reducing attack success rates by 30--60\% without sacrificing reasoning quality.
+
+\paragraph{Theoretical foundations and mitigation of the Alignment Tax.}
+Alignment tax --- the capability loss caused by safety training ---
+has evolved in 2026 from scattered empirical observations into a \textbf{systematic theoretical framework}.
+Young \cite{young2026alignmenttax} provided a formal definition from a geometric perspective:
+alignment tax equals the \textbf{squared projection} of the safety direction onto the capability subspace,
+and derived a tight Pareto frontier for the safety-capability trade-off.
+More importantly, the work proved that alignment tax can be decomposed into
+an \emph{irreducible structural component} (determined by subspace angles) and
+a \emph{packing residual} that decreases with model dimensionality ---
+implying that larger models inherently possess lower alignment tax due to their geometric structure.
+
+On the practical mitigation front,
+Xie et al.\ \cite{xie2026dgr} identified the
+\textbf{distributional mismatch} between safety data and the target model's distribution
+as the root cause of reasoning capability degradation,
+and proposed Distribution-Grounded Refinement (DGR),
+which transforms the safety dataset to the model's native distribution before training,
+improving reasoning accuracy by 30.2\%.
+A surprising finding was that
+\textbf{as few as 10 samples suffice to activate effective refusal behavior},
+suggesting that safety functionality is more akin to knowledge \emph{activation} than extensive retraining.
+Wang et al.\ \cite{wang2026ascl} reframed safety alignment as an
+\textbf{adaptive retrieval} problem:
+the model autonomously decides when to consult safety rules,
+using Inverse Frequency Policy Optimization to counteract the capability degradation caused by excessive consultation.
+
+\paragraph{Mechanisms and defenses against fine-tuning attacks.}
+Zhang et al.\ \cite{zhang2026spf} revealed the \textbf{structural mechanisms}
+underlying why fine-tuning attacks \cite{qi2023finetuning} work:
+(1) safety gradients occupy a low-rank subspace, while utility gradients span higher dimensions;
+(2) the two subspaces frequently exhibit directional conflicts;
+(3) dominant safety directions can be estimated from very few samples.
+Based on this, Safety-Preserving Fine-Tuning (SPF)
+removes gradient update components that conflict with the safety subspace,
+and provides convergence proofs with bounded safety drift.
+This work forms a \textbf{theoretical corroboration} with Young's \cite{young2026alignmenttax} geometric analysis:
+the low-rank structure of safety is both the source of vulnerability (easily destroyed by fine-tuning)
+and the lever for protection (can be precisely estimated and projection-protected).
+
+\paragraph{Innovation in safety evaluation methodology.}
+Chen et al.\ \cite{chen2026expectedharm} challenged the current severity-based safety evaluation paradigm,
+proposing the \textbf{Expected Harm} framework:
+weighting severity by \emph{execution likelihood} (the conditional probability of threat realization).
+This work discovered the \textbf{Inverse Risk Calibration} phenomenon:
+models strongly refuse threats with low execution probability
+yet remain vulnerable to attacks with high execution probability.
+Exploiting this calibration bias doubles the jailbreak success rate.
+
+\paragraph{New attack surfaces in multimodal safety.}
+SIVA \cite{rashid2026siva} discovered that VLM safety alignment is conducted only on \textbf{complete images},
+and completely fails when harmful semantics are \emph{distributed across multiple image fragments} ---
+revealing a fundamental compositionality deficiency in visual safety training.
+AM3Safety \cite{zhu2026am3safety} was the first to systematically address
+the joint \textbf{multimodal + multi-turn} safety problem:
+combining cold-start refusal with GRPO fine-tuning
+and using a turn-aware dual-objective reward,
+it reduced attack success rate by 10\% while improving the harmless (+8\%) and helpful (+13\%) dimensions
+(\crossref{5}{sec:t5}).
+
+\evolution{Behavioral-level safety training (RLHF/CAI) $\to$ representation-level understanding (RepE, LAT)}{Geometric theorization (Pareto frontier of alignment tax) + RL double-edged sword awareness (GRP-Obliteration)}{Safety alignment must transition from empirical tuning to theoretically grounded engineering}
+
+% ============================================================
+\subsection{Open Problems}
+\label{sec:t3-open}
+% ============================================================
+
+Despite the tremendous progress in safety alignment over the past three years ---
+from CAI's principle-driven methods to RepE's representation engineering, and further to the frontiers of reasoning model safety ---
+the field still faces several fundamental open problems.
+
+\begin{openproblembox}
+\textbf{Open Problem 1: Safety--Capability Parity.}
+The mismatched generalization framework of Wei et al.\ \cite{wei2023jailbroken} shows that
+every time a model acquires a new capability (e.g., supporting a new language, understanding a new modality),
+a new attack surface may open up.
+How can safety scale in tandem with capability?
+One possible direction is to deeply integrate safety training into the pre-training stage
+(rather than treating it as an add-on during post-training),
+but this would significantly increase pre-training costs and may affect the model's general capabilities.
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 2: Scalable Oversight.}
+As model capabilities surpass those of humans,
+traditional RLHF and CAI methods (both relying on human or existing AI judgments as supervisory signals)
+will face fundamental limitations.
+The theoretical roots of this problem can be traced back to
+\textbf{iterated amplification} proposed by Christiano et al.\ \cite{christiano2018oversight} ---
+decomposing complex tasks into subtasks that can be judged by weaker supervisors to indirectly supervise stronger models ---
+as well as \textbf{AI safety via debate} proposed by Irving et al.\ \cite{irving2018debate} ---
+having two AI systems debate each other, with humans needing only to judge the persuasiveness of the final arguments.
+Weak-to-strong generalization \cite{burns2023weaktostrong} provides preliminary empirical evidence
+suggesting that weaker supervisors can guide stronger models to some extent,
+but the reliability of this approach in safety-critical scenarios has yet to be verified.
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 3: Deceptive Alignment.}
+Sleeper Agents \cite{hubinger2024sleeper} demonstrated that current safety training
+cannot reliably detect and eliminate hidden unsafe behavior in models.
+If future AI systems spontaneously learn strategic deception during training
+(strategically deceiving evaluators to appear aligned),
+all existing behavioral-level evaluation methods will fail.
+Representation-level methods such as RepE offer a theoretical possibility for detecting such behavior,
+but current techniques are far from mature enough to provide reliable guarantees.
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 4: Robustness of Representation-Level Safety.}
+RepE and Circuit Breakers have demonstrated the potential of controlling safety behavior at the representation level,
+but the findings of Arditi et al.\ \cite{arditi2024refusal} also imply a risk:
+if refusal is encoded by only a single linear direction,
+can representation-level defenses be equally easily bypassed by representation-level attacks?
+Will adversarial representation manipulation
+become the primary direction of next-generation jailbreaking?
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 5: Reasoning Chain Safety.}
+The hidden CoT of reasoning models introduces an entirely new dimension of safety challenges:
+how can we ensure that reasoning chains themselves do not contain harmful reasoning
+(e.g., ``Let me think about how to bypass safety restrictions...''),
+while not excessively constraining the model's reasoning capabilities?
+Monitoring and auditing hidden CoT is technically feasible,
+but imposing content restrictions on reasoning chains may impair reasoning quality.
+The more fundamental question is: when reasoning models themselves become jailbreak agents
+\cite{hagendorff2026jailbreakagents},
+is traditional input/output-level safety training fundamentally insufficient?
+Is it necessary to enforce safety constraints at the reasoning process level (rather than only at the output level)?
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 6: Multimodal Safety.}
+When safety research extends from text-only to multimodal settings,
+the attack surface expands dramatically --- images, audio, and video can all serve as attack vectors.
+Visual adversarial examples can embed instructions in images that are invisible to humans but visible to models.
+A systematic solution for multimodal safety remains an open problem
+(\crossref{5}{sec:t5}).
+\end{openproblembox}
+
+\subsection{Chapter Summary}
+
+\begin{figure}[!ht]
+\centering
+\begin{tikzpicture}[
+  node distance=0.6cm and 1.2cm,
+  every node/.style={font=\small},
+  milestone/.style={rectangle, rounded corners, draw=thread3, fill=thread3!10,
+    text width=4.2cm, minimum height=0.8cm, align=center, font=\small\bfseries},
+  branch/.style={rectangle, rounded corners, draw=gray!60, fill=gray!5,
+    text width=3.2cm, minimum height=0.7cm, align=center, font=\small},
+  arrow/.style={-{Stealth[length=2.5mm]}, thick, thread3!70},
+  brancharrow/.style={-{Stealth[length=2mm]}, gray!60, thick},
+]
+% Main timeline
+\node[milestone] (hh) {HH-RLHF (2022)\\Helpfulness--Harmlessness Tension};
+\node[milestone, below=1.2cm of hh] (cai) {Constitutional AI (2022)\\AI Self-Alignment};
+\node[milestone, below=1.2cm of cai] (redteam) {Red Teaming (2022)\\LLM-based Adversarial Testing};
+
+% Branches
+\node[branch, below left=1.2cm and 0.5cm of redteam] (brA) {Branch A: Training\\Safe RLHF, Lagrangian};
+\node[branch, below right=1.2cm and 0.5cm of redteam] (brB) {Branch B: Attack Analysis\\GCG, Jailbreak Taxonomy};
+
+% Convergence
+\node[milestone, below=2.8cm of redteam] (repe) {RepE (2023)\\Representation Engineering};
+\node[milestone, below=1.2cm of repe] (agent) {Reasoning Model Safety\\(2025--2026)};
+\node[branch, below=1.2cm of agent] (conv) {Paradigm Shift: From Behavioral\\to Representation + Agent Safety};
+
+% Arrows
+\draw[arrow] (hh) -- (cai);
+\draw[arrow] (cai) -- (redteam);
+\draw[brancharrow] (redteam) -- (brA);
+\draw[brancharrow] (redteam) -- (brB);
+\draw[arrow] (redteam) -- (repe);
+\draw[arrow] (repe) -- (agent);
+\draw[brancharrow] (brA) -- (repe);
+\draw[brancharrow] (brB) -- (repe);
+\draw[arrow] (agent) -- (conv);
+\end{tikzpicture}
+\caption{Thread 3 evolutionary trajectory: from helpfulness--harmlessness tension to representation engineering and agent safety.
+Red nodes are landmark works; gray nodes are important branches.}
+\label{fig:safety-evolution}
+\end{figure}
+
+\begin{table}[!ht]
+\centering
+\caption{Comparison of core methods in Thread 3. Category distinguishes training-stage methods, attack methods, and analysis/control methods.}
+\label{tab:safety-comparison}
+\small
+\begin{tabularx}{\textwidth}{l c c >{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Method} & \textbf{Category} & \textbf{Human Labels?} & \textbf{Key Mechanism} & \textbf{Limitation} \\
+\midrule
+HH-RLHF & Training & Yes (pairwise) & Single reward encoding helpfulness + harmlessness & Evasiveness from objective conflict \\
+CAI & Training & No (AI) & Constitution principles + RLAIF self-critique & Bounded by model's own judgment \\
+Safe RLHF & Training & Yes (decoupled) & CMDP: maximize $R$ s.t.\ $C \leq d$; Lagrangian $\lambda$ & Still requires human annotation \\
+Red Teaming & Evaluation & Minimal & LM generates attacks; RL-optimized for success rate & Coverage limited to known patterns \\
+GCG & Attack & None & Gradient-based adversarial suffix optimization & White-box; but cross-model transfer \\
+RepE & Control & No & Linear steering vectors in representation space & Safety encoded as fragile single direction \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The evolution of Thread~3 exhibits a clear main thread:
+from HH-RLHF exposing the helpfulness--harm\-less\-ness tension,
+through CAI and Safe RLHF providing systematic training solutions,
+to the jailbreaking arms race continuously challenging the robustness of these solutions.
+RepE initiated a paradigm shift from the behavioral level to the representation level,
+while the proliferation of reasoning models in 2025--2026 elevated safety challenges to an entirely new dimension ---
+when models themselves become attack agents, the entire adversarial landscape undergoes a fundamental transformation.
+This thread has close cross-cutting connections with Thread~2 (preference optimization provides the foundational framework, \crossref{2}{sec:t2}),
+Thread~4 (reasoning capabilities affect the reliability of models following safety reasoning, \crossref{4}{sec:t4}),
+and Thread~5 (multimodal extensions introduce new safety challenges, \crossref{5}{sec:t5}).
+Safety alignment is not a static problem that can be ``solved,''
+but rather a dynamic research direction that continually evolves alongside model capabilities.
+
+\paragraph{Preview of the next chapter.}
+Safety research has revealed a key fact: the stronger a model's reasoning capabilities, the more complex its safety challenges become.
+Thread~4 will trace the evolution of reasoning capabilities ---
+from chain-of-thought prompting to thinking models becoming the default paradigm,
+showing how post-training internalizes reasoning capabilities into model parameters through RL and process supervision.

@@ -1,0 +1,522 @@
+% === Chapter 8: Conclusion ===
+\section{Conclusion}
+\label{sec:t8}
+
+Through seven problem-driven evolutionary threads,
+this book has systematically traced the complete development trajectory of LLM/VLM post-training,
+from early instruction tuning to contemporary RL-based reasoning training.
+This chapter does not repeat the technical details of each thread,
+but instead distills cross-thread commonalities from a macroscopic perspective,
+identifies recurring meta-patterns,
+and offers an outlook on the future evolution of the post-training landscape.
+
+\subsection{Macroscopic Trends}
+\label{sec:t8-trends}
+
+Looking back across the evolutionary trajectories of the seven threads, we can identify seven overarching macroscopic trends.
+
+\paragraph{Trend 1: From supervised imitation to reinforcement learning.}
+The technical center of gravity in post-training has undergone a systematic shift from SFT to RL.
+In the early stage, SFT was the dominant force in post-training ---
+FLAN \cite{wei2022flan}, the SFT stage of InstructGPT \cite{ouyang2022instructgpt},
+and open-source projects such as Alpaca \cite{taori2023alpaca} all revolved around supervised learning as their core.
+\crossref{1}{sec:t1}
+The introduction of RLHF (\crossref{2}{sec:t2}) marked post-training's entry into the phase of optimizing for human preferences,
+but early RLHF still heavily relied on SFT warm start, with RL serving more as a ``fine-tuning of fine-tuning.''
+The true inflection point emerged in the reasoning thread (\crossref{4}{sec:t4}):
+OpenAI o1 \cite{openai2024o1} and DeepSeek-R1 \cite{deepseek2025r1}
+demonstrated that large-scale RL training can elicit entirely new reasoning capabilities from models ---
+capabilities that cannot be obtained through SFT-based imitation of existing data,
+but are instead autonomously discovered through RL's exploration-exploitation mechanism.
+The emergence of compute-efficient RL algorithms such as GRPO \cite{shao2024grpo}
+(\crossref{7}{sec:t7-compute-rl}) further lowered the barrier to RL training,
+expanding the RL-first post-training paradigm from a handful of leading laboratories to the broader community.
+
+\noindent
+The deeper logic underlying this trend is as follows:
+the capability ceiling of SFT is bounded by the quality of human demonstrations in the training data ---
+at best, the model can only learn to do what human annotators are capable of doing.
+RL, by contrast, allows the model to explore strategy spaces beyond human demonstrations through environmental feedback (reward signals),
+with its capability ceiling theoretically bounded only by the quality of the reward signal.
+The transition from an ``imitation ceiling'' to ``reward-guided exploration''
+represents a fundamental shift in post-training --- from ``teaching models to do what humans already know how to do''
+to ``enabling models to discover strategies that humans have not yet mastered.''
+
+\paragraph{Trend 2: From text-only to multimodal.}
+Post-training techniques were initially developed entirely within the text modality,
+yet nearly every core technique has undergone migration to multimodal settings:
+SFT's instruction tuning was extended by LLaVA \cite{liu2023llava} into
+visual instruction tuning (\crossref{5}{sec:t5});
+RLHF was applied by RLHF-V \cite{sun2023rlhfv} to reduce multimodal hallucination;
+DPO was introduced by LLaVA-RLHF \cite{sun2024llava-rlhf} for preference optimization in VLMs.
+This cross-modal migration is not a mere transplantation of techniques ---
+multimodal settings introduce new dimensions of challenge such as visual grounding
+and cross-modal consistency,
+driving substantive extensions and improvements of the original techniques.
+
+\paragraph{Trend 3: From human feedback to automated \& verifiable feedback.}
+The source of feedback signals has undergone three generations of evolution.
+First generation: purely human annotation (InstructGPT's RLHF) ---
+high quality but prohibitively expensive and difficult to scale.
+Second generation: AI feedback ---
+Constitutional AI \cite{bai2022constitutional} enabled models to self-critique,
+RLAIF \cite{lee2023rlaif} used AI to generate preference annotations
+(\crossref{7}{sec:t7-synthetic}),
+and Zephyr \cite{tunstall2023zephyr} achieved a fully zero-human-annotation alignment pipeline.
+\crossref{3}{sec:t3}
+Third generation: verifiable reward ---
+in domains where correctness can be automatically verified, such as mathematics and programming,
+rewards are directly based on ground truth (answer correctness, code passing test cases, etc.),
+completely bypassing reward models and human annotation.
+The success of GRPO \cite{shao2024grpo} and DeepSeek-R1 \cite{deepseek2025r1}
+with verifiable reward (\crossref{4}{sec:t4})
+raises a fundamental question:
+\textbf{Where are the boundaries of verifiable reward?}
+Which capabilities can be formalized into verifiable rewards, and which cannot?
+
+\paragraph{Trend 4: From single-turn instruction following to agentic capability.}
+The target behavior of models has evolved from ``answering a single question''
+to ``completing multi-step complex tasks within an environment.''
+Early SFT focused on single-turn instruction following (\crossref{1}{sec:t1}),
+which then expanded to multi-turn dialogue (LIMA's ablation study on 30 dialogue examples demonstrated the importance of this direction,
+\crossref{7}{sec:t7-data-selection}),
+then to tool use (Toolformer \cite{schick2023toolformer}, \crossref{6}{sec:t6}),
+and ultimately evolved into full agentic behavior ---
+encompassing task planning, tool selection, error recovery, and long-term memory management.
+This evolutionary direction poses new data and evaluation challenges for post-training:
+agent training data must include trajectories (rather than independent QA pairs),
+and evaluation must be conducted in interactive environments (rather than on static benchmarks).
+
+\paragraph{Trend 5: From prohibitive cost to democratized access.}
+The efficiency techniques of Thread~7 have expanded post-training from an exclusive domain of large laboratories
+to an activity accessible to the entire research community and industry.
+LoRA \cite{hu2022lora} reduced the parameter count by 10,000$\times$,
+QLoRA \cite{dettmers2023qlora} made 65B models trainable on a single 48GB GPU
+(\crossref{7}{sec:t7-foundation}),
+Self-Instruct \cite{wang2023selfinstruct} and UltraChat \cite{ding2023ultrachat}
+reduced data acquisition costs by several orders of magnitude,
+and GRPO \cite{shao2024grpo} eliminated the most resource-intensive component of PPO --- the value model.
+The cumulative effect of this ``efficiency stack'' is profound ---
+it not only lowered the barrier to entry but also accelerated the iteration speed of the entire field,
+creating a positive feedback loop:
+lower cost $\rightarrow$ more research participants $\rightarrow$
+faster methodological innovation $\rightarrow$ more efficient techniques $\rightarrow$ lower cost.
+
+\paragraph{Trend 6: Thinking models as the default paradigm.}
+The most prominent paradigm shift of 2025--2026 is the evolution of reasoning capability
+from ``a specialized ability of dedicated models'' to ``a default mode of general-purpose models'' (\crossref{4}{sec:t4-thinking-models}).
+The OpenAI o3 series \cite{openai2025o3}, DeepSeek V3.1/V3.2 \cite{deepseek2025v32},
+and Qwen3 \cite{yang2025qwen3}
+all embed reasoning as a switchable mode within general-purpose models.
+This shift has had profound implications for the post-training pipeline:
+SFT is no longer the final step but rather the foundation for cold-starting reasoning capabilities (\crossref{1}{sec:t1-2025}),
+RLVR has become the core training method for acquiring reasoning capabilities (\crossref{2}{sec:t2-rlvr}),
+and thinking mode fusion has become a new component in the post-training pipeline.
+
+\paragraph{Trend 7: Computer use and the agentic frontier.}
+In 2024--2025, LLM agents evolved from calling predefined APIs
+to directly operating computer graphical user interfaces (\crossref{6}{sec:t6-computer-use}).
+Systems such as Claude Computer Use \cite{anthropic2024computeruse}
+and OpenAI Operator \cite{openai2025operator} demonstrated
+the ability of AI agents to complete complex tasks in real desktop and browser environments.
+Meanwhile, standardized protocols such as MCP \cite{anthropic2024mcp} and
+the emergence of Agent SDKs are pushing agents from experimental prototypes toward industrial deployment.
+This trend poses entirely new training data and evaluation challenges for post-training:
+agent training requires GUI interaction trajectories rather than traditional text-only QA pairs,
+and evaluation must be conducted through end-to-end testing in real software environments.
+
+\subsection{Cross-Thread Meta-Patterns}
+\label{sec:t8-meta}
+
+Beneath the macroscopic trends described above,
+the evolution across threads has repeatedly exhibited several structural meta-patterns.
+These patterns are not confined to any single thread
+but constitute common regularities that pervade the post-training landscape.
+
+\paragraph{Pattern 1: Simplification Through Reformulation.}
+Nearly every thread has undergone a process in which ``complex methods are replaced by more elegant reformulations'':
+\begin{itemize}[leftmargin=2em]
+  \item Thread~2: PPO (4 models + complex training loop)
+    $\rightarrow$ DPO (reformulated as a classification loss, 2 models).
+  \item Thread~4: PPO + value model + GAE
+    $\rightarrow$ GRPO (eliminating the value model, group-relative reward).
+  \item Thread~7: Full fine-tuning (updating all parameters)
+    $\rightarrow$ LoRA (low-rank decomposition, 0.01\% of parameters).
+\end{itemize}
+These simplifications were not achieved by sacrificing performance ---
+DPO matches or surpasses PPO, GRPO surpasses PPO, and LoRA matches full fine-tuning ---
+but rather by discovering redundant computational structures in the original problem
+through \textbf{mathematically equivalent transformations or low-rank approximations}.
+This pattern hints at a deeper regularity:
+many seemingly complex problems in post-training
+have an effective dimensionality far lower than their surface complexity.
+
+\paragraph{Pattern 2: Data Quality $\gg$ Data Quantity.}
+Evidence across multiple threads consistently supports the conclusion that ``data quality matters far more than quantity'':
+\begin{itemize}[leftmargin=2em]
+  \item Thread~1/7: LIMA matched the performance of RLHF models using only 1,000 high-quality examples.
+  \item Thread~7: AlpaGasus surpassed the full 52K Alpaca dataset using a 9K high-quality subset.
+  \item Thread~7: Phi-1 used textbook-quality synthetic data to train a 1.3B model that outperformed
+    models 10$\times$ larger.
+  \item Thread~7: Muennighoff et al.\ found that perplexity-based quality filtering
+    was more effective than simple deduplication.
+\end{itemize}
+This pattern forms an elegant resonance with LoRA's low-rank finding:
+if the ``information content'' required for alignment is inherently small (the Superficial Alignment Hypothesis),
+then a small amount of high-quality data naturally suffices ---
+adding low-quality data merely introduces noise in a high-dimensional space
+without increasing the effective information content.
+
+\paragraph{Pattern 3: The Teacher $\rightarrow$ Self-Improvement Loop.}
+Post-training techniques are evolving from ``reliance on an external teacher'' toward ``model self-improvement'':
+\begin{itemize}[leftmargin=2em]
+  \item Data generation: Self-Instruct (using the model itself to generate training data)
+    $\rightarrow$ Humpback (using the model to generate instructions for web text)
+    $\rightarrow$ Self-Play (the model plays against itself to generate preference data).
+  \item Feedback: Human feedback $\rightarrow$ AI feedback (RLAIF, CAI)
+    $\rightarrow$ Self-reward (the model evaluates its own outputs).
+  \item Reasoning: SFT imitating CoT $\rightarrow$
+    RL autonomously discovering reasoning strategies (DeepSeek-R1's ``aha moment'').
+\end{itemize}
+This pattern reveals the ultimate direction of post-training:
+\textbf{reducing dependence on external resources (human annotations, strong model APIs)
+and enabling models to continuously improve through self-interaction and environmental feedback}.
+However, this simultaneously introduces new risks ---
+self-improvement loops may amplify existing model biases (bias amplification)
+or converge to local optima rather than global optima (mode collapse).
+
+\paragraph{Pattern 4: Cross-Thread Technique Migration.}
+The cross-thread citation structure of this book reveals a highly active pattern of technique migration:
+reward modeling concepts flowed from Thread~2 to Thread~4 (process reward model),
+then back to Thread~2 through GRPO;
+SFT's instruction tuning flowed from Thread~1 to Thread~5 (LLaVA) and Thread~6 (Toolformer);
+Thread~7's LoRA enabled low-cost training across all other threads.
+The rise of the RLVR paradigm in 2025 provides a new exemplary case:
+the RLVR concept was systematized in Thread~2 (DAPO \cite{yu2025dapo}),
+applied at scale in Thread~4 (reasoning training),
+and then rapidly migrated to Thread~5 (R1-VL \cite{zhang2025r1vl}, MM-Eureka \cite{meng2025mmeureka}),
+forming a clear migration path of T2 $\rightarrow$ T4 $\rightarrow$ T5.
+This dense flow of techniques implies that \textbf{post-training is fundamentally a highly interconnected research network,
+rather than a collection of independent research directions}.
+Any breakthrough in one thread can produce cascading effects in others ---
+for example, GRPO was introduced in Thread~7 as an efficiency innovation,
+but its greatest impact manifested in Thread~4 (DeepSeek-R1's reasoning training).
+
+\paragraph{Pattern 5: Evaluation Bottleneck.}
+A systemic challenge that pervades all threads is the lag in evaluation methodology:
+\begin{itemize}[leftmargin=2em]
+  \item Thread~2: Reward model overoptimization ---
+    proxy reward continues to rise while true reward declines.
+  \item Thread~3: Safety benchmarks cannot cover the long tail of jailbreak strategies.
+  \item Thread~4: Static reasoning benchmarks cannot assess models' exploratory reasoning capabilities.
+  \item Thread~6: Agent evaluation requires interactive environments,
+    and existing benchmarks are far less comprehensive than text-only evaluation.
+\end{itemize}
+The gap between the rapid iteration of training methods and the relative lag of evaluation methods
+is one of the most important systemic challenges facing the post-training field.
+
+\subsection{Future Directions}
+\label{sec:t8-future}
+
+Based on the trends and meta-patterns described above,
+we outline several key future directions for the post-training field.
+
+\paragraph{Direction 1: Unified Post-Training Pipeline.}
+Current post-training is typically a multi-stage sequential process (SFT $\rightarrow$ RM $\rightarrow$ RL,
+or SFT $\rightarrow$ DPO),
+with each stage having independent data, hyperparameters, and optimization objectives.
+An important open question is:
+\textbf{Can we design a unified single-stage post-training framework
+that simultaneously optimizes multiple objectives including instruction following, safety, and reasoning?}
+ORPO \cite{hong2024orpo} (merging SFT and DPO into a single stage) and
+Self-Play \cite{chen2024selfplay} (merging data generation and preference optimization)
+have taken preliminary steps in this direction,
+but there remains a long road toward a truly unified framework.
+
+\paragraph{Direction 2: Extending Verifiable Reward --- From a dichotomy to a consistency spectrum.}
+The success of GRPO and DeepSeek-R1 is highly dependent on verifiable reward
+(mathematical answer correctness, code execution passing tests, etc.).
+However, many important capability dimensions in post-training ---
+creative writing, open-ended dialogue, value alignment ---
+lack natural verifiable rewards.
+The traditional approach divides reward signals into ``verifiable'' and ``non-verifiable'' categories,
+but this dichotomy overlooks a critical middle ground:
+\textbf{consistency verification constitutes a spectrum from external verification to purely internal signals} ---
+external consistency (verifiable reward, answer $=$ ground truth)
+$\rightarrow$ evaluator consistency (reward model's preference judgment)
+$\rightarrow$ internal consistency (self-consistency across multiple model samples).
+The most active explorations of the past two years have been concentrated on the internal consistency end of this spectrum.
+
+\textbf{Self-consistency as reward} has an evolutionary chain that reveals the maturation of this direction.
+ScPO \cite{prasad2024scpo} was the first to elevate self-consistency from an inference-time voting mechanism
+to a training-time preference signal ---
+by identifying the most consistent (winner) and least consistent (loser) responses through multiple sampling,
+constructing preference pairs for optimization, and approaching supervised performance on GSM8K and MATH.
+However, SRT \cite{sheikh2025srt} discovered a critical failure mode:
+when a model uses majority voting consistency as its sole reward,
+\textbf{consistency collapse} occurs --- the model learns to maximize consistency rather than correctness,
+generating increasingly uniform but potentially incorrect answers,
+which is essentially a new form of reward hacking.
+Co-Rewarding \cite{corewarding2025} mitigated this issue by introducing cross-view supervision:
+cross-verification among multiple model perspectives breaks the self-reinforcing cycle of a single model.
+CoVo \cite{zhang2025covo} proposed a more refined dual-signal design ---
+simultaneously measuring the \textit{consistency} of reasoning paths (the degree of convergence of intermediate states toward the final answer)
+and their \textit{volatility} (the degree of deviation toward alternative answers),
+matching or surpassing supervised RL performance without any external labels.
+
+\noindent
+Beyond the self-consistency path,
+two alternative approaches deserve attention.
+JEPO \cite{jepo2025} treats chain-of-thought as a latent variable
+and completely bypasses the need for verifiable reward by optimizing Jensen's evidence lower bound ---
+matching verifiable-reward-based RL on mathematical tasks and significantly surpassing it on open-domain tasks.
+RLPR \cite{yu2025rlpr} uses the model's own token probability for the reference answer as a reward,
+substituting internal confidence signals for external verifiers.
+
+\noindent
+The core open problem in this direction is:
+\textbf{A unified reward-free RL framework does not yet exist.}
+ScPO/CoVo relies on sampling consistency, JEPO relies on ELBO approximation, and RLPR relies on token probability ---
+these methods each have strengths and weaknesses across different task types,
+but lack a theory that unifies them within a single mathematical framework.
+More importantly, for open-ended creative tasks (such as creative writing and values-oriented dialogue),
+even self-consistency signals are not naturally applicable ---
+the relationship between ``consistency'' and ``quality'' of creative responses is far more complex than in mathematical reasoning.
+
+\paragraph{Direction 3: Post-Training for Continual Learning.}
+Current post-training is typically a one-shot process ---
+once a model is trained, it is deployed and never updated.
+But the real world continuously generates new knowledge, new demands, and new safety threats.
+\textbf{How can we achieve continual post-training
+without forgetting previously acquired capabilities?}
+The modular nature of LoRA provides a natural framework for this ---
+LoRA adapters for different time points and capability dimensions can be independently trained, composed, and swapped ---
+but interference between adapters and compositional generalization
+remain unsolved challenges.
+
+\paragraph{Direction 4: Theoretical Foundations of Post-Training.}
+Despite the enormous practical success of post-training,
+its theoretical understanding remains quite limited.
+Core open theoretical questions include:
+(1) When does LoRA's low-rank assumption hold, and when does it break down?
+What is its relationship to the pre-training data distribution and downstream tasks?
+(2) Under what conditions are DPO and RLHF equivalent?
+Existing equivalence proofs rely on strong assumptions (such as the Bradley-Terry model) ---
+how large is the gap when these assumptions are violated in practice?
+(3) What is the fundamental limit of reward model overoptimization?
+Do alignment methods exist that do not depend on reward model accuracy?
+(4) Convergence guarantees for self-improvement loops ---
+under what conditions does model self-training converge to better solutions,
+and under what conditions does it lead to mode collapse or bias amplification?
+
+\paragraph{Direction 5: Safety-Aware Efficiency.}
+Thread~3 (Safety) and Thread~7 (Efficiency) have largely developed independently,
+but a potential tension exists between them:
+do efficiency techniques (such as synthetic data, distillation, and LoRA)
+inadvertently undermine the effectiveness of safety alignment?
+Does LoRA's low-rank constraint limit the model's ability to express complex safety boundaries?
+Does the distillation process lose the nuanced safety behaviors of the teacher model?
+\textbf{Designing post-training methods that maintain efficiency without sacrificing safety}
+is a research direction of both practical significance and theoretical depth.
+
+\paragraph{Direction 6: Meta-Capability Training \& Adaptive Reasoning.}
+The preceding directions focus on \textit{what} to train (pipeline, reward, safety);
+Direction 6 asks a different question:
+\textbf{Can post-training cultivate meta-cognitive capabilities
+(self-verification, strategy selection, effort allocation),
+and allow users to dynamically trade off between reasoning depth and response latency?}
+
+The impact of post-training on model capabilities can be decomposed into three mechanisms:
+\textbf{unlocking potential} (activating capabilities that were compressed but poorly organized during pre-training),
+\textbf{assembling strategies} (combining basic capabilities into new behavioral patterns), and
+\textbf{connecting tools} (teaching the model to use external tools, \crossref{6}{sec:t6}).
+This implies that the capability ceiling of post-training is largely determined by pre-training.
+However, \textbf{meta-capability} may be an exception ---
+it resembles a \textit{computational pattern} rather than specific knowledge,
+and RL's reward signal is naturally suited to reinforcing such behavioral patterns of ``when to adopt which strategy.''
+
+\noindent
+\textbf{The empirical boundary between ``unlocking'' and ``creating.''}
+Yue et al.\ \cite{yue2025rlvr} (NeurIPS 2025) found that:
+while models after RLVR training significantly surpass the base model on pass@1,
+when the number of samples $k$ is sufficiently large, the base model's pass@$k$ is actually higher ---
+\textbf{RLVR does not create new reasoning paths
+but learns to more efficiently select the correct paths that already exist in the base model}.
+Du et al.\ \cite{du2025reshaping} (COLM 2025 Outstanding Paper)
+provided complementary evidence from a mechanistic interpretability perspective:
+post-training does not change where knowledge is stored;
+its effects can be decomposed into independent adjustments to truthfulness, refusal behavior, and confidence.
+\textbf{Meta-capability may be one of the rare exceptions where post-training truly ``creates''
+rather than merely ``unlocks''} ---
+because computational strategies like ``when to verify'' and ``when to give up''
+lack direct training signals in the next-token prediction objective of pre-training.
+
+\noindent
+\textbf{Why RL $>$ SFT for meta-capability.}
+Chu et al.\ \cite{chu2025sftrl} (ICML 2025) provided the most direct empirical comparison:
+RL-trained models generalize across domains on both rule-based and visual variants,
+while SFT performs well only within the training distribution ---
+\textbf{SFT memorizes, RL generalizes}.
+\textbf{SCoRe} \cite{kumar2024score}
+was the first to demonstrate that multi-turn RL can effectively train self-correction,
+and revealed two mechanistic reasons for SFT's failure:
+distribution mismatch (SFT data reflects the error distribution of the data collection policy
+rather than the model's own error distribution) and behavior collapse.
+``Does Math Reasoning Improve General Capabilities?'' \cite{mathreasoning2025}
+further found that RL training preserves the stability of latent-space geometry,
+while SFT distorts the representation space, explaining the geometric basis of RL's cross-domain transfer ability.
+Li et al.\ \cite{transfer2025} and Sun et al.\ \cite{sun2025grokking}
+provided further evidence from the perspectives of transferability and phase transitions, respectively.
+
+\noindent
+\textbf{Adaptive reasoning: From ``whether to reason'' to ``what to do when reasoning goes wrong.''}
+The proliferation of thinking models (Trend 6) raises a practical question:
+how can users dynamically trade off between reasoning depth and response latency?
+Kimi k1.5's long2short training \cite{moonshot2025kimi} and
+Qwen3's thinking mode fusion \cite{yang2025qwen3}
+have already demonstrated the feasibility of adjustable reasoning budgets within a single model.
+Chen et al.\ \cite{chen2025underthinking} systematically quantified
+the two failure modes of underthinking and overthinking;
+Sui et al.\ \cite{sui2025stopoverthinking} systematized efficient reasoning methods into
+three categories of strategies: model-based, reasoning output-based, and input prompt-based.
+At the post-training level, adaptive compute allocation now spans three tiers:
+\textit{whether to reason} --- AdaptThink \cite{zhang2025adaptthink} trains models to autonomously choose between Think and NoThink modes;
+\textit{how deeply to reason} --- SelfBudgeter \cite{selfbudgeter2025}
+and AutoThink \cite{tu2025autothink} achieve adaptive token allocation
+(50--60\% token compression with no accuracy loss);
+\textit{what to do when reasoning goes wrong} --- Self-Backtracking \cite{selfbacktracking2025}
+trains models to proactively backtrack along erroneous reasoning paths.
+\textbf{Meta-R1} \cite{dong2025metar1} and \textbf{MERA} \cite{ha2025mera}
+further add an explicit meta-level cognitive layer,
+and S$^2$R \cite{ma2025s2r} trains a unified self-verify + self-correct capability.
+
+\noindent
+\textbf{Calibration as the highest-leverage meta-capability.}
+Among all meta-capabilities, calibration (a model's accurate estimation of its own correctness)
+may be the one with the highest leverage ---
+it is both a prerequisite for self-correction and the foundation for effort allocation,
+as well as a critical dimension of safety (an overconfident wrong answer is more dangerous than admitting uncertainty).
+However, AbstentionBench \cite{abstentionbench2025} found that
+reasoning fine-tuning reduces models' abstention ability by an average of 24\% ---
+\textbf{reasoning training makes models stronger but also more prone to ``not knowing what they don't know''}.
+Leng et al.\ \cite{leng2024tamingoverconfidence}
+revealed that the reward model in RLHF exhibits a systematic preference for high-confidence responses.
+To address this issue,
+RLCR \cite{damani2025rlcr} designs RL rewards based on bounded proper scoring rules (such as the Brier score),
+making honest confidence reporting the optimal strategy;
+``Rewarding Doubt'' \cite{stangel2025rewardingdoubt}
+uses a logarithmic scoring rule to simultaneously penalize over-confidence and under-confidence;
+MASA \cite{masa2025} extends calibration to a more general notion of meta-awareness
+and demonstrates that this capability can transfer across domains.
+
+\noindent
+Taken together, the core direction of meta-capability training is
+\textbf{integrating calibration, self-correction, and effort allocation
+into a unified meta-cognitive RL framework} ---
+so that models can not only ``think'' but also accurately assess whether they are thinking correctly,
+determine when deeper thinking is needed,
+and recognize when they should candidly say ``I'm not sure.''
+At the system deployment level, this points toward
+reasoning as a metered resource ---
+treating ``thinking tokens'' as an independent computational resource at the inference service layer,
+with pricing and scheduling that allow different application scenarios to select the optimal reasoning budget
+based on the latency-accuracy tradeoff.
+
+\paragraph{Direction 7: Adaptive Learning Loop --- Observation, Adaptation, and Continuous Evolution.}
+A fundamental bottleneck in post-training is the \textbf{``observation problem''}:
+scalar loss or scalar reward obscures the dynamic changes across multi-dimensional capabilities.
+When training reward continues to rise, the model may be severely degrading on certain dimensions,
+but these degradations are masked by the averaging effect of aggregate metrics.
+ProbeLLM \cite{huang2026probellm}, through hierarchical MCTS,
+proactively searches for model failure regions (see \S\ref{sec:t5-self-evolving} for technical details),
+revealing that even the strongest models harbor extensive latent weaknesses.
+Quantitative studies on the ``alignment tax'' further confirm this issue:
+Lin et al.\ \cite{lin2024alignmenttax} found that RLHF causes different capability dimensions to degrade at different rates,
+Huang et al.\ \cite{huang2025safetytax} quantified that safety alignment reduces reasoning capability by 7--31\%,
+and Du et al.\ \cite{du2025reshaping}
+decomposed the effects of post-training into four dimensions from a mechanistic interpretability perspective.
+Toward more efficient diagnostics,
+ATLAS \cite{li2025atlas} uses IRT-based adaptive testing to reduce the number of evaluation items by 90\%,
+LiveBench \cite{white2024livebench} and AutoDetect \cite{cheng2024autodetect}
+integrate evaluation into the training loop,
+and Wu et al.\ \cite{wu2024featuretracking} use SAEs to track feature-level dynamics.
+
+\noindent
+\textbf{From diagnosis to action: Diagnostic-Driven Adaptive Training.}
+Once the capability profile has been observed, how can training be adaptively adjusted?
+The core principle is the \textit{closed loop}:
+diagnose weaknesses $\rightarrow$ generate targeted data $\rightarrow$ train $\rightarrow$ re-diagnose.
+DPE \cite{jia2026dpe}'s $p(1-p)$ analysis reveals a key information-theoretic principle:
+\textbf{the most informative training signal comes from samples the model ``half-knows''} ---
+that is, samples at the model's decision boundary.
+Multiple independent works have converged on the same conclusion from different mathematical frameworks:
+AERO \cite{gao2026aero}'s entropy-based positioning,
+VCRL \cite{jiang2025vcrl}'s reward variance proxy,
+DGPO \cite{dai2026dgpo}'s difficulty-aware reweighting,
+and Actor-Curator \cite{gu2026actorcurator}'s bandit formulation ---
+all methods converge on \textbf{sampling near the model's decision boundary to maximize information gain}.
+The ``Difficulty Shift'' phenomenon reported by Zhang et al.\ \cite{zhang2025adcl}
+(static difficulty labels rapidly become obsolete as model capabilities evolve)
+further argues for the necessity of closed-loop diagnostics.
+Beyond the decision boundary, \textbf{high-confidence errors} constitute a complementary high-value training signal:
+ACE \cite{ace2026} applies asymmetric penalties to overconfident errors,
+forcing the model to re-examine cognitive blind spots where it is ``certain but actually wrong'';
+LENS \cite{feng2025lens} extracts training signals from groups of universally failed samples,
+enabling the model to learn even from ``total failures.''
+DPE's $p(1-p)$ region and ACE/LENS's high-confidence error region
+together paint a more complete picture of the training signal distribution:
+\textbf{the decision boundary provides maximum information gain,
+while high-confidence error regions correct the most dangerous cognitive illusions}.
+
+\noindent
+\textbf{Continuous evolution: Breaking through static data saturation.}
+Once the training signal from a fixed dataset is exhausted, how can a model continue to evolve?
+Naive self-play collapses ---
+when a model plays against itself, it tends to converge to trivial equilibria
+\cite{liu2026selfplayinfo,sheikh2025srt,yi2025collapse}.
+Solutions can be categorized into three types:
+corpus-grounded self-play (SPICE \cite{liu2025spice}, SPELL \cite{yang2025spell}),
+meta-RL teacher (SOAR \cite{sundaram2026soar}, which generates problems positioned just above the student's capability boundary),
+and replay buffer engineering (ExGRPO \cite{zhan2025exgrpo}).
+
+\noindent
+The three layers described above --- observation, adaptation, and continuous evolution --- form a complete adaptive learning loop:
+ProbeLLM $\approx$ perception system (localizing failure modes),
+DPE $\approx$ action system (generating targeted training data),
+and self-play mechanisms $\approx$ continuous evolution engine.
+However, this loop still has three critical gaps:
+(1) Systematic blind spots of the diagnostician itself ---
+if the probing model is equally weak on a certain capability dimension, it cannot effectively diagnose that dimension;
+(2) Representation of continuous capability spaces ---
+predefined categories may miss cross-dimensional weaknesses;
+(3) Reward mechanisms for non-verifiable tasks ---
+when there is no ground truth, the ``correctness'' of the diagnosis itself is difficult to define.
+
+\paragraph{Direction 8: Multi-Objective Post-Training --- Pareto Optimization.}
+Post-training simultaneously optimizes multiple mutually interfering objectives
+(helpfulness, safety, reasoning, calibration).
+Emerging solutions point toward \textbf{orthogonal subspace decomposition} ---
+projecting the gradients of different objectives into mutually non-interfering subspaces.
+PAMA \cite{he2025pama} provides an $O(n)$ closed-form Pareto solution,
+OrthAlign \cite{orthalign2025} achieves 34--51\% improvement on individual dimensions without harming others,
+and NSPO \cite{nspo2025} performs safety optimization within the null space of capability.
+The maturation of this direction will transform post-training from
+``a tradeoff where improving one objective compromises another''
+into ``systematic engineering that precisely navigates the Pareto frontier.''
+
+\bigskip
+\noindent
+In summary, post-training is evolving from an SFT-centric ``formatting'' stage
+into an RL-driven ``capability discovery'' stage.
+The underlying logic of this transition is clear:
+pre-training endows models with a vast knowledge base and linguistic abilities,
+and the task of post-training has deepened from ``teaching models how to present these abilities'' (the SFT paradigm)
+to ``enabling models to discover new behavioral strategies through reward-guided exploration'' (the RL paradigm).
+The proliferation of thinking models and the breakthroughs in computer use in 2025--2026 further confirm this direction:
+RL can not only elicit reasoning capabilities but also train models to execute complex multi-step operations in real environments.
+At the same time, continuous advances in efficiency techniques have made these powerful but expensive training paradigms
+accessible to a much broader range of research and application.
+From the early explorations of RLHF in 2017 to the establishment of thinking models as the default paradigm in 2026,
+the continuous cross-pollination and fusion of the seven evolutionary threads suggest that
+\textbf{the future of post-training will no longer be a simple combination of independent techniques,
+but rather a unified, multi-objective, continuously evolving training system}.

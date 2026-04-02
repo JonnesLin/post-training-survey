@@ -1,0 +1,966 @@
+% !TEX root = ../main.tex
+% Chapter 06: Thread 6 — Tool Use & Agentic Capabilities
+
+\section{Thread 6: Tool Use \& Agentic Capabilities}
+\label{sec:t6}
+
+Large language models have demonstrated remarkable capabilities in text generation, yet they remain fundamentally ``closed systems''---unable to access external tools, retrieve real-time information, or perform precise computations. This chapter traces how post-training transforms LLMs from passive text generators into \emph{agentic} systems capable of invoking tools, interacting with environments, and coordinating multi-step task execution. The core data structure along this evolutionary thread expands from ``pure text sequences'' to interleaved sequences of ``text + API calls + environment feedback,'' giving rise to four major branches: function calling, agent tuning, code generation alignment, and multi-tool orchestration.
+
+\evolution{LLMs can only generate text and cannot interact with the external world}{LLMs act as agents that invoke tools, plan, and execute multi-step tasks}{tool use training + reasoning-action loop}
+
+
+% ============================================================
+\subsection{Problem Origin: LLMs Cannot Execute Real-World Tasks}
+\label{sec:t6-origin}
+% ============================================================
+
+\begin{problembox}
+Three fundamental limitations of LLMs prevent them from performing real-world task execution:
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Knowledge cutoff}: Pre-training data is temporally truncated, preventing the model from accessing information that emerged after training, leading to outdated or even hallucinated responses.
+  \item \textbf{Inability to perform precise computation}: Even for simple arithmetic operations (e.g., $735/499$), LLMs tend to guess rather than compute accurately; error accumulation in mathematical reasoning is especially difficult to avoid.
+  \item \textbf{Inability to interact with external environments}: Models cannot browse the web, query databases, call APIs, or manipulate file systems---yet these are fundamental requirements for real-world tasks.
+\end{enumerate}
+\end{problembox}
+
+These limitations were repeatedly confirmed in early research. \citet{komeili2022internet} and \citet{thoppilan2022lamda} respectively demonstrated that granting models access to search engines can significantly reduce factual errors, but these approaches relied on extensive human annotation or task-specific designs and lacked generality. \citet{patel2021nlp} showed that even the largest LLMs perform far worse than small dedicated calculators on simple math problems. The systematic survey by \citet{ji2022hallucination} further demonstrated that the hallucination problem cannot be fundamentally solved merely by scaling up model size---models need the ability to \emph{access external information sources}.
+
+From a post-training perspective, the essence of the problem is that pre-training only teaches models to ``predict the next token,'' not to ``select the right tool at the right time and use it correctly.'' The latter requires an entirely new training paradigm---one that teaches models \emph{when} to invoke tools, \emph{which} tool to invoke, and \emph{how} to integrate tool-returned results into subsequent generation.
+
+Notably, \textbf{code generation} provides an indirect but extremely important pathway for tool use.
+Codex \cite{chen2021codex} (GPT-3 fine-tuned by OpenAI on GitHub code)
+demonstrated that LLMs can serve as general-purpose code generators,
+and code itself is a form of ``tool invocation language''---by generating executable code,
+LLMs can indirectly call arbitrary APIs, perform computations, and manipulate file systems.
+The success of Codex laid the foundation for subsequent ``code-as-action'' paradigms
+such as PAL \cite{gao2022pal} (Thread~4, \crossref{4}{sec:t4-origin})
+and Code as Policies \cite{liang2023codepolicies}.
+
+
+% ============================================================
+\subsection{Foundational Methods: Enabling LLMs to Use External Tools}
+\label{sec:t6-foundation}
+% ============================================================
+
+Between 2021 and 2023, three foundational works emerged, each addressing the core problem of ``enabling LLMs to use external tools'' through different technical approaches.
+
+% --- WebGPT ---
+\subsubsection{WebGPT: Browser-Assisted Question Answering via Human Feedback}
+
+\landmark{nakano2022webgpt} was among the earliest systems to combine LLMs with external tools and optimize them through post-training. Its core insight was: rather than improving the LLM's internal knowledge, give it a browser and let it search, browse, and cite web information just as a human would.
+
+\paragraph{System design.} WebGPT built a text-based web browsing environment on top of GPT-3. The model can execute a set of discrete action commands: \texttt{Search <query>} (send a Bing search), \texttt{Click on link <ID>} (click a link), \texttt{Quote <text>} (extract a citation), \texttt{Scroll} (page down), etc. The environment state is converted into textual descriptions and fed back to the model, forming a multi-turn interaction loop. A key design feature is that the model must collect \emph{references} during browsing---this enables human annotators to judge the factual accuracy of answers based on citations, without needing to verify facts themselves.
+
+\paragraph{Training pipeline.} Training proceeds in four stages:
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Behavior Cloning (BC)}: Approximately 6,000 human demonstration trajectories were collected (92\% from the ELI5 dataset), and supervised fine-tuning was used to teach the model basic browsing operation patterns.
+  \item \textbf{Reward Modeling (RM)}: Approximately 21,500 pairs of human comparison data on model-generated answers were collected to train a reward model that predicts human preferences (expressed as Elo scores).
+  \item \textbf{Reinforcement Learning (RL)}: The PPO algorithm was used to optimize the BC model based on the reward model, obtaining reward scores at the end of each episode, with KL penalty relative to the BC policy to prevent reward hacking.
+  \item \textbf{Rejection Sampling (best-of-$n$)}: $n$ answers are generated from the BC or RL model, and the reward model selects the best one. This approach requires no additional training but consumes more inference compute.
+\end{enumerate}
+
+\paragraph{Experimental results.} The best model (175B best-of-64) on the ELI5 dataset was judged by humans to be preferred over human demonstrators 56\% of the time and over the highest-voted Reddit answers 69\% of the time. On TruthfulQA, WebGPT outperformed all GPT-3 variants on both truthfulness and informativeness, with performance continuing to improve as model scale increased---a stark contrast to base GPT-3, which on TruthfulQA becomes more prone to imitative falsehoods as scale increases.
+
+\paragraph{Post-training perspective.} WebGPT pioneered the application of the RLHF pipeline (BC $\rightarrow$ RM $\rightarrow$ RL) to tool use scenarios, demonstrating that reward models can effectively evaluate complex behaviors involving multi-turn tool interactions. Moreover, the finding that rejection sampling outperformed RL in this setting suggests that the unpredictability of the environment makes it difficult for train-time RL to explore sufficiently---an observation with important implications for subsequent agent training research.
+
+% --- Toolformer ---
+\subsubsection{Toolformer: Self-Supervised Tool Use Learning}
+
+WebGPT relied on extensive human demonstrations and feedback, making it costly. \landmark{schick2023toolformer} proposed a fundamentally different approach: let the model \emph{teach itself} to use tools. This represents a purely elegant engineering solution---replacing human annotation with perplexity as a self-supervised signal.
+
+\paragraph{Core method.} Toolformer's training consists of three steps:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Sampling API calls}: For each piece of text $\mathbf{x} = x_1, \ldots, x_n$ in the training corpus, the model's own in-context learning ability is leveraged to sample candidate API calls $c_i^1, \ldots, c_i^k$ at each possible position $i$. Specifically, for each position, the probability $p_i$ of the model generating an \texttt{<API>} token is computed, retaining only positions where $p_i > \tau_s$, and then sampling specific call content from those positions.
+
+  \item \textbf{Executing API calls}: All candidate API calls are actually executed to obtain return results $r_i$. Supported tools include a QA system (Atlas), calculator, Wikipedia search (BM25), machine translation (NLLB-600M), and calendar.
+
+  \item \textbf{Filtering based on perplexity}: This is the essence of the method. A weighted cross-entropy loss $L_i(\mathbf{z})$ is defined, comparing two quantities: $L_i^+$ (the loss when the API call and its result are prepended as a prefix) and $L_i^-$ (the lesser of the loss without an API call and the loss with only the call but without its result). Only calls satisfying $L_i^- - L_i^+ \geq \tau_f$ are retained---i.e., calls where the API invocation and its result \emph{genuinely reduce the difficulty of predicting subsequent tokens}.
+\end{enumerate}
+
+After filtering, the retained API calls are embedded into the original text using special tokens (\texttt{<API>}, \texttt{</API>}, \texttt{$\rightarrow$}), forming an augmented dataset $\mathcal{C}^*$, on which the model is fine-tuned with the standard language modeling objective.
+
+\paragraph{Inference mechanism.} At inference time, when the top-$k$ tokens generated by the model include \texttt{<API>}, normal decoding is interrupted, the corresponding API call is executed, and the result is inserted before generation continues. In experiments, $k=10$ is used to encourage the model to use tools more actively.
+
+\paragraph{Experimental results.} Toolformer, based on GPT-J (6.7B), achieved significant improvements in the zero-shot setting: on the LAMA knowledge completion task, it led the GPT-J baseline by 11.7--18.6 percentage points; on mathematical reasoning (ASDiv/SVAMP/MAWPS), it surpassed GPT-J by 2--3$\times$, even exceeding the 25$\times$ larger GPT-3 (175B). In terms of language modeling perplexity, tool-augmented fine-tuning caused no degradation---perplexity with API calls disabled remained comparable to the original model. Scaling experiments showed that tool use ability begins to emerge at approximately 775M parameters.
+
+\paragraph{Limitations.} Toolformer's key limitation is its inability to perform \emph{chained tool calls} (i.e., using one tool's output as another tool's input), since API calls are independently sampled and filtered. It also does not support interactive tool use (e.g., reformulating a query based on search results). These are precisely the directions addressed by subsequent work.
+
+% --- ReAct ---
+\subsubsection{ReAct: Synergizing Reasoning and Action}
+
+Before ReAct, the \textbf{embodied AI} community had already explored ideas for combining LLM reasoning with physical-world actions.
+SayCan \cite{ahn2022saycan} had LLMs propose high-level action plans,
+which were then filtered by an affordance function (determining which actions are feasible given the robot's current state),
+addressing the problem of ``LLMs knowing what to do but not what can be done.''
+Inner Monologue \cite{huang2022innermonologue} further introduced \textbf{closed-loop feedback}---
+after executing each step, the robot feeds environmental observations (success/failure signals, scene descriptions)
+back to the LLM in natural language form, allowing the LLM to dynamically adjust subsequent plans based on feedback.
+This ``reasoning $\rightarrow$ action $\rightarrow$ observation $\rightarrow$ re-reasoning'' closed-loop structure
+directly foreshadowed ReAct's Thought--Action--Observation paradigm.
+
+If WebGPT solved ``how LLMs operate tools'' and Toolformer solved ``how LLMs autonomously decide to use tools,'' then \landmark{yao2023react} unified and formalized these ideas---\emph{interleaving reasoning and action within the same token sequence}.
+
+\paragraph{Core idea.} ReAct expands the agent's action space from $\mathcal{A}$ to $\hat{\mathcal{A}} = \mathcal{A} \cup \mathcal{L}$, where $\mathcal{L}$ is the natural language space. An $\hat{a}_t \in \mathcal{L}$ is called a \emph{thought} or \emph{reasoning trace}---it does not affect the external environment but updates the agent's internal context $c_{t+1} = (c_t, \hat{a}_t)$, thereby influencing subsequent reasoning and actions. Task-solving trajectories consist of sequences of Thought--Action--Observation triplets:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Thought}: Decompose goals, extract key information, adjust plans, handle exceptions (e.g., ``the search results do not contain the target information; I need a different query'').
+  \item \textbf{Action}: Execute concrete environment operations (e.g., \texttt{search[e]}, \texttt{lookup[s]}, \texttt{finish[a]}).
+  \item \textbf{Observation}: Receive feedback returned by the environment (e.g., Wikipedia page excerpts).
+\end{itemize}
+
+\paragraph{Implementation.} ReAct is primarily implemented via few-shot prompting---manually annotating a small number (6) of example trajectories in ReAct format as in-context examples. This enables it to endow LLMs with agent capabilities without any parameter updates. The paper also explored fine-tuning: 3,000 correct trajectories were collected to fine-tune PaLM-8B/62B, and results showed that fine-tuned ReAct significantly outperformed fine-tuned Standard/CoT/Act methods.
+
+\paragraph{Key experimental findings.}
+
+\begin{itemize}[leftmargin=*]
+  \item On HotpotQA and FEVER, ReAct consistently outperformed the pure Action (no thought) baseline, demonstrating that reasoning traces are crucial for guiding actions. Error analysis showed that CoT's primary failure mode was hallucination (56\%), while ReAct's hallucination rate was 0\%, as it could ground responses through external knowledge bases.
+  \item ReAct and CoT exhibit complementary strengths and weaknesses: ReAct is more grounded but has limited reasoning flexibility, while CoT's reasoning chains are more flexible but prone to hallucination. The optimal strategy is to combine them (ReAct $\rightarrow$ CoT-SC or CoT-SC $\rightarrow$ ReAct).
+  \item On the ALFWorld decision-making task, ReAct's best trial achieved a 71\% success rate, far surpassing Act-only (45\%) and the imitation learning baseline BUTLER (37\%).
+  \item On WebShop, ReAct achieved a 40.0\% success rate, exceeding the IL+RL method (28.7\%), but still far below human experts (59.6\%).
+\end{itemize}
+
+\paragraph{Post-training significance.} ReAct's Thought--Action--Observation loop became the standard paradigm for virtually all subsequent agent systems (\crossref{4}{sec:t4-convergence}). More importantly, it revealed a key insight: reasoning ability and tool use ability should not be viewed as independent dimensions---the former serves as the ``planning layer'' for the latter, and the latter serves as the ``execution layer'' for the former. This recognition directly gave rise to subsequent agent tuning research.
+
+
+% ============================================================
+\subsection{Limitations and Branches: Four Technical Paths}
+\label{sec:t6-branches}
+% ============================================================
+
+The foundational methods established basic paradigms, but their respective limitations were also clearly visible: WebGPT relied on extensive human annotation, Toolformer did not support tool chaining or interactive use, and ReAct was constrained by the context length limitations of few-shot prompting. Research branched out along four directions to address these bottlenecks.
+
+% --- Branch A: Function Calling ---
+\subsubsection{Branch A: Function Calling}
+
+From a post-training perspective, the core challenges of function calling are: how to construct large-scale, high-quality tool use training data, and how to enable models to correctly select and invoke tools when facing thousands or even tens of thousands of APIs.
+
+\paragraph{Gorilla: Retriever-Aware Training.}
+\citet{patil2023gorilla} proposed \textbf{Gorilla}, which is specifically trained for large-scale API invocation scenarios. Core contributions include: (1) constructing \textbf{APIBench}, a dataset covering \textbf{1,645 APIs} across three major platforms---TorchHub, TensorHub, and HuggingFace---with (instruction, API call) pairs generated via GPT-4 self-instruct; (2) proposing \emph{retriever-aware training}---concatenating retrieved relevant API documentation into the prompt during training, enabling the model to learn API selection within the context of documentation rather than memorizing API signatures. Experiments showed this approach significantly reduced the hallucination rate (generating non-existent APIs), and when APIs are updated, only the retrieval index needs to be refreshed without retraining.
+
+\paragraph{ToolLLM: A Large-Scale Framework for Real APIs.}
+\landmark{qin2023toolllm} pushed function calling to an entirely new scale. The core design comprises three stages:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{API collection}: \textbf{16,464 real RESTful APIs} were crawled from RapidAPI Hub, spanning 49 categories (social media, e-commerce, weather, etc.), with rigorous availability filtering (initial testing + response evaluation) retaining 3,451 high-quality tools.
+  \item \textbf{Instruction generation}: ChatGPT was used to generate diverse instructions covering both single-tool and multi-tool scenarios, with sampling strategies guided by RapidAPI's hierarchical structure (category $\rightarrow$ collection $\rightarrow$ tool $\rightarrow$ API) to ensure diversity, ultimately generating nearly 200K (instruction, relevant API) pairs.
+  \item \textbf{Solution path annotation}: The most critical innovation---proposing the \textbf{Depth-First Search-based Decision Tree (DFSDT)} to replace CoT/ReAct's linear reasoning chains. DFSDT allows the model to \emph{backtrack} to previous nodes and try different reasoning paths when encountering errors, thereby addressing two inherent problems of ReAct: (a) error propagation---a single erroneous action leads to cascading failures downstream; (b) limited exploration---a linear chain explores only one direction. DFSDT significantly outperformed ReAct across all scenarios (average pass rate: 63.8\% vs. 35.8\%), with especially pronounced improvements on complex multi-tool instructions.
+\end{enumerate}
+
+\textbf{ToolLLaMA} (LLaMA-2 7B), fine-tuned on the ToolBench dataset, approached its teacher model ChatGPT in both pass rate and win rate, and demonstrated strong generalization on the out-of-distribution APIBench. Combined with a trained neural API retriever (based on Sentence-BERT), the system can automatically recommend relevant APIs from the 16K+ API pool without requiring manual specification by the user.
+
+\paragraph{Other important works.}
+\citet{liu2024apigen} proposed \textbf{APIGen}, which constructed an automated function calling data generation pipeline with multi-layer verification (format check, execution, semantic) to ensure data quality.
+\citet{zhang2024xlam} trained the \textbf{xLAM} series of models, which achieved leading performance on the Berkeley Function-Calling Leaderboard, demonstrating a unified training paradigm for action models.
+\citet{hao2023toolkengpt}'s \textbf{ToolkenGPT} adopted an entirely different technical approach---representing each tool as a special token embedding in the vocabulary, triggering invocation by naturally ``predicting'' tool tokens in next-token prediction, without modifying the model architecture.
+
+% --- Branch B: Agent Tuning ---
+\subsubsection{Branch B: Agent Tuning}
+
+ReAct demonstrated agent capabilities through prompting, but can these capabilities be ``internalized'' into model parameters through fine-tuning? The agent tuning branch directly addresses this question (\crossref{4}{sec:t4-convergence}: reasoning training provides foundational capabilities for planning).
+
+\paragraph{FireAct: Learning from Strong Model Trajectories.}
+\citet{chen2023fireact}'s \textbf{FireAct} first used GPT-4 to generate agent trajectories under multiple prompting methods (CoT, ReAct, etc.), then filtered successful trajectories for fine-tuning smaller models (Llama-2 7B/13B). The key finding was that fine-tuning enables small models to match or even surpass prompted large models on agent tasks, and that including trajectories from multiple prompting methods in the training data allows the model to learn to flexibly switch strategies according to task requirements.
+
+\paragraph{AgentTuning and Agent-FLAN: Decomposed Training.}
+\citet{zeng2023agenttuning} proposed \textbf{AgentTuning}, which mixes agent trajectory data with general instruction tuning data during training. The key finding was that this mixing strategy improves agent capabilities without degrading general capabilities---training on pure agent data leads to deterioration of general abilities. \citet{chen2024agentflan}'s \textbf{Agent-FLAN} further analyzed three challenges facing agent tuning (hallucinated actions, inadequate long-horizon reasoning, non-robust format following) and proposed decomposing agent capabilities into independent sub-capabilities for separate training, then combining them through data mixing.
+
+\paragraph{Reflexion: Verbal Self-Reflection.}
+\citet{shinn2023reflexion} proposed a ``training'' approach that does not update parameters: \textbf{Reflexion} has agents generate natural language reflective summaries after task failure (e.g., ``my search query was too broad last time; I should be more specific next time''), stores these reflections in long-term memory, and provides them as additional context in subsequent attempts. This verbal reinforcement learning achieved significant improvements on HotpotQA, AlfWorld, and programming tasks, demonstrating the potential of language itself as a representation of experience (rather than gradient updates).
+
+\paragraph{Lemur: Unifying Natural Language and Code.}
+\citet{xu2023lemur} observed that agent tasks simultaneously require natural language understanding (understanding instructions, reasoning and planning) and coding ability (interacting with environments, structured operations), but existing models typically excel at only one. \textbf{Lemur} achieved harmonization of both capabilities through carefully designed pre-training data ratios (text 90\%: code 10\%) and balanced instruction tuning strategies.
+
+% --- Branch C: Code Generation Alignment ---
+\subsubsection{Branch C: Code Generation Alignment}
+
+Code generation is a special but extremely important instance of tool use---code itself is a ``tool invocation language,'' and unit tests provide a natural, automatable reward signal.
+
+\paragraph{CodeRL: Actor-Critic Framework.}
+\landmark{le2022coderl} formalized code generation as an RL problem, proposing an actor-critic architecture. Core design components include:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Actor}: A pre-trained code LM (CodeT5-large, 770M) serving as a stochastic policy that generates code sequences.
+  \item \textbf{Critic}: An independent neural network that takes the problem description and sampled program as input and predicts the program's unit test outcome (four classes: CompileError / RuntimeError / FailedTest / PassedTest). The critic's token-level hidden states are used to estimate the intermediate return $\hat{q}_{\phi}(w_t^s)$ for each token, providing finer-grained feedback than episode-level returns.
+  \item \textbf{Return definition}: A graded reward based on unit test signals is defined: compile error $-1.0$, runtime error $-0.6$, test failure $-0.3$, all tests passed $+1.0$. Return normalization using a greedy decoding baseline stabilizes training.
+\end{itemize}
+
+At inference, a \textbf{Critic Sampling} strategy is introduced, distinguishing two cases: (a) if programs passing sample tests exist, the critic selects high-quality subsequences as seeds for refining; (b) if all programs fail, the critic selects the most promising candidates for a program repair module. On the APPS benchmark, this achieved SOTA (pass@1000: 20\%+), and on MBPP, pass@80 reached 63.0\%, surpassing finetuned GPT-137B (61.4\%).
+
+\paragraph{RLTF and PPOCoder.}
+\citet{liu2023rltf} proposed \textbf{RLTF} (Reinforcement Learning from Unit Test Feedback), with the core innovation of \emph{multi-granularity feedback}: providing not only program-level pass/fail signals but also leveraging compiler and test framework error messages to provide localized feedback at the code line level, making RL training more efficient. \citet{shojaee2023ppocoder}'s \textbf{PPOCoder} applied the PPO algorithm to code generation, using program compilation and execution results as reward signals.
+
+% --- Branch D: Multi-tool Orchestration ---
+\subsubsection{Branch D: Multi-tool Orchestration}
+
+Single-tool invocation solves the problem of ``using a hammer,'' but real-world scenarios often require ``selecting and coordinating multiple tools''---giving rise to the multi-tool orchestration paradigm with LLMs as central controllers.
+
+\paragraph{HuggingGPT: LLM as AI Model Dispatcher.}
+\landmark{shen2023hugginggpt} proposed a bold vision: ``Language serves as an interface for LLMs to collaborate with AI models.'' The system uses ChatGPT as the central controller, connecting numerous expert models from the Hugging Face community, and processes complex multimodal tasks through four stages:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Task Planning}: The LLM parses the user request and decomposes it into a structured subtask list (JSON format), determining execution order and dependencies. Three task topologies are supported: single task, sequential task chain, and DAG-structured task graph.
+  \item \textbf{Model Selection}: For each subtask, the LLM selects the most appropriate expert model based on model capability descriptions on Hugging Face, via in-context task-model assignment. To handle an excessive number of candidate models, models are first filtered by task type, then ranked by download count to select the top-$K$.
+  \item \textbf{Task Execution}: The selected expert models are invoked for inference, with resource dependencies between tasks managed through a \texttt{<resource>-task\_id} mechanism (e.g., task 2 requires the image generated by task 1 as input).
+  \item \textbf{Response Generation}: The LLM integrates execution results from all subtasks and generates the final natural language response.
+\end{enumerate}
+
+Experiments showed that GPT-3.5 significantly outperformed Alpaca-7b and Vicuna-7b in task planning (e.g., graph task GPT-4 Score: 50.48 vs. 13.14/19.17), but HuggingGPT's end-to-end success rate was still only 63.08\% (with GPT-3.5 as controller), exposing the limitations of current LLMs in planning stability and format compliance.
+
+\paragraph{Other multi-tool orchestration methods.}
+\citet{lu2023chameleon}'s \textbf{Chameleon} proposed plug-and-play compositional reasoning, having LLMs dynamically compose different tools (e.g., web search + Python + image captioner) to generate programmatic solutions based on task requirements.
+\citet{yin2023agentlumos}'s \textbf{Agent Lumos} proposed unified and modular training: decomposing agent capabilities into planning (generating high-level plans) and grounding (translating plans into concrete operations) modules, training them separately and combining them for use.
+\citet{wang2023voyager}'s \textbf{Voyager} demonstrated open-ended agentic behavior in the Minecraft game, achieving continuous autonomous exploration and skill accumulation through three mechanisms: automatic curriculum, skill library, and code-as-action.
+Code as Policies \cite{liang2023codepolicies} directly applied Codex-level code generation capabilities
+to robot control---LLMs translate natural language instructions into executable Python control policies,
+leveraging spatial geometry APIs for precise physical manipulation,
+demonstrating the feasibility of the ``code-as-action'' paradigm in embodied scenarios.
+
+\paragraph{Generative Agents: Agent Social Simulation.}
+Park et al.\ \cite{park2023generativeagents} constructed a virtual town populated by 25 LLM agents,
+each possessing an independent memory system (observation $\rightarrow$ retrieval $\rightarrow$ reflection)
+and capable of autonomously planning daily activities and forming social relationships.
+The unique value of this work lies in extending agent capabilities from ``completing a single task'' to ``continuous autonomous existence,''
+and its memory architecture (a three-layer structure of memory stream + reflection + planning)
+provides an important reference for long-term memory design in subsequent agent systems.
+
+
+% ============================================================
+\subsection{Convergence and Frontiers: Unifying Function Calling and Planning}
+\label{sec:t6-convergence}
+% ============================================================
+
+After the rapid divergence of 2023, the four branches began to converge in 2024: function calling training and planning/reasoning training were unified within the same post-training pipeline, and evaluation standards also trended toward unification.
+
+\paragraph{Joint Training of Function Calling + Planning.}
+Early function calling training focused solely on ``given a tool list, correctly generate calls,''
+while neglecting multi-step planning capabilities---
+models could correctly format a single API call
+but could not plan the execution order and dependencies of a series of calls.
+The latest practice integrates ReAct/DFSDT-style reasoning trajectories
+with function calling data in joint training,
+enabling models to simultaneously possess both ``knowing what to call'' and ``knowing in what order to call'' capabilities.
+
+This integration manifests in training data construction as a three-layer structure:
+(1) \textbf{Single-step function calling data}---
+correct API signature matching, parameter filling, and format compliance
+(corresponding to Branch~A's foundational capability);
+(2) \textbf{Multi-step reasoning trajectories}---
+complete interaction histories containing Thought--Action--Observation sequences,
+teaching the model to maintain goal consistency across multi-turn interactions
+(corresponding to Branch~B's planning capability);
+(3) \textbf{Failure recovery trajectories}---
+negative examples containing error detection, strategy rollback, and alternative solution exploration,
+training the model's robustness
+(corresponding to DFSDT's backtracking philosophy).
+
+xLAM \citep{zhang2024xlam} and Granite Function Calling \citep{abdelaziz2024granite}
+are representative of this trend,
+and their excellent performance on the Berkeley Function-Calling Leaderboard
+validates the effectiveness of joint training.
+
+\paragraph{AgentBench: Systematic Agent Evaluation.}
+\landmark{liu2023agentbench} constructed the first systematic multi-dimensional benchmark for evaluating LLM-as-Agent. It covers \textbf{8 interactive environments}, organized into three major categories:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Code-grounded}: Operating System (bash interaction), Database (SQL operations), Knowledge Graph (structured queries).
+  \item \textbf{Game-grounded}: Digital Card Game (strategic reasoning), Lateral Thinking Puzzles (lateral thinking), House Holding / ALFWorld (commonsense reasoning).
+  \item \textbf{Web-grounded}: Web Shopping / WebShop (e-commerce navigation), Web Browsing / Mind2Web (general web operations).
+\end{itemize}
+
+Evaluation of 29 LLMs (API-based and open-source) revealed several key findings:
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{A vast gap exists between commercial and open-source models}: GPT-4 achieved an Overall Score of 4.01, while the strongest open-source model codellama-34b scored only 0.96. API-based models averaged 2.32, while OSS models averaged 0.51.
+  \item \textbf{The primary failure mode was Task Limit Exceeded} (i.e., inability to solve the problem after multiple rounds of reasoning), followed by Invalid Format and Invalid Action---indicating that long-term reasoning, decision-making, and instruction following are the main bottlenecks.
+  \item \textbf{The double-edged sword effect of code training}: codellama outperformed llama-2 on tasks requiring structured operations (e.g., Web Shopping) but performed worse on tasks requiring general reasoning (e.g., Digital Card Game, Operating System).
+  \item \textbf{The importance of high-quality alignment data}: vicuna-13b (aligned on ShareGPT gpt-4/gpt-3.5 conversation data) not only outperformed the same-sized llama-2-13b on AgentBench but could even compete with the 3$\times$ larger codellama-34b.
+\end{enumerate}
+
+\paragraph{From SWE-bench to Coding Agents: Natural Convergence of the Four Branches.}
+In 2024, \emph{software engineering automation} became the most impactful application scenario for agentic capabilities
+and a landmark case of convergence across the four branches.
+
+\landmark{jimenez2024swebench}'s \textbf{SWE-bench}
+advanced the evaluation standard from synthetic programming problems to real-world GitHub issue resolution.
+Its data construction methodology possesses an elegant engineering quality:
+mining from the GitHub Pull Request histories of 12 large Python open-source projects
+(Django, scikit-learn, sympy, Flask, etc.)---
+for each PR, extracting the associated issue description as the task input,
+using the repository snapshot before PR merge as the initial state,
+and using the new or modified test cases in the PR as evaluation criteria.
+The elegance of this design lies in the fact that
+evaluation is entirely based on \emph{existing human-written tests},
+avoiding the cost and bias of manual annotation
+while ensuring that the ground truth for each task is a real, production-grade code modification.
+The final 2,294 instances cover cross-file modifications, API refactoring, bug fixes, and other task types,
+with an average of 1.7 files modified per patch.
+
+SWE-bench subsequently gave rise to two important subsets:
+\textbf{SWE-bench Lite} (300 instances) filters out overly simple tasks or those with complex environment configuration,
+providing a more efficient evaluation scheme;
+\textbf{SWE-bench Verified} (500 instances) was individually verified by human experts,
+ensuring that each instance's issue description is adequate, test cases are accurate, and solution uniqueness is reasonable---
+this subset quickly became the \emph{gold standard} for coding agent evaluation.
+
+The fundamental reason SWE-bench became the \emph{de facto} benchmark is that
+it naturally requires the synergy of capabilities from all four branches:
+\begin{itemize}[leftmargin=*]
+  \item \emph{Branch A} capabilities---precisely invoking bash, editors, and search tools (function calling);
+  \item \emph{Branch B} capabilities---multi-step reasoning and planning, including error diagnosis, hypothesis verification, and strategy rollback (agent tuning);
+  \item \emph{Branch C} capabilities---generating syntactically correct and semantically precise code patches (code alignment, \crossref{1}{sec:t1-distillation});
+  \item \emph{Branch D} capabilities---coordinating switches among terminal, file editor, and search engine (multi-tool orchestration).
+\end{itemize}
+More importantly, SWE-bench provides \emph{verifiable binary rewards}---
+a patch either passes all tests or it does not---
+enabling the RLVR paradigm (\crossref{2}{sec:t2-rlvr}) to be directly applied to coding agent training.
+
+\citet{yang2024sweagent}'s \textbf{SWE-Agent}
+designed the \textbf{Agent-Computer Interface (ACI)}---
+a set of file browsing and editing commands optimized for LLMs,
+replacing traditional bash operations to reduce action space complexity.
+The ACI's design principle is ``let the LLM see what it can understand'':
+the \texttt{open} command displays a 100-line context window with line numbers (rather than the raw \texttt{cat} output of the entire file),
+the \texttt{edit} command includes built-in linting validation---
+if an edit introduces syntax errors, the command is \emph{rejected} and rolled back to the pre-edit state,
+forcing the agent to produce syntactically correct modifications.
+\texttt{search\_dir} and \texttt{find\_file} provide structured search results,
+replacing the extremely noisy \texttt{grep -r} output.
+
+SWE-Agent's key finding was that \emph{interface design matters}:
+GPT-4's SWE-bench resolve rate under ACI was 12.47\%,
+compared to only approximately 3.8\% with raw bash operations---
+the performance difference of the same underlying model under different action interfaces exceeded \textbf{three-fold}.
+This result has fundamental implications for agentic post-training:
+optimizing the agent's action interface can yield gains equal to or even greater than optimizing model parameters.
+This insight echoes Toolformer's design philosophy---
+the \emph{representation} of tools (how tools are exposed to the model)
+is equally as important as \emph{training for tool use}
+(\crossref{4}{sec:t4-convergence}: reasoning capabilities provide the foundation for agent planning).
+
+\citet{wang2024opendevin}'s \textbf{OpenHands} (formerly OpenDevin)
+further open-sourced the infrastructure for coding agents,
+with an architectural design reflecting engineering maturity:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{EventStream event bus}: All agent actions (Action) and environmental observations (Observation)
+    are transmitted through a unified event stream, achieving complete decoupling of agent logic from execution environment---
+    this enables the same agent policy to seamlessly switch between underlying execution environments;
+  \item \textbf{Sandboxed Docker containers}: Each task executes in an isolated container,
+    with the agent's file operations, command execution, and network access subject to security constraints,
+    addressing the sandbox requirements raised in Open Problem~4;
+  \item \textbf{Pluggable Agent abstraction}: Through a standardized Agent interface,
+    different agent strategies (ReAct, CodeAct, planning-execution separation, etc.)
+    can be fairly compared within the same framework.
+\end{itemize}
+The \textbf{CodeAct} paradigm adopted by OpenHands is particularly noteworthy:
+the agent expresses all actions as executable Python or bash code snippets
+rather than structured JSON function calls---
+the composability and expressiveness of code enables the agent to naturally construct complex operations
+(such as iterating over files, conditional branching, pipeline composition)
+without needing to predefine APIs for each operation pattern.
+
+On the SWE-bench Verified benchmark,
+the resolve rate from early 2024 to mid-2025
+climbed from single-digit percentages to over 70\%,
+demonstrating a remarkable pace of progress---
+this has also made coding agents the \emph{de facto} benchmark domain
+for measuring the overall level of agentic post-training.
+OpenHands has played a role in this process analogous to HuggingFace's role in the ML community---
+providing open-source infrastructure, lowering barriers to entry, and accelerating iteration across the entire ecosystem.
+
+\paragraph{The Scaling Curve of SWE-bench.}
+The evolution of resolve rates on SWE-bench Verified
+constitutes the most intuitive measure of the pace of progress in agentic capabilities.
+In early 2024, the RAG-based baseline's resolve rate was approximately 3\%---
+models attempted to solve problems solely through retrieving relevant code snippets and simple patch generation.
+In March 2024, Devin claimed to reach 13.86\%, first attracting widespread attention.
+By mid-2024, SWE-Agent + Claude 3.5 Sonnet pushed the score to approximately 33\%,
+validating the compounding effect of ACI design and stronger base models.
+By late 2024, agent systems based on OpenAI o1-preview and Claude 3.5 Sonnet
+successively broke through the 40--50\% range.
+By mid-2025, multiple systems exceeded \textbf{70\%} on the Verified subset,
+approaching the performance level of human developers under the same time constraints.
+
+The steepness of this curve merits serious consideration.
+Some analyses suggest that the task completion rate of coding agents approximately \textbf{doubles every 7 months},
+exhibiting a scaling curve independent of base model foundational capabilities---
+even if the underlying model's general capabilities plateau,
+optimizations at the agent system level (environment design, tool integration, trajectory training)
+can still deliver sustained performance growth.
+This suggests that agentic post-training may possess its own independent scaling law,
+rather than simply depending on model scale growth---
+a direction worthy of deeper investigation in Thread~7's efficiency research
+(\crossref{7}{sec:t7-scaling-data}).
+
+\evolution{Coding agent resolve rate: 3\% (early 2024) → 13.86\% (Devin) → 33\% (SWE-Agent) → 70\%+ (mid-2025)}{From nearly unusable to approaching human level within 18 months}{ACI design + stronger base models + trajectory SFT + RL from test feedback}
+
+
+% ============================================================
+\subsection{2025--2026: Computer Use and Agent Infrastructure}
+\label{sec:t6-computer-use}
+% ============================================================
+
+In 2025, agentic capabilities rapidly evolved from ``models calling predefined APIs''
+to two major directions: ``models directly operating computer interfaces'' and ``standardized agent infrastructure,''
+marking the transition of LLM agents from experimental prototypes to production-grade deployment.
+
+\subsubsection{Computer Use: From API to GUI}
+
+\paragraph{Claude Computer Use.}
+Anthropic released Claude Computer Use \cite{anthropic2024computeruse} in late 2024,
+enabling the model to \textbf{directly operate the computer's graphical interface}---
+including moving the mouse, clicking buttons, typing text, and taking screenshots.
+This capability transcends the boundaries of traditional function calling:
+the model no longer requires predefined API interfaces
+but instead interacts with arbitrary software through the GUI, just as a human user would.
+Claude 4.5 \cite{anthropic2025claude45} achieved a \textbf{61.4\%} success rate on the OSWorld benchmark,
+making it the strongest model for computer use tasks at the time.
+
+\paragraph{OpenAI Operator.}
+OpenAI subsequently released Operator \cite{openai2025operator},
+an AI agent specifically designed for browser operations.
+Operator can autonomously navigate web pages, fill out forms, complete purchases, and handle other complex multi-step tasks,
+demonstrating the direct commercial value of computer use in consumer-facing applications.
+
+\paragraph{Training Challenges of Computer Use.}
+Computer use poses unique challenges for post-training:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Action space explosion}: Compared to the discrete API set of function calling,
+    the action space of GUI operations is continuous (mouse coordinates, keyboard input)
+    and highly dependent on the current screen state;
+  \item \textbf{Visual understanding requirements}: The model needs to understand the meaning, position, and interactability of UI elements from screenshots,
+    deeply integrating Thread~5's multimodal capabilities with Thread~6's agent capabilities;
+  \item \textbf{Long-trajectory stability}: Practical computer use tasks often involve dozens of steps,
+    making the error accumulation problem (\S\ref{sec:t6-open}) especially severe.
+\end{itemize}
+
+\paragraph{OSWorld: Systematic Evaluation of Computer Use.}
+\citet{xie2024osworld}'s \textbf{OSWorld}
+provides the first systematic evaluation benchmark for computer use capabilities.
+Unlike previous web-only benchmarks (such as WebShop and Mind2Web),
+OSWorld evaluates in \emph{real operating system environments}---
+369 tasks run on actual Ubuntu virtual machines,
+covering 9 commonly used applications
+(Chrome browser, VS Code, LibreOffice Calc/Writer/Impress,
+GIMP image editor, Thunderbird email client, VLC media player, and the system file manager).
+The diversity and complexity of tasks far exceed those of previous benchmarks:
+from simple file renaming to cross-application workflows
+(e.g., ``extract attachment data from an email, create a chart in LibreOffice, and send the result back via email''),
+with each task requiring an average of 10+ GUI operations.
+
+OSWorld's evaluation design is equally sophisticated:
+combining \emph{execution-based} verification (checking file system state, application configurations, and other programmable metrics)
+with \emph{screenshot-based} visual verification
+to ensure that evaluation does not miss functional errors due to surface-level matching.
+Experimental results were sobering:
+GPT-4V (with Set-of-Mark visual prompting) achieved a success rate of only \textbf{12.24\%},
+compared to 72.36\% for humans---
+this 60-percentage-point gap clearly quantifies the current bottlenecks in computer use capabilities:
+\emph{visual grounding} (accurately locating UI elements) and \emph{long-trajectory planning} (cross-step state tracking).
+Claude 4.5's subsequent breakthrough of 61.4\% on OSWorld
+(\crossref{5}{sec:t5}: multimodal capabilities as a prerequisite for computer use)
+marks that this gap is being rapidly narrowed.
+
+\subsubsection{Coding Agents: From Benchmark to Product}
+
+Coding agents rapidly evolved from research prototypes to commercial products between 2024 and 2025,
+becoming the earliest application scenario of agentic capabilities to achieve large-scale deployment.
+The unique value of this domain lies in simultaneously satisfying two key conditions for agentic post-training:
+\textbf{verifiable rewards} (unit tests provide binary feedback)
+and \textbf{rich training environments} (every GitHub repository constitutes an independent agent environment).
+This made coding agents the first domain where agentic RL achieved breakthroughs---
+not because code tasks are ``simpler,''
+but because the \emph{reward signal in code tasks is the cleanest}
+(\crossref{4}{sec:t4-convergence}).
+
+\paragraph{Devin and the AI Software Engineer.}
+Cognition AI released \textbf{Devin} \citep{cognition2024devin} in March 2024,
+positioning it as ``the world's first AI software engineer.''
+Devin was equipped with a complete persistent development environment---
+terminal, code editor, and browser running continuously within the same session,
+with the agent freely switching between tools while maintaining context.
+Its system design emphasized \emph{long-horizon autonomy}:
+after receiving a high-level task description,
+the agent autonomously completes the entire workflow from reading the issue, searching the codebase, writing code, to running tests,
+with no human intervention required in between.
+Devin claimed an \textbf{unassisted resolve rate of 13.86\%} on SWE-bench at the time of release,
+which was the highest publicly reported score.
+
+However, Devin's release also sparked important discussions about evaluation methodology.
+Independent reproduction attempts questioned the representativeness of its SWE-bench evaluation---
+some community members pointed out that evaluation samples may have been cherry-picked
+and that the definition boundary of ``unassisted'' was insufficiently clear.
+This controversy drove the creation of the SWE-bench Verified subset---
+with human experts individually verifying evaluation instances
+to provide a unified, non-manipulable evaluation standard for all coding agents.
+Despite the controversy,
+Devin's release marked a turning point in the transition of agentic capabilities from academic research to productization,
+catalyzing a wave of coding agent product competition---
+OpenHands, Aider, Cursor Agent Mode, and other systems emerged in rapid succession thereafter.
+
+\paragraph{Claude Code and the Terminal-Native Agent.}
+Anthropic's \textbf{Claude Code} \citep{anthropic2025claudecode}
+adopted a fundamentally different design philosophy---
+rather than providing a standalone IDE interface,
+it serves as a \textbf{command-line native tool} directly embedded in the developer's existing terminal workflow.
+This design choice reflects a deep consideration of the human-agent relationship in agentic systems:
+the agent is not an ``AI engineer'' that replaces the developer
+but rather an \emph{augmentation tool} that integrates into the developer's existing work environment.
+
+Claude Code's agentic loop consists of three core components:
+(1) \textbf{extended thinking}---the model performs internal reasoning and planning before acting,
+analyzing codebase structure, understanding requirements, and formulating modification strategies;
+(2) \textbf{tool use}---executing file read/write, bash commands, code search, and other operations,
+seamlessly integrating external tools and data sources through the MCP protocol;
+(3) \textbf{verification}---running tests, checking compilation, and verifying functional correctness before entering the next iteration cycle.
+This loop is essentially an industrial-grade implementation of the ReAct paradigm,
+but with the addition of a critical \textbf{layered permission model}---
+users can precisely control which operations the agent can execute autonomously
+and which require human approval,
+providing a practical engineering answer to the permission model proposed in Open Problem~4
+(\crossref{3}{sec:t3}).
+
+\paragraph{Product Design Spectrum and Human-Agent Collaboration Paradigms.}
+Devin and Claude Code represent two extremes of the coding agent product design space,
+forming a meaningful design spectrum between them:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Fully autonomous mode} (Devin): The agent works independently after receiving a task,
+    with humans reviewing results at critical checkpoints---
+    suitable for clearly defined, testable tasks (e.g., bug fixes, feature implementation);
+  \item \textbf{Embedded collaborative mode} (Claude Code): The agent operates within the developer's work environment,
+    with each operation observable and intervenable in real time---
+    suitable for exploratory tasks (e.g., code comprehension, architectural refactoring, technical solution evaluation);
+  \item \textbf{IDE-integrated mode} (Cursor, GitHub Copilot): Agent capabilities are embedded in the editor,
+    providing real-time suggestions and completions during the coding process---
+    lowest autonomy but also lowest latency, suitable for fine-grained coding assistance.
+\end{itemize}
+This spectrum reveals a deeper post-training question:
+different human-agent collaboration modes have different requirements for model capabilities.
+The fully autonomous mode demands extremely strong long-trajectory planning and error recovery capabilities
+(since human intervention is infrequent, the cost of each failure is high);
+the embedded collaborative mode places greater emphasis on the model's \emph{interpretability} and \emph{context awareness}
+(the agent needs to make its reasoning process understandable to humans
+and be able to learn and adjust from humans' local corrections).
+How to optimize these different capability dimensions through post-training in a targeted manner
+is a key challenge for agent productization.
+
+\paragraph{Post-training implications.}
+The rapid evolution of coding agents provides several key lessons for agentic post-training:
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Environment design is part of training}:
+    SWE-Agent's ACI design demonstrated that
+    optimizing the agent's action interface can yield gains equal to or even greater than optimizing model parameters;
+  \item \textbf{Verifiable reward signals are key}:
+    The unit tests in code tasks provide a natural binary reward,
+    enabling RL-based training (\crossref{2}{sec:t2-rlvr}) to be directly applied---
+    this follows the same logic as RLVR's success in Thread~2;
+  \item \textbf{Long-trajectory capability determines the ceiling}:
+    Real software engineering tasks involve tens to hundreds of steps,
+    and the agent's error accumulation and recovery ability across long trajectories
+    becomes the core factor determining the performance ceiling
+    (\crossref{7}{sec:t7-compute-rl}: computational efficiency of long-trajectory training is a practical bottleneck);
+  \item \textbf{Data flywheel effect}:
+    The productization of coding agents creates a unique data closed loop---
+    actual user usage generates large volumes of real trajectories with success/failure signals;
+    successful trajectories, after filtering, can serve as SFT training data
+    (\crossref{1}{sec:t1-quality}: high-quality data engineering is the core of SFT);
+    failed trajectories can be used to learn error recovery strategies.
+    This flywheel enables coding agent training data to grow automatically with deployment scale,
+    forming a positive feedback loop of ``more users $\rightarrow$ more trajectories $\rightarrow$ better models $\rightarrow$ more users.''
+\end{enumerate}
+
+\paragraph{Formation of the Coding Agent Training Paradigm.}
+Synthesizing the above product practices and research advances,
+the post-training pipeline for coding agents is converging toward a three-stage paradigm:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Agent SFT}:
+    Supervised fine-tuning on large volumes of successful agent trajectories.
+    Trajectory sources include:
+    teacher trajectories generated from strong models (e.g., GPT-4, Claude)
+    (analogous to the synthetic data methods in Thread~1, \crossref{1}{sec:t1-synthetic}),
+    as well as real user interaction trajectories collected from product deployments.
+    The key is the \emph{format} of trajectories---
+    they must include the complete reasoning process (thought), tool invocations (action),
+    and environment feedback (observation), not merely the final patch.
+  \item \textbf{Agent RL}:
+    Using unit test pass rates as the reward signal,
+    further optimizing the agent's exploration and decision-making capabilities through GRPO or PPO.
+    The core challenge at this stage is \emph{sparse rewards}---
+    a complete software engineering task may involve 50+ steps,
+    but rewards are obtained only at the final test execution.
+    CodeRL's token-level critic and RLTF's multi-granularity feedback
+    provide partial solutions.
+  \item \textbf{Environment and interface optimization}:
+    A third dimension distinct from traditional post-training---
+    optimizing the interface layer through which the agent interacts with the environment.
+    SWE-Agent's ACI, OpenHands' CodeAct,
+    and Claude Code's MCP integration all belong to this category.
+    Environment optimization and model optimization are orthogonally complementary:
+    better interface design reduces the effective difficulty of tasks,
+    enabling models of equal capability to solve more complex problems.
+\end{enumerate}
+
+This three-stage paradigm represents a significant innovation in the post-training landscape:
+it elevates ``what environment the model trains in''
+to equal importance with ``what model to train,''
+breaking the previous tradition in post-training research of focusing almost exclusively on model parameter optimization.
+
+\subsubsection{Standardization of Agent Infrastructure}
+
+Between 2024 and 2025, three major AI companies almost simultaneously released agent development standards and frameworks,
+marking the transition to ``agent as product.''
+
+\paragraph{Model Context Protocol (MCP).}
+Anthropic's \textbf{MCP} \cite{anthropic2024mcp}
+defined an open standard protocol
+enabling LLMs to access external data sources and tools in a unified manner.
+MCP quickly became the industry de facto standard---
+it standardized tool use from ``custom integration per application''
+to ``plug-and-play via protocol,''
+dramatically reducing the construction cost of agent systems.
+
+\paragraph{Agent SDKs.}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{OpenAI Agents SDK} \cite{openai2025agentssdk}:
+    Provides an open-source framework for building multi-agent workflows,
+    with built-in mechanisms for handoffs (task transfer between agents), guardrails (safety constraints), and tracing (debugging and tracking);
+  \item \textbf{Google ADK} \cite{google2025adk}:
+    Agent Development Kit, emphasizing deep integration with the Google Cloud ecosystem,
+    supporting multi-agent orchestration and custom tool registration.
+\end{itemize}
+
+\paragraph{Convergence trend: Agent as Product.}
+The three-way convergence of computer use + function calling + reasoning and planning is forming a new product paradigm:
+\textbf{general-purpose AI agents}.
+Such systems possess the following characteristics:
+(1) ability to operate arbitrary software through the GUI (computer use);
+(2) ability to call arbitrary APIs through standard protocols (MCP/function calling);
+(3) ability to perform multi-step reasoning and planning (\crossref{4}{sec:t4-thinking-models});
+(4) ability to flexibly switch between different levels of autonomy---
+from fully autonomous execution to human-approved operations at every step.
+The significance of this trend transcends mere technical progress:
+it means that the optimization objective of post-training is expanding from
+``making models generate better text''
+to ``enabling models to accomplish more complex tasks in the open world''---
+a fundamental paradigm shift.
+Even more noteworthy is the pace of progress in agent capabilities---
+research suggests that AI agent task completion rates on standardized benchmarks
+approximately \textbf{double every 7 months}, exhibiting a scaling curve independent of base model capabilities.
+
+\subsubsection{2026: Scaling Agent RL and the Environment Revolution}
+\label{sec:t6-2026}
+
+In early 2026, the field of agentic post-training underwent a qualitative shift:
+\textbf{Agent training transitioned from the era of SFT/prompting in handcrafted environments
+to the era of large-scale RL in synthetic environments}.
+
+\paragraph{Synthetic Environments: Solving the Data Bottleneck of Agent RL.}
+Agent RL training has long been constrained by the number of available environments:
+handcrafted training environments typically contain only a dozen to a few dozen scenarios,
+which is fundamentally insufficient to support the large-scale exploration required by RL.
+\landmark{wang2026awm} Agent World Model (AWM)
+solved this bottleneck at its root:
+through a fully automated synthetic environment generation pipeline,
+it generated \textbf{1,000 diverse environments} in a single pass (averaging 35 tools per environment),
+with code-driven environments backed by databases
+providing more reliable state transitions than LLM-simulated environments.
+The key finding was that agents trained solely in synthetic environments
+can \textbf{generalize to previously unseen real environments},
+achieving strong out-of-distribution performance on three tool use benchmarks.
+VeriEnv \cite{chae2026verienv} achieved a similar paradigm in the web agent domain:
+using LLMs to automatically clone real websites into executable synthetic environments
+equipped with deterministic, programmable rewards,
+\emph{decoupling} agent training from unsafe real-world interactions.
+
+\evolution{Handcrafting small numbers of training environments (ReAct, ALFWorld)}{Automatically synthesizing thousands of diverse environments (AWM, VeriEnv)}{The bottleneck of Agent RL shifts from ``algorithms'' to ``environment scale''}
+
+\paragraph{GLM-5: Engineering Breakthrough in Asynchronous Agent RL.}
+\landmark{glm52026}
+Zhipu AI's GLM-5 (744B parameters, 40B active MoE)
+achieved a critical engineering breakthrough for agent RL:
+the \textbf{asynchronous agent RL architecture} decouples generation from training,
+enabling complex multi-turn agent interactions to execute without blocking the training loop.
+This infrastructure innovation makes RL training in real multi-step interaction scenarios feasible,
+and GLM-5 achieved open-source model SOTA on reasoning, coding, and agentic tasks.
+
+\paragraph{Methodological Innovations in Agent RL.}
+At the training algorithm level, three works addressed different core bottlenecks of agent RL:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Exploration bottleneck}:
+    RAPO \cite{zhang2026rapo} introduced retrieval into the RL training loop---
+    during the rollout phase, agents reference retrieved off-policy step-level traces,
+    breaking through the exploration limitations of purely on-policy methods.
+    This yielded an average improvement of 5.0\% across 14 datasets with 1.2$\times$ training speedup.
+
+  \item \textbf{Skill accumulation}:
+    SkillRL \cite{xia2026skillrl} achieved hierarchical skill learning---
+    through a SkillBank that stores both general and task-specific skills,
+    with a recursive evolution mechanism that co-evolves the skill library and the policy.
+    A 7B model surpassed GPT-4o on ALFWorld and WebShop by 41\%.
+
+  \item \textbf{Multi-agent stability}:
+    Dr.\ MAS \cite{feng2026drmas} discovered that GRPO's global advantage normalization
+    causes gradient instability in multi-agent systems.
+    Through \textbf{agent-wise advantage normalization}
+    (using each agent's own reward statistics),
+    this achieved 5.6\% improvement on math reasoning and 15.2\% on search tasks.
+\end{itemize}
+
+\paragraph{Long-Horizon Agents and Memory Management.}
+MemPO \cite{li2026mempo} transformed memory management from an external module into a \textbf{learnable policy}:
+agents autonomously summarize and manage their own memory during environment interaction,
+with RL-based credit assignment evaluating memory effectiveness.
+On long-horizon tasks, F1 improved by 25.98\%
+while token usage decreased by 67--73\%---
+directly addressing the context length bottleneck of long-trajectory tasks.
+
+\paragraph{Agent Safety and Evaluation.}
+ToolSafe \cite{mou2026toolsafe} provided the first
+\textbf{step-level safety assurance framework} for agent tool invocations:
+TS-Guard uses a safety model trained with multi-task RL
+to \emph{proactively} detect unsafe tool calls (before execution),
+combined with TS-Flow's guardrail-feedback reasoning framework,
+reducing harmful tool calls by 65\%
+while improving benign task completion rates by 10\%
+(\crossref{3}{sec:t3}).
+
+On the evaluation front,
+AgencyBench \cite{li2026agencybench} pushed agent evaluation to
+\textbf{real-world scale}:
+32 scenarios, 138 tasks,
+with each task requiring approximately 90 tool calls and approximately 1 million tokens of context.
+Evaluation results revealed a significant gap between proprietary and open-source models
+(48.4\% vs.\ 32.1\%),
+as well as substantial individual differences in agents' self-correction and tool preference behaviors.
+
+\begin{openproblembox}
+\textbf{Open Problem 5: Sim-to-Real Gap from Synthetic Environments to the Real World.}\\
+AWM and VeriEnv have demonstrated the effectiveness of synthetic environment training,
+but does a systematic bias exist in the transfer from synthetic to real environments?
+Can the reward design of synthetic environments introduce reward hacking?
+How can the safety and reliability of synthetically trained agents be verified in unseen real-world scenarios?
+This problem is closely related to the verifiable reward assumption in Thread~4's RLVR:
+the closer the synthetic environment's reward is to a ``perfect verifier,''
+the smaller the sim-to-real gap, but the higher the construction cost.
+\end{openproblembox}
+
+% ============================================================
+\subsection{Open Problems}
+\label{sec:t6-open}
+% ============================================================
+
+\begin{openproblembox}
+\textbf{Open Problem 1: Reliable Multi-Step Behavior and Error Recovery.}\\
+AgentBench shows that even GPT-4 achieves only a 78\% success rate on house-holding tasks,
+far from meeting practical deployment standards.
+Agents face three core failure modes in long trajectories:
+(a) \textbf{Error accumulation}---a single erroneous early decision leads to cascading failures downstream;
+(b) \textbf{Infinite loops}---the agent becomes trapped in repeatedly attempting the same strategy;
+(c) \textbf{Irrecoverable failures}---irreversible operations (e.g., deleting files) cannot be undone.
+Reflexion's verbal self-reflection and ToolLLM's DFSDT
+provide preliminary solutions from the reasoning-time and search-time dimensions respectively,
+but effective methods for end-to-end optimization of error recovery strategies at \emph{train-time} are still lacking.
+The practice of coding agents offers a valuable reference:
+SWE-Agent's edit command rejects syntax errors \emph{before execution} via linting,
+and Claude Code's permission model requires human approval for high-risk operations \emph{before execution}---
+both represent designs that push error prevention from the ``model reasoning layer'' down to the ``environment interface layer.''
+How to train models through post-training to ``anticipate'' and ``avoid'' irrecoverable errors,
+rather than merely ``reflect'' after errors occur, remains a core challenge.
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 2: Evaluation Standardization.}\\
+Current evaluation of agentic capabilities is highly fragmented:
+AgentBench \citep{liu2023agentbench} evaluates overall agent capabilities,
+T-Eval \citep{chen2023teval} provides step-by-step fine-grained evaluation of tool use capabilities,
+MINT \citep{wang2023mint} focuses on multi-turn interaction,
+the Berkeley Function-Calling Leaderboard \citep{patil2024bfcl} specializes in function calling accuracy,
+SWE-bench \citep{jimenez2024swebench} focuses on software engineering,
+and OSWorld \citep{xie2024osworld} evaluates computer use capabilities.
+The evaluation dimensions, environment settings, and metric definitions across different benchmarks vary enormously,
+making cross-method comparison difficult.
+The community needs a unified evaluation framework
+spanning the full capability spectrum from single-step tool invocation to multi-step task planning---
+analogous to Thread~2's evolution of reward model evaluation from pairwise accuracy to RLHF Workbench,
+agent evaluation also needs to undergo a paradigm unification.
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 3: Scaling Law for Tool Use.}\\
+Toolformer observed that tool use ability emerges at ${\sim}775$M parameters,
+but we know almost nothing about the scaling relationship among
+(model scale) $\times$ (number of tools) $\times$ (task complexity).
+A deeper question is:
+as the tool collection expands, will the model encounter a ``tool selection dilemma''---
+where the ability to select the correct tool actually \emph{degrades} when facing too many tools?
+How should the optimal tool collection size and training data volume be determined for a model of a given scale?
+
+The ``doubling every 7 months'' pace of progress observed on SWE-bench Verified
+(\S\ref{sec:t6-convergence})
+provides a preliminary empirical scaling curve, but its sustainability faces two key uncertainties:
+(a) to what extent does the current rapid progress stem from ``low-hanging fruit''
+(simple issues being resolved first)---
+when all remaining tasks require deep architectural understanding,
+will the curve significantly decelerate?
+(b) is the improvement in resolve rate driven by base model capabilities
+or by agent system optimization (ACI, environment design, retrieval augmentation)?
+If the latter, then agentic post-training may possess
+a scaling law \emph{independent of model scale},
+which would fundamentally change how we think about resource allocation.
+\end{openproblembox}
+
+\begin{openproblembox}
+\textbf{Open Problem 4: Agent Safety and Controllability.}\\
+WebGPT already highlighted the risks of granting models real-time web access
+(e.g., editing Wikipedia, manipulating search results).
+With the advent of computer use,
+the agent's action space expands from discrete API calls to arbitrary GUI operations,
+and safety risks escalate dramatically:
+agents may execute irreversible operations (deleting files, sending emails, modifying system configurations),
+and their behavioral trajectories are difficult for humans to monitor in real time.
+How to design effective \emph{permission models} (what agents are allowed to do),
+\emph{sandbox mechanisms} (constraining the agent's operational scope), and
+\emph{human-in-the-loop} approval mechanisms
+are prerequisites for agents transitioning from experimentation to production
+(\crossref{3}{sec:t3}).
+The design choices across the coding agent product spectrum---
+Devin's fully autonomous mode vs.\ Claude Code's layered permission model---
+represent different engineering answers to this problem,
+but a systematic theoretical framework
+for characterizing the optimal trade-off between ``autonomy'' and ``safety'' is still lacking.
+\end{openproblembox}
+
+
+\subsection{Chapter Summary}
+
+\begin{figure}[!ht]
+\centering
+\begin{tikzpicture}[
+  node distance=0.6cm and 1.2cm,
+  every node/.style={font=\small},
+  milestone/.style={rectangle, rounded corners, draw=thread6, fill=thread6!10,
+    text width=4.2cm, minimum height=0.8cm, align=center, font=\small\bfseries},
+  branch/.style={rectangle, rounded corners, draw=gray!60, fill=gray!5,
+    text width=3.2cm, minimum height=0.7cm, align=center, font=\small},
+  arrow/.style={-{Stealth[length=2.5mm]}, thick, thread6!70},
+  brancharrow/.style={-{Stealth[length=2mm]}, gray!60, thick},
+]
+% Main timeline
+\node[milestone] (webgpt) {WebGPT (2022)\\RL for Tool Use};
+\node[milestone, below=1.2cm of webgpt] (react) {ReAct (2023)\\Thought--Action--Observation};
+\node[milestone, below=1.2cm of react] (func) {Function Calling (2023)\\Large-scale API Integration};
+
+% Branches
+\node[branch, below left=1.2cm and 0.5cm of func] (brA) {Branch A: Code Agents\\CodeRL, SWE-Agent};
+\node[branch, below right=1.2cm and 0.5cm of func] (brB) {Branch B: Multi-tool\\HuggingGPT, AgentBench};
+
+% Convergence
+\node[milestone, below=2.8cm of func] (swebench) {SWE-bench (2024)\\Coding Agent Convergence};
+\node[milestone, below=1.2cm of swebench] (prod) {Computer Use / MCP\\(2025--2026)};
+\node[branch, below=1.2cm of prod] (conv) {Convergence: Agent SFT + RL\\+ Environment Optimization};
+
+% Arrows
+\draw[arrow] (webgpt) -- (react);
+\draw[arrow] (react) -- (func);
+\draw[brancharrow] (func) -- (brA);
+\draw[brancharrow] (func) -- (brB);
+\draw[arrow] (func) -- (swebench);
+\draw[arrow] (swebench) -- (prod);
+\draw[brancharrow] (brA) -- (swebench);
+\draw[brancharrow] (brB) -- (swebench);
+\draw[arrow] (prod) -- (conv);
+\end{tikzpicture}
+\caption{Thread 6 evolutionary trajectory: from RL-based tool use to production-grade coding agent deployment.
+Teal nodes represent landmark works; gray nodes represent important branches.}
+\label{fig:agentic-evolution}
+\end{figure}
+
+\begin{table}[!ht]
+\centering
+\caption{Comparison of core methods in Thread 6. Action Space distinguishes among API calls, code execution, and GUI operations.}
+\label{tab:agentic-comparison}
+\small
+\begin{tabularx}{\textwidth}{l >{\raggedright\arraybackslash}p{2.2cm} >{\raggedright\arraybackslash}p{2.2cm} >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Method} & \textbf{Action Space} & \textbf{Training Signal} & \textbf{Key Innovation} \\
+\midrule
+WebGPT & Browser commands & RLHF (human pref.) & First RL-trained tool-using LM \\
+Toolformer & API calls (5 tools) & Self-supervised (PPL) & Autonomous tool-use learning; no human labels \\
+ReAct & Text (Thought + Act) & Prompt-only (no train) & Interleaved reasoning and action in one sequence \\
+ToolLLM & 16K+ real APIs & SFT + DFSDT search & Industrial-scale function calling \\
+HuggingGPT & Multi-model dispatch & Prompt-only & LLM as controller orchestrating expert models \\
+SWE-Agent & Code + shell (ACI) & SFT on trajectories & Agent-Computer Interface; 12.47\% SWE-bench \\
+Computer Use & GUI (mouse + keyboard) & SFT + RL & Continuous GUI action space; screenshot grounding \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Thread~6's evolutionary trajectory clearly demonstrates the transformation of LLMs from ``passive text generators''
+to ``active world interactors'':
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Problem foundation} (2021--2022):
+    WebGPT demonstrated that LLMs can learn to use a browser through the RLHF pipeline,
+    Toolformer showed that tool use capabilities can be autonomously acquired through self-supervised signals,
+    and ReAct established the Thought--Action--Observation standard interaction paradigm.
+
+  \item \textbf{Path divergence} (2023):
+    Addressing the limitations of foundational methods, research diverged into four paths---
+    Function Calling (large-scale API integration),
+    Agent Tuning (internalizing agent capabilities into parameters),
+    Code Generation Alignment (leveraging unit tests as rewards),
+    and Multi-tool Orchestration (LLM as the tool dispatch center).
+
+  \item \textbf{Capability convergence} (2024):
+    The four paths naturally converged on coding agent tasks such as SWE-bench---
+    solving real software engineering problems simultaneously requires precise tool invocation,
+    multi-step reasoning and planning, high-quality code generation, and multi-tool coordination.
+    The resolve rate on SWE-bench Verified climbed from 3\% to 70\%+ within 18 months,
+    exhibiting an agentic scaling curve independent of base model scale growth.
+
+  \item \textbf{Productization and infrastructure} (2025--2026):
+    Computer use expanded the action space from discrete APIs to continuous GUI operations,
+    with benchmarks like OSWorld quantifying the vast room for improvement in computer use.
+    Coding agents (Devin, Claude Code, OpenHands)
+    unfolded along a product spectrum from fully autonomous to embedded collaborative to IDE-integrated modes.
+    Standard protocols such as MCP and Agent SDKs lowered barriers to construction.
+    The three-stage training paradigm of Agent SFT + Agent RL + environment optimization began to take shape,
+    elevating ``what environment the model trains in'' to equal importance with ``what model to train.''
+\end{enumerate}
+
+\evolution{LLMs as passive text generators}{LLMs as active environment interactors, with agents entering production-grade deployment}{tool learning + ReAct + RL from environment}
+
+\noindent
+The core takeaway of this chapter is:
+\textbf{The essence of agentic post-training is teaching models the ``protocol for interacting with the world.''}
+Whether it is WebGPT's browser operations, Toolformer's API calls,
+or Computer Use's GUI operations---
+all breakthroughs revolve around the core question of how to teach models
+``when to act, how to act, and how to learn from the results of actions.''
+Unlike Thread~1 (SFT is a data engineering problem) and Thread~4 (reasoning is an RL problem),
+the key bottleneck revealed by Thread~6 lies not in training algorithms
+but in \textbf{action interface design} and \textbf{the quality of environmental feedback}.
+SWE-Agent's ACI design, ToolLLM's DFSDT search strategy,
+and MCP's standardized protocol
+all represent optimizations at the ``interface layer between model and world,''
+rather than simply scaling up models or increasing training data.
+
+This insight also points to deep connections between Thread~6 and other threads:
+Thread~4's reasoning capabilities provide the planning layer for agents
+(ReAct's Thought is essentially CoT, \crossref{4}{sec:t4-convergence});
+Thread~3's safety research provides the necessary constraint framework for agent deployment
+(\crossref{3}{sec:t3});
+Thread~7's efficiency methods make agent training feasible in resource-constrained scenarios
+(\crossref{7}{sec:t7-compute-rl});
+Thread~1's data engineering methodology provides guidance for constructing agent trajectory data
+(\crossref{1}{sec:t1-synthetic});
+and Thread~5's multimodal capabilities are the prerequisite for Computer Use
+(\crossref{5}{sec:t5}).
+These deep cross-thread interconnections
+make Thread~6 one of the most densely connected nodes in the entire post-training evolutionary landscape.
+
+\paragraph{Preview of the next chapter.}
+The preceding six threads have demonstrated the continuous expansion of post-training capabilities,
+but the deployment of every capability is constrained by computational resources and data costs.
+Thread~7 will examine the entire field from the perspective of efficiency---
+tracing the evolution and convergence of three paths: parameter efficiency (LoRA/QLoRA), data efficiency (LIMA/phi-1), and algorithmic efficiency (GRPO),
+revealing how post-training progresses from ``brute-force scaling'' to ``frugal optimization.''
