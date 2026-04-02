@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this survey, please cite it as below."
+type: software
+title: "LLM/VLM Post-Training: A Survey Through the Lens of Evolution"
+authors:
+  - family-names: Lin
+    given-names: Jinhong
+url: "https://github.com/JonnesLin/post-training-survey"
+repository-code: "https://github.com/JonnesLin/post-training-survey"
+keywords:
+  - large language models
+  - vision-language models
+  - post-training
+  - RLHF
+  - instruction tuning
+  - alignment
+license: MIT
+date-released: "2026-04-02"
